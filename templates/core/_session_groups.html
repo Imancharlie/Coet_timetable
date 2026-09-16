@@ -1,0 +1,45 @@
+{% load core_tags %}
+
+<div class="mt-6 bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+    <div class="px-5 py-3 border-b border-gray-200 flex items-center justify-between">
+        <h3 class="text-sm font-semibold text-gray-700">Assigned Student Groups ({{ groups|length }})</h3>
+    </div>
+    <div class="p-4">
+        {% if groups %}
+        <div class="flex flex-wrap gap-2 mb-4">
+            {% for sg in groups %}
+            <span class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 border border-blue-200 text-blue-700 rounded-full text-sm">
+                {{ sg.group }}
+                <button hx-post="/sessions/{{ session_pk }}/remove-group/{{ sg.group_id }}/"
+                        hx-target="#slide-content"
+                        hx-swap="innerHTML"
+                        class="text-blue-400 hover:text-red-500 transition"
+                        title="Remove group">
+                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                </button>
+            </span>
+            {% empty %}
+            <p class="text-sm text-gray-400">No groups assigned yet.</p>
+            {% endfor %}
+        </div>
+        {% else %}
+        <p class="text-sm text-gray-400 mb-4">No groups assigned to this session yet.</p>
+        {% endif %}
+
+        <form hx-post="/sessions/{{ session_pk }}/add-group/"
+              hx-target="#slide-content"
+              hx-swap="innerHTML"
+              class="flex flex-col sm:flex-row gap-2">
+            {% csrf_token %}
+            <select name="group_id" class="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-800 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <option value="">— Select a student group —</option>
+                {% for g in all_groups %}
+                <option value="{{ g.pk }}">{{ g.programme.code }} {{ g.code }}</option>
+                {% endfor %}
+            </select>
+            <button type="submit" class="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition">
+                Add Group
+            </button>
+        </form>
+    </div>
+</div>

@@ -1,0 +1,42 @@
+{% load core_tags %}
+
+<form hx-post="{{ action }}" hx-target="#modal-content" hx-swap="innerHTML"
+      x-data="{ submitting: false }" @submit="submitting = true">
+    {% csrf_token %}
+    <div class="space-y-5">
+        {% for field in form %}
+        <div>
+            <label for="{{ field.id_for_label }}" class="block text-sm font-medium text-gray-700 mb-1.5">
+                {{ field.label }}{% if field.field.required %} <span class="text-red-500">*</span>{% endif %}
+            </label>
+            {{ field }}
+            {% for error in field.errors %}
+            <p class="mt-1 text-xs text-red-500">{{ error }}</p>
+            {% endfor %}
+            {% if field.help_text %}
+            <p class="mt-1 text-xs text-gray-400">{{ field.help_text }}</p>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+    <div class="mt-6 flex justify-end gap-3">
+        <button type="button" @click="modalOpen = false" class="px-4 py-2 text-sm font-medium text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 transition">
+            Cancel
+        </button>
+        <button type="submit" :disabled="submitting"
+                class="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition disabled:opacity-50">
+            <span x-show="!submitting">Save</span>
+            <span x-show="submitting">Saving...</span>
+        </button>
+    </div>
+</form>
+
+<script>
+    document.querySelectorAll('#modal-content input, #modal-content select, #modal-content textarea').forEach(function (el) {
+        if ((el.getAttribute('type') === 'checkbox' || el.getAttribute('type') === 'radio') && !el.classList.contains('w-full')) {
+            el.className = 'h-4 w-4 text-blue-600 border-gray-300 rounded';
+        } else {
+            el.className = 'w-full px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white' + (el.tagName === 'SELECT' ? '' : '');
+        }
+    });
+</script>

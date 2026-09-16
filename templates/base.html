@@ -1,0 +1,206 @@
+{% load static %}
+{% load core_tags %}
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}{{ page_title|default:"CoET Timetable" }}{% endblock %} — CoET Timetable</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <style>
+        [x-cloak] { display: none !important; }
+        .hx-indicator { display: none; }
+        .htmx-request .hx-indicator { display: inline-block; }
+        .htmq-request .hx-indicator { display: inline-block; }
+    </style>
+</head>
+<body class="h-full bg-gray-50" x-data="{ slideOpen: false, modalOpen: false }"
+      @close-modal.window="modalOpen = false"
+      @open-modal.window="modalOpen = true"
+      @close-slide.window="slideOpen = false"
+      @open-slide.window="slideOpen = true"
+      @refresh-table.window="setTimeout(function(){ htmx.trigger('#data-table-wrap', 'refresh') }, 150)">
+{% csrf_token %}
+
+<script>
+function getCookie(name) {
+    var match = document.cookie.match(new RegExp('(^| )' + name + '=([^;]+)'));
+    return match ? match[2] : null;
+}
+document.body.addEventListener('htmx:configRequest', function (evt) {
+    var token = getCookie('csrftoken');
+    if (token) { evt.detail.headers['X-CSRFToken'] = token; }
+});
+
+function openModal(url, title) {
+    document.getElementById('modal-title').textContent = title || 'Form';
+    openInto('#modal-content', url);
+}
+function openEdit(url, title) {
+    document.getElementById('modal-title').textContent = title || 'Edit';
+    openInto('#modal-content', url);
+}
+function openDelete(url, title) {
+    document.getElementById('modal-title').textContent = title || 'Confirm Delete';
+    openInto('#modal-content', url);
+}
+function openInto(targetId, url) {
+    var content = document.querySelector(targetId);
+    content.innerHTML = '<div class="flex items-center justify-center h-32"><div class="text-gray-400 text-sm">Loading...</div></div>';
+    var root = document.querySelector('[x-data]');
+    if (root && root.__x) { root.__x.$data.modalOpen = true; }
+    fetch(url, { headers: { 'HX-Request': 'true' } })
+        .then(function (r) { return r.text(); })
+        .then(function (html) { content.innerHTML = html; });
+}
+</script>
+
+<div class="flex h-full">
+    <!-- Mobile overlay -->
+    <div x-show="sidebarOpen" x-cloak @click="sidebarOpen = false"
+         class="fixed inset-0 bg-black/40 z-30 lg:hidden"></div>
+
+    <!-- Sidebar -->
+    <aside x-data="{ sidebarOpen: false }"
+           :class="sidebarOpen ? 'translate-x-0' : '-translate-x-full'"
+           class="fixed lg:sticky top-0 left-0 z-40 h-screen w-64 bg-slate-900 text-slate-200 flex flex-col transition-transform lg:translate-x-0 shrink-0">
+        <!-- Logo -->
+        <div class="px-5 py-5 border-b border-slate-700">
+            <a href="{% url 'dashboard' %}" class="text-lg font-bold text-white tracking-tight">
+                <span class="text-emerald-400">CoET</span> Timetable
+            </a>
+            <p class="text-xs text-slate-400 mt-0.5">Group Allocation & Validation</p>
+        </div>
+        <!-- Nav -->
+        <nav class="flex-1 overflow-y-auto py-4 px-3 space-y-1 text-sm">
+            {% with nav=active_nav %}
+            <a href="{% url 'dashboard' %}"
+               class="flex items-center gap-3 px-3 py-2.5 rounded-lg transition
+                      {% if nav == 'dashboard' %}bg-slate-800 text-white{% else %}hover:bg-slate-800/60 text-slate-300{% endif %}">
+                <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-4 0a1 1 0 01-1-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 01-1 1h-2z"/></svg>
+                Dashboard
+            </a>
+
+            <div class="pt-3 pb-1 px-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Reference Data</div>
+            <a href="{% url 'programme-list' %}"
+               class="flex items-center gap-3 px-3 py-2.5 rounded-lg transition
+                      {% if nav == 'programmes' %}bg-slate-800 text-white{% else %}hover:bg-slate-800/60 text-slate-300{% endif %}">
+                <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"/></svg>
+                Programmes
+            </a>
+            <a href="{% url 'group-list' %}"
+               class="flex items-center gap-3 px-3 py-2.5 rounded-lg transition
+                      {% if nav == 'groups' %}bg-slate-800 text-white{% else %}hover:bg-slate-800/60 text-slate-300{% endif %}">
+                <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                Student Groups
+            </a>
+            <a href="{% url 'course-list' %}"
+               class="flex items-center gap-3 px-3 py-2.5 rounded-lg transition
+                      {% if nav == 'courses' %}bg-slate-800 text-white{% else %}hover:bg-slate-800/60 text-slate-300{% endif %}">
+                <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/></svg>
+                Programme Courses
+            </a>
+            <a href="{% url 'venue-list' %}"
+               class="flex items-center gap-3 px-3 py-2.5 rounded-lg transition
+                      {% if nav == 'venues' %}bg-slate-800 text-white{% else %}hover:bg-slate-800/60 text-slate-300{% endif %}">
+                <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"/></svg>
+                Venues
+            </a>
+            <a href="{% url 'semester-list' %}"
+               class="flex items-center gap-3 px-3 py-2.5 rounded-lg transition
+                      {% if nav == 'semesters' %}bg-slate-800 text-white{% else %}hover:bg-slate-800/60 text-slate-300{% endif %}">
+                <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+                Semesters
+            </a>
+
+            <div class="pt-3 pb-1 px-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Timetable</div>
+            <a href="{% url 'session-list' %}"
+               class="flex items-center gap-3 px-3 py-2.5 rounded-lg transition
+                      {% if nav == 'sessions' %}bg-slate-800 text-white{% else %}hover:bg-slate-800/60 text-slate-300{% endif %}">
+                <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"/></svg>
+                Master Timetable
+            </a>
+            <a href="{% url 'workshop-list' %}"
+               class="flex items-center gap-3 px-3 py-2.5 rounded-lg transition
+                      {% if nav == 'workshops' %}bg-slate-800 text-white{% else %}hover:bg-slate-800/60 text-slate-300{% endif %}">
+                <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                Workshop Allocations
+            </a>
+            <a href="{% url 'td-list' %}"
+               class="flex items-center gap-3 px-3 py-2.5 rounded-lg transition
+                      {% if nav == 'td' %}bg-slate-800 text-white{% else %}hover:bg-slate-800/60 text-slate-300{% endif %}">
+                <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+                TD Allocations
+            </a>
+
+            <div class="pt-3 pb-1 px-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Data Import</div>
+            <a href="{% url 'import-hub' %}"
+               class="flex items-center gap-3 px-3 py-2.5 rounded-lg transition
+                      {% if nav == 'imports' %}bg-slate-800 text-white{% else %}hover:bg-slate-800/60 text-slate-300{% endif %}">
+                <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
+                Import Data
+            </a>
+            {% endwith %}
+        </nav>
+        <!-- Version -->
+        <div class="px-5 py-3 border-t border-slate-700 text-xs text-slate-500">v0.1 — Phase 1</div>
+    </aside>
+
+    <!-- Main content -->
+    <div class="flex-1 flex flex-col min-w-0">
+        <!-- Top bar -->
+        <header class="sticky top-0 z-20 bg-white border-b border-gray-200 px-4 lg:px-6 h-14 flex items-center gap-4">
+            <button @click="sidebarOpen = !sidebarOpen" class="lg:hidden text-gray-500 hover:text-gray-700">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
+            </button>
+            <h1 class="text-base font-semibold text-gray-800 truncate">{{ page_title|default:"Dashboard" }}</h1>
+            <div class="ml-auto text-xs text-gray-400 hidden sm:block">CoET — University of Dar es Salaam</div>
+        </header>
+
+        <!-- Page content -->
+        <main class="flex-1 p-4 lg:p-6">
+            {% block content %}{% endblock %}
+        </main>
+    </div>
+</div>
+
+<!-- Slide-over detail panel -->
+<div x-show="slideOpen" x-cloak class="fixed inset-0 z-50" style="display:none">
+    <div class="absolute inset-0 bg-black/30 transition-opacity" @click="slideOpen = false"></div>
+    <div class="absolute inset-y-0 right-0 w-full max-w-2xl bg-white shadow-2xl flex flex-col">
+        <div class="flex items-center justify-between px-6 py-4 border-b border-gray-200">
+            <h2 class="text-lg font-semibold text-gray-800 truncate" id="slide-title">Details</h2>
+            <button @click="slideOpen = false" class="text-gray-400 hover:text-gray-600 rounded-lg p-1.5 hover:bg-gray-100">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+            </button>
+        </div>
+        <div id="slide-content" class="flex-1 overflow-y-auto p-6">
+            <div class="flex items-center justify-center h-32">
+                <div class="text-gray-400 text-sm">Loading...</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Modal -->
+<div x-show="modalOpen" x-cloak class="fixed inset-0 z-50 flex items-center justify-center p-4" style="display:none">
+    <div class="absolute inset-0 bg-black/50" @click="modalOpen = false"></div>
+    <div class="relative bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col">
+        <div class="flex items-center justify-between px-6 py-4 border-b border-gray-200">
+            <h2 class="text-lg font-semibold text-gray-800" id="modal-title">Form</h2>
+            <button @click="modalOpen = false" class="text-gray-400 hover:text-gray-600 rounded-lg p-1.5 hover:bg-gray-100">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+            </button>
+        </div>
+        <div id="modal-content" class="flex-1 overflow-y-auto p-6">
+            <div class="flex items-center justify-center h-32">
+                <div class="text-gray-400 text-sm">Loading...</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+</body>
+</html>

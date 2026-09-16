@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% load core_tags %}
+
+{% block content %}
+<div class="max-w-3xl mx-auto">
+    <button onclick="history.back()" class="text-sm text-gray-500 hover:text-gray-700 mb-4 flex items-center gap-1">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>
+        Back
+    </button>
+
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+        <div class="px-6 py-4 border-b border-gray-200 bg-gray-50">
+            <h2 class="text-base font-semibold text-gray-800">Import {{ import_title }}</h2>
+        </div>
+        <div class="p-6">
+            <div class="bg-gray-50 border border-gray-200 rounded-lg p-4 mb-6">
+                <p class="text-sm text-gray-600 font-medium mb-2">Required Excel columns:</p>
+                <code class="text-xs bg-white border border-gray-200 rounded px-3 py-1.5 text-gray-700 block">{{ columns }}</code>
+                <p class="text-xs text-gray-400 mt-2">File must be .xlsx or .xls format. The first row should be headers. Column names are matched case-insensitively.</p>
+            </div>
+
+            <form method="post" enctype="multipart/form-data"
+                  hx-post="{% url 'import-upload' import_type %}"
+                  hx-target="#upload-result"
+                  hx-swap="innerHTML"
+                  x-data="{ uploading: false }"
+                  @submit="uploading = true"
+                  id="upload-form">
+                {% csrf_token %}
+                <div class="space-y-4">
+                    {% for field in form %}
+                    <div>
+                        <label for="{{ field.id_for_label }}" class="block text-sm font-medium text-gray-700 mb-2">
+                            Select Excel file (.xlsx / .xls)
+                        </label>
+                        {{ field }}
+                    </div>
+                    {% endfor %}
+                </div>
+
+                <div class="mt-6 flex flex-wrap gap-3">
+                    <button type="submit" :disabled="uploading"
+                            class="px-5 py-2.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition disabled:opacity-50 flex items-center gap-2">
+                        <svg x-show="!uploading" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
+                        <span x-show="uploading">
+                            <svg class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                        </span>
+                        <span x-text="uploading ? 'Importing...' : 'Import File'"></span>
+                    </button>
+                    <a href="{% url 'import-hub' %}" class="px-5 py-2.5 text-sm font-medium text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 transition">
+                        Cancel
+                    </a>
+                </div>
+            </form>
+            <div id="upload-result"></div>
+        </div>
+    </div>
+</div>
+{% endblock %}

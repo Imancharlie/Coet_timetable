@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% load core_tags %}
+
+{% block content %}
+<div class="max-w-7xl mx-auto">
+    <div class="mb-6">
+        <p class="text-sm text-gray-500">Import data from Excel files. Each importer validates the file structure, reports errors, and preserves the original data. Reference data (programmes, groups, venues, semesters) must be imported before timetable files.</p>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+        {% for key, info in import_types.items %}
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 flex flex-col hover:shadow-md transition">
+            <div class="flex items-start justify-between gap-3 mb-3">
+                <div>
+                    <h3 class="font-semibold text-gray-800">{{ info.title }}</h3>
+                    <p class="text-xs text-gray-500 mt-1">Expected columns:</p>
+                    <code class="inline-block mt-1 text-xs bg-gray-50 border border-gray-200 rounded px-2 py-1 text-gray-600">{{ info.columns }}</code>
+                </div>
+            </div>
+            <div class="mt-4 pt-4 border-t border-gray-100">
+                <a href="{% url 'import-upload' key %}"
+                   class="block w-full text-center px-4 py-2.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition">
+                    Upload {{ info.title }}
+                </a>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+
+    <div class="mt-8 bg-blue-50 border border-blue-200 rounded-xl p-5">
+        <div class="flex gap-3">
+            <svg class="w-5 h-5 text-blue-600 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+            <div class="text-sm text-blue-800">
+                <p class="font-medium mb-1">Import order recommendation</p>
+                <ol class="list-decimal list-inside text-blue-700 space-y-1">
+                    <li>Semesters</li>
+                    <li>Programmes</li>
+                    <li>Student Groups</li>
+                    <li>Programme Courses</li>
+                    <li>Venues</li>
+                    <li>Master Timetable (creates Sessions)</li>
+                    <li>Workshop Allocation</li>
+                    <li>TD Allocation</li>
+                </ol>
+                <p class="mt-2 text-blue-600">The workshop & TD allocations preserve the exact venue text from the file (e.g. TW101) with no foreign key, as specified in Phase 1.</p>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

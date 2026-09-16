@@ -1,0 +1,54 @@
+{% load core_tags %}
+
+<!-- Import result panel -->
+<div class="mt-8 space-y-4">
+    <div class="border-l-4 pl-4 py-3 rounded-r-lg
+        {% if result.errors %}border-amber-400 bg-amber-50
+        {% else %}border-emerald-400 bg-emerald-50{% endif %}">
+        <h3 class="font-semibold text-gray-800">
+            {% if result.errors %}
+                Import completed with {{ result.errors|length }} error{{ result.errors|length|pluralize }}
+            {% else %}
+                Import successful
+            {% endif %}
+        </h3>
+    </div>
+
+    <div class="grid grid-cols-3 gap-4 text-center">
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+            <div class="text-2xl font-bold text-emerald-600">{{ result.created }}</div>
+            <div class="text-xs text-gray-500 mt-1">Created</div>
+        </div>
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+            <div class="text-2xl font-bold text-blue-600">{{ result.updated }}</div>
+            <div class="text-xs text-gray-500 mt-1">Updated</div>
+        </div>
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+            <div class="text-2xl font-bold text-gray-400">{{ result.skipped }}</div>
+            <div class="text-xs text-gray-500 mt-1">Skipped</div>
+        </div>
+    </div>
+
+    {% if result.errors %}
+    <div class="bg-white rounded-xl shadow-sm border border-red-200 overflow-hidden">
+        <div class="px-4 py-3 border-b border-red-100 bg-red-50">
+            <h4 class="text-sm font-semibold text-red-700">Errors</h4>
+        </div>
+        <ul class="divide-y divide-red-100 max-h-64 overflow-y-auto">
+            {% for error in result.errors %}
+            <li class="px-4 py-2 text-sm text-red-700 bg-red-50/30">{{ error }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+
+    <div class="flex gap-3 pt-2">
+        <a href="{% url 'import-hub' %}" class="px-4 py-2 text-sm font-medium text-white bg-gray-800 hover:bg-gray-900 rounded-lg transition">
+            Back to Imports
+        </a>
+        <button onclick="document.getElementById('upload-form').reset(); document.getElementById('upload-result').innerHTML = ''"
+                class="px-4 py-2 text-sm font-medium text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 transition">
+            Import Another File
+        </button>
+    </div>
+</div>
