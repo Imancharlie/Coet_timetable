@@ -619,7 +619,7 @@ def session_create(request):
     if request.method == "POST":
         form = SessionForm(request.POST)
         formset = SessionGroupFormSet(request.POST)
-        if form.is_valid():
+        if form.is_valid() and formset.is_valid():
             session = form.save()
             formset.instance = session
             formset.save()
@@ -646,7 +646,7 @@ def session_edit(request, pk):
     if request.method == "POST":
         form = SessionForm(request.POST, instance=item)
         formset = SessionGroupFormSet(request.POST, instance=item)
-        if form.is_valid():
+        if form.is_valid() and formset.is_valid():
             session = form.save()
             formset.instance = session
             formset.save()

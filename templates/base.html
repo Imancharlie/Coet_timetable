@@ -21,8 +21,8 @@
       @open-modal.window="modalOpen = true"
       @close-slide.window="slideOpen = false"
       @open-slide.window="slideOpen = true"
-       @refresh-table.window="setTimeout(function(){ htmx.trigger('#data-table-wrap', 'refresh') }, 150)"
-       @refresh-detail.window="setTimeout(function(){ htmx.trigger('#slide-content', 'refresh') }, 150)">
+      @refresh-table.window="setTimeout(function(){ htmx.trigger('#data-table-wrap', 'refresh') }, 150)"
+      @refresh-detail.window="setTimeout(refreshSlide, 150)">
 {% csrf_token %}
 
 <script>
@@ -53,8 +53,66 @@ function openInto(targetId, url) {
     window.dispatchEvent(new Event('open-modal'));
     fetch(url, { headers: { 'HX-Request': 'true' } })
         .then(function (r) { return r.text(); })
-        .then(function (html) { content.innerHTML = html; });
+        .then(function (html) {
+            content.innerHTML = html;
+            if (window.htmx) { htmx.process(content); }
+        })
+        .catch(function () {
+            content.innerHTML = '<div class="p-6 text-center text-red-600 text-sm">Failed to load. Please try again.</div>';
+        });
 }
+
+function refreshSlide() {
+    var sc = document.getElementById('slide-content');
+    var u = window._slideUrl;
+    if (!sc || !u) return;
+    sc.innerHTML = '<div class="flex items-center justify-center h-32"><p class="text-gray-400 text-sm">Refreshing...</p></div>';
+    fetch(u, { headers: { 'HX-Request': 'true' } })
+        .then(function (r) { return r.text(); })
+        .then(function (html) { sc.innerHTML = html; });
+}
+
+function showToast(message, type) {
+    var container = document.getElementById('toast-container');
+    if (!container) return;
+    var el = document.createElement('div');
+    var color = type === 'error' ? 'bg-red-600' : type === 'info' ? 'bg-blue-600' : 'bg-emerald-600';
+    el.className = color + ' text-white px-4 py-3 rounded-lg shadow-lg text-sm font-medium flex items-center gap-2';
+    el.innerHTML = '<span>' + (type === 'error' ? '&#10007;' : '&#10003;') + '</span><span>' + message + '</span>';
+    container.appendChild(el);
+    setTimeout(function () {
+        el.style.transition = 'opacity 0.3s';
+        el.style.opacity = '0';
+        setTimeout(function () { el.remove(); }, 300);
+    }, 3500);
+}
+
+document.body.addEventListener('htmx:afterSwap', function (evt) {
+    var path = evt.detail && evt.detail.pathInfo ? (evt.detail.pathInfo.requestPath || '') : '';
+    if (evt.detail && evt.detail.target && evt.detail.target.id === 'slide-content') {
+        window._slideUrl = path;
+    }
+    try {
+        var xhr = evt.detail.xhr;
+        var triggers = (xhr.getResponseHeader('HX-Trigger') || '') + (xhr.getResponseHeader('HX-Trigger-After-Swap') || '');
+        if (triggers.indexOf('close-modal') !== -1) {
+            var msg;
+            if (path.indexOf('/delete/') !== -1) { msg = 'Record deleted successfully'; }
+            else if (path.indexOf('/edit/') !== -1) { msg = 'Record updated successfully'; }
+            else { msg = 'Record created successfully'; }
+            showToast(msg, 'success');
+        }
+    } catch (e) {}
+});
+
+document.body.addEventListener('htmx:responseError', function (evt) {
+    var status = evt.detail && evt.detail.xhr ? evt.detail.xhr.status : 0;
+    showToast('Request failed (' + status + '). Please try again.', 'error');
+});
+
+document.body.addEventListener('htmx:sendError', function () {
+    showToast('Could not reach the server. Is it running?', 'error');
+});
 </script>
 
 <div class="flex h-full">
@@ -201,6 +259,8 @@ function openInto(targetId, url) {
         </div>
     </div>
 </div>
+
+<div id="toast-container" class="fixed top-4 right-4 z-[100] space-y-2"></div>
 
 </body>
 </html>
