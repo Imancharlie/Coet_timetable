@@ -13,6 +13,9 @@ from .models import (
     WorkshopAllocation,
 )
 
+INPUT_CLS = "w-full px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white"
+SELECT_CLS = INPUT_CLS
+
 
 class SemesterForm(forms.ModelForm):
     class Meta:
@@ -20,9 +23,9 @@ class SemesterForm(forms.ModelForm):
         fields = ["academic_year", "semester"]
         widgets = {
             "academic_year": forms.TextInput(
-                attrs={"placeholder": "e.g. 2026/2027"}
+                attrs={"class": INPUT_CLS, "placeholder": "e.g. 2026/2027"}
             ),
-            "semester": forms.NumberInput(attrs={"min": 1, "max": 4}),
+            "semester": forms.NumberInput(attrs={"class": INPUT_CLS, "min": 1, "max": 4}),
         }
 
 
@@ -31,9 +34,9 @@ class ProgrammeForm(forms.ModelForm):
         model = Programme
         fields = ["code", "name"]
         widgets = {
-            "code": forms.TextInput(attrs={"placeholder": "e.g. CE"}),
+            "code": forms.TextInput(attrs={"class": INPUT_CLS, "placeholder": "e.g. CE"}),
             "name": forms.TextInput(
-                attrs={"placeholder": "e.g. Civil Engineering"}
+                attrs={"class": INPUT_CLS, "placeholder": "e.g. Civil Engineering"}
             ),
         }
 
@@ -43,8 +46,8 @@ class StudentGroupForm(forms.ModelForm):
         model = StudentGroup
         fields = ["programme", "code"]
         widgets = {
-            "programme": forms.Select(attrs={"class": "w-full"}),
-            "code": forms.TextInput(attrs={"placeholder": "e.g. A1"}),
+            "programme": forms.Select(attrs={"class": SELECT_CLS}),
+            "code": forms.TextInput(attrs={"class": INPUT_CLS, "placeholder": "e.g. A1"}),
         }
 
 
@@ -53,9 +56,9 @@ class ProgrammeCourseForm(forms.ModelForm):
         model = ProgrammeCourse
         fields = ["programme", "course_code"]
         widgets = {
-            "programme": forms.Select(attrs={"class": "w-full"}),
+            "programme": forms.Select(attrs={"class": SELECT_CLS}),
             "course_code": forms.TextInput(
-                attrs={"placeholder": "e.g. MT161"}
+                attrs={"class": INPUT_CLS, "placeholder": "e.g. MT161"}
             ),
         }
 
@@ -65,8 +68,8 @@ class VenueForm(forms.ModelForm):
         model = Venue
         fields = ["name", "capacity"]
         widgets = {
-            "name": forms.TextInput(attrs={"placeholder": "e.g. NB102"}),
-            "capacity": forms.NumberInput(attrs={"min": 0}),
+            "name": forms.TextInput(attrs={"class": INPUT_CLS, "placeholder": "e.g. NB102"}),
+            "capacity": forms.NumberInput(attrs={"class": INPUT_CLS, "min": 0}),
         }
 
 
@@ -83,18 +86,18 @@ class SessionForm(forms.ModelForm):
             "venue",
         ]
         widgets = {
-            "semester": forms.Select(attrs={"class": "w-full"}),
+            "semester": forms.Select(attrs={"class": SELECT_CLS}),
             "course_code": forms.TextInput(
-                attrs={"placeholder": "e.g. MT161"}
+                attrs={"class": INPUT_CLS, "placeholder": "e.g. MT161"}
             ),
-            "activity_type": forms.Select(attrs={"class": "w-full"}),
-            "day": forms.Select(attrs={"class": "w-full"}),
-            "venue": forms.Select(attrs={"class": "w-full"}),
+            "activity_type": forms.Select(attrs={"class": SELECT_CLS}),
+            "day": forms.Select(attrs={"class": SELECT_CLS}),
+            "venue": forms.Select(attrs={"class": SELECT_CLS}),
             "start_time": forms.TimeInput(
-                attrs={"type": "time"}, format="%H:%M"
+                attrs={"class": INPUT_CLS, "type": "time"}, format="%H:%M"
             ),
             "end_time": forms.TimeInput(
-                attrs={"type": "time"}, format="%H:%M"
+                attrs={"class": INPUT_CLS, "type": "time"}, format="%H:%M"
             ),
         }
 
@@ -104,7 +107,7 @@ class SessionGroupForm(forms.ModelForm):
         model = SessionGroup
         fields = ["group"]
         widgets = {
-            "group": forms.Select(attrs={"class": "w-full"}),
+            "group": forms.Select(attrs={"class": SELECT_CLS}),
         }
 
 
@@ -130,22 +133,20 @@ class WorkshopAllocationForm(forms.ModelForm):
             "venue",
         ]
         widgets = {
-            "semester": forms.Select(attrs={"class": "w-full"}),
+            "semester": forms.Select(attrs={"class": SELECT_CLS}),
             "course_code": forms.TextInput(
-                attrs={"placeholder": "e.g. TG201"}
+                attrs={"class": INPUT_CLS, "placeholder": "e.g. TG201"}
             ),
             "group_code": forms.TextInput(
-                attrs={"placeholder": "e.g. C1"}
+                attrs={"class": INPUT_CLS, "placeholder": "e.g. C1"}
             ),
-            "day": forms.Select(attrs={"class": "w-full"}),
-            "venue": forms.TextInput(
-                attrs={"placeholder": "e.g. TW101"}
-            ),
+            "day": forms.Select(attrs={"class": SELECT_CLS}),
+            "venue": forms.TextInput(attrs={"class": INPUT_CLS, "placeholder": "e.g. TW101"}),
             "start_time": forms.TimeInput(
-                attrs={"type": "time"}, format="%H:%M"
+                attrs={"class": INPUT_CLS, "type": "time"}, format="%H:%M"
             ),
             "end_time": forms.TimeInput(
-                attrs={"type": "time"}, format="%H:%M"
+                attrs={"class": INPUT_CLS, "type": "time"}, format="%H:%M"
             ),
         }
 
@@ -163,22 +164,20 @@ class TechnicalDrawingAllocationForm(forms.ModelForm):
             "venue",
         ]
         widgets = {
-            "semester": forms.Select(attrs={"class": "w-full"}),
+            "semester": forms.Select(attrs={"class": SELECT_CLS}),
             "course_code": forms.TextInput(
-                attrs={"placeholder": "e.g. TG201"}
+                attrs={"class": INPUT_CLS, "placeholder": "e.g. TG201"}
             ),
             "group_code": forms.TextInput(
-                attrs={"placeholder": "e.g. A1"}
+                attrs={"class": INPUT_CLS, "placeholder": "e.g. A1"}
             ),
-            "day": forms.Select(attrs={"class": "w-full"}),
-            "venue": forms.TextInput(
-                attrs={"placeholder": "e.g. TW101"}
-            ),
+            "day": forms.Select(attrs={"class": SELECT_CLS}),
+            "venue": forms.TextInput(attrs={"class": INPUT_CLS, "placeholder": "e.g. TW101"}),
             "start_time": forms.TimeInput(
-                attrs={"type": "time"}, format="%H:%M"
+                attrs={"class": INPUT_CLS, "type": "time"}, format="%H:%M"
             ),
             "end_time": forms.TimeInput(
-                attrs={"type": "time"}, format="%H:%M"
+                attrs={"class": INPUT_CLS, "type": "time"}, format="%H:%M"
             ),
         }
 

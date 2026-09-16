@@ -21,7 +21,8 @@
       @open-modal.window="modalOpen = true"
       @close-slide.window="slideOpen = false"
       @open-slide.window="slideOpen = true"
-      @refresh-table.window="setTimeout(function(){ htmx.trigger('#data-table-wrap', 'refresh') }, 150)">
+       @refresh-table.window="setTimeout(function(){ htmx.trigger('#data-table-wrap', 'refresh') }, 150)"
+       @refresh-detail.window="setTimeout(function(){ htmx.trigger('#slide-content', 'refresh') }, 150)">
 {% csrf_token %}
 
 <script>
@@ -49,8 +50,7 @@ function openDelete(url, title) {
 function openInto(targetId, url) {
     var content = document.querySelector(targetId);
     content.innerHTML = '<div class="flex items-center justify-center h-32"><div class="text-gray-400 text-sm">Loading...</div></div>';
-    var root = document.querySelector('[x-data]');
-    if (root && root.__x) { root.__x.$data.modalOpen = true; }
+    window.dispatchEvent(new Event('open-modal'));
     fetch(url, { headers: { 'HX-Request': 'true' } })
         .then(function (r) { return r.text(); })
         .then(function (html) { content.innerHTML = html; });

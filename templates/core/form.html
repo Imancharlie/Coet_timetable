@@ -19,6 +19,13 @@
         </div>
         {% endfor %}
     </div>
+    {% if form.non_field_errors %}
+    <div class="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg">
+        {% for error in form.non_field_errors %}
+        <p class="text-sm text-red-600">{{ error }}</p>
+        {% endfor %}
+    </div>
+    {% endif %}
     <div class="mt-6 flex justify-end gap-3">
         <button type="button" @click="modalOpen = false" class="px-4 py-2 text-sm font-medium text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 transition">
             Cancel
@@ -30,13 +37,3 @@
         </button>
     </div>
 </form>
-
-<script>
-    document.querySelectorAll('#modal-content input, #modal-content select, #modal-content textarea').forEach(function (el) {
-        if ((el.getAttribute('type') === 'checkbox' || el.getAttribute('type') === 'radio') && !el.classList.contains('w-full')) {
-            el.className = 'h-4 w-4 text-blue-600 border-gray-300 rounded';
-        } else {
-            el.className = 'w-full px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white' + (el.tagName === 'SELECT' ? '' : '');
-        }
-    });
-</script>

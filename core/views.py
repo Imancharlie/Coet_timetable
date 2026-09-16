@@ -149,7 +149,7 @@ def programme_create(request):
         if form.is_valid():
             form.save()
             r = HttpResponse("")
-            r["HX-Trigger"] = "closeModal,refreshTable"
+            r["HX-Trigger"] = "close-modal,refresh-table"
             return r
     else:
         form = ProgrammeForm()
@@ -167,7 +167,7 @@ def programme_edit(request, pk):
         if form.is_valid():
             form.save()
             r = HttpResponse("")
-            r["HX-Trigger"] = "closeModal,refreshTable,refreshDetail"
+            r["HX-Trigger"] = "close-modal,refresh-table,refresh-detail"
             return r
     else:
         form = ProgrammeForm(instance=item)
@@ -187,12 +187,12 @@ def programme_delete(request, pk):
     if request.method == "POST":
         item.delete()
         r = HttpResponse("")
-        r["HX-Trigger"] = "closeModal,refreshTable"
+        r["HX-Trigger"] = "close-modal,refresh-table"
         return r
     return render(
         request,
         "core/delete.html",
-        {"item": item, "title": f"Delete {item}?", "back_url": "/programmes/"},
+        {"item": item, "title": f"Delete {item}?", "back_url": "/programmes/", "delete_url": f"/programmes/{pk}/delete/"},
     )
 
 
@@ -263,7 +263,7 @@ def studentgroup_create(request):
         if form.is_valid():
             form.save()
             r = HttpResponse("")
-            r["HX-Trigger"] = "closeModal,refreshTable"
+            r["HX-Trigger"] = "close-modal,refresh-table"
             return r
     else:
         form = StudentGroupForm()
@@ -281,7 +281,7 @@ def studentgroup_edit(request, pk):
         if form.is_valid():
             form.save()
             r = HttpResponse("")
-            r["HX-Trigger"] = "closeModal,refreshTable,refreshDetail"
+            r["HX-Trigger"] = "close-modal,refresh-table,refresh-detail"
             return r
     else:
         form = StudentGroupForm(instance=item)
@@ -301,12 +301,12 @@ def studentgroup_delete(request, pk):
     if request.method == "POST":
         item.delete()
         r = HttpResponse("")
-        r["HX-Trigger"] = "closeModal,refreshTable"
+        r["HX-Trigger"] = "close-modal,refresh-table"
         return r
     return render(
         request,
         "core/delete.html",
-        {"item": item, "title": f"Delete {item}?", "back_url": "/groups/"},
+        {"item": item, "title": f"Delete {item}?", "back_url": "/groups/", "delete_url": f"/groups/{pk}/delete/"},
     )
 
 
@@ -372,7 +372,7 @@ def venue_create(request):
         if form.is_valid():
             form.save()
             r = HttpResponse("")
-            r["HX-Trigger"] = "closeModal,refreshTable"
+            r["HX-Trigger"] = "close-modal,refresh-table"
             return r
     else:
         form = VenueForm()
@@ -390,7 +390,7 @@ def venue_edit(request, pk):
         if form.is_valid():
             form.save()
             r = HttpResponse("")
-            r["HX-Trigger"] = "closeModal,refreshTable,refreshDetail"
+            r["HX-Trigger"] = "close-modal,refresh-table,refresh-detail"
             return r
     else:
         form = VenueForm(instance=item)
@@ -406,12 +406,12 @@ def venue_delete(request, pk):
     if request.method == "POST":
         item.delete()
         r = HttpResponse("")
-        r["HX-Trigger"] = "closeModal,refreshTable"
+        r["HX-Trigger"] = "close-modal,refresh-table"
         return r
     return render(
         request,
         "core/delete.html",
-        {"item": item, "title": f"Delete {item}?", "back_url": "/venues/"},
+        {"item": item, "title": f"Delete {item}?", "back_url": "/venues/", "delete_url": f"/venues/{pk}/delete/"},
     )
 
 
@@ -477,7 +477,7 @@ def semester_create(request):
         if form.is_valid():
             form.save()
             r = HttpResponse("")
-            r["HX-Trigger"] = "closeModal,refreshTable"
+            r["HX-Trigger"] = "close-modal,refresh-table"
             return r
     else:
         form = SemesterForm()
@@ -495,7 +495,7 @@ def semester_edit(request, pk):
         if form.is_valid():
             form.save()
             r = HttpResponse("")
-            r["HX-Trigger"] = "closeModal,refreshTable,refreshDetail"
+            r["HX-Trigger"] = "close-modal,refresh-table,refresh-detail"
             return r
     else:
         form = SemesterForm(instance=item)
@@ -515,12 +515,12 @@ def semester_delete(request, pk):
     if request.method == "POST":
         item.delete()
         r = HttpResponse("")
-        r["HX-Trigger"] = "closeModal,refreshTable"
+        r["HX-Trigger"] = "close-modal,refresh-table"
         return r
     return render(
         request,
         "core/delete.html",
-        {"item": item, "title": f"Delete {item}?", "back_url": "/semesters/"},
+        {"item": item, "title": f"Delete {item}?", "back_url": "/semesters/", "delete_url": f"/semesters/{pk}/delete/"},
     )
 
 
@@ -624,7 +624,7 @@ def session_create(request):
             formset.instance = session
             formset.save()
             r = HttpResponse("")
-            r["HX-Trigger"] = "closeModal,refreshTable"
+            r["HX-Trigger"] = "close-modal,refresh-table"
             return r
     else:
         form = SessionForm()
@@ -651,7 +651,7 @@ def session_edit(request, pk):
             formset.instance = session
             formset.save()
             r = HttpResponse("")
-            r["HX-Trigger"] = "closeModal,refreshTable,refreshDetail"
+            r["HX-Trigger"] = "close-modal,refresh-table,refresh-detail"
             return r
     else:
         form = SessionForm(instance=item)
@@ -673,12 +673,12 @@ def session_delete(request, pk):
     if request.method == "POST":
         item.delete()
         r = HttpResponse("")
-        r["HX-Trigger"] = "closeModal,refreshTable"
+        r["HX-Trigger"] = "close-modal,refresh-table"
         return r
     return render(
         request,
         "core/delete.html",
-        {"item": item, "title": f"Delete {item}?", "back_url": "/sessions/"},
+        {"item": item, "title": f"Delete {item}?", "back_url": "/sessions/", "delete_url": f"/sessions/{pk}/delete/"},
     )
 
 
@@ -800,7 +800,7 @@ def workshop_create(request):
         if form.is_valid():
             form.save()
             r = HttpResponse("")
-            r["HX-Trigger"] = "closeModal,refreshTable"
+            r["HX-Trigger"] = "close-modal,refresh-table"
             return r
     else:
         form = WorkshopAllocationForm()
@@ -822,7 +822,7 @@ def workshop_edit(request, pk):
         if form.is_valid():
             form.save()
             r = HttpResponse("")
-            r["HX-Trigger"] = "closeModal,refreshTable,refreshDetail"
+            r["HX-Trigger"] = "close-modal,refresh-table,refresh-detail"
             return r
     else:
         form = WorkshopAllocationForm(instance=item)
@@ -842,12 +842,12 @@ def workshop_delete(request, pk):
     if request.method == "POST":
         item.delete()
         r = HttpResponse("")
-        r["HX-Trigger"] = "closeModal,refreshTable"
+        r["HX-Trigger"] = "close-modal,refresh-table"
         return r
     return render(
         request,
         "core/delete.html",
-        {"item": item, "title": f"Delete {item}?", "back_url": "/workshops/"},
+        {"item": item, "title": f"Delete {item}?", "back_url": "/workshops/", "delete_url": f"/workshops/{pk}/delete/"},
     )
 
 
@@ -929,7 +929,7 @@ def td_create(request):
         if form.is_valid():
             form.save()
             r = HttpResponse("")
-            r["HX-Trigger"] = "closeModal,refreshTable"
+            r["HX-Trigger"] = "close-modal,refresh-table"
             return r
     else:
         form = TechnicalDrawingAllocationForm()
@@ -951,7 +951,7 @@ def td_edit(request, pk):
         if form.is_valid():
             form.save()
             r = HttpResponse("")
-            r["HX-Trigger"] = "closeModal,refreshTable,refreshDetail"
+            r["HX-Trigger"] = "close-modal,refresh-table,refresh-detail"
             return r
     else:
         form = TechnicalDrawingAllocationForm(instance=item)
@@ -967,12 +967,12 @@ def td_delete(request, pk):
     if request.method == "POST":
         item.delete()
         r = HttpResponse("")
-        r["HX-Trigger"] = "closeModal,refreshTable"
+        r["HX-Trigger"] = "close-modal,refresh-table"
         return r
     return render(
         request,
         "core/delete.html",
-        {"item": item, "title": f"Delete {item}?", "back_url": "/td/"},
+        {"item": item, "title": f"Delete {item}?", "back_url": "/td/", "delete_url": f"/td/{pk}/delete/"},
     )
 
 
@@ -1040,7 +1040,7 @@ def course_create(request):
         if form.is_valid():
             form.save()
             r = HttpResponse("")
-            r["HX-Trigger"] = "closeModal,refreshTable"
+            r["HX-Trigger"] = "close-modal,refresh-table"
             return r
     else:
         form = ProgrammeCourseForm()
@@ -1062,7 +1062,7 @@ def course_edit(request, pk):
         if form.is_valid():
             form.save()
             r = HttpResponse("")
-            r["HX-Trigger"] = "closeModal,refreshTable,refreshDetail"
+            r["HX-Trigger"] = "close-modal,refresh-table,refresh-detail"
             return r
     else:
         form = ProgrammeCourseForm(instance=item)
@@ -1082,12 +1082,12 @@ def course_delete(request, pk):
     if request.method == "POST":
         item.delete()
         r = HttpResponse("")
-        r["HX-Trigger"] = "closeModal,refreshTable"
+        r["HX-Trigger"] = "close-modal,refresh-table"
         return r
     return render(
         request,
         "core/delete.html",
-        {"item": item, "title": f"Delete {item}?", "back_url": "/courses/"},
+        {"item": item, "title": f"Delete {item}?", "back_url": "/courses/", "delete_url": f"/courses/{pk}/delete/"},
     )
 
 

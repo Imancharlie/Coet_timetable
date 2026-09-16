@@ -7,9 +7,9 @@ urlpatterns = [
     # Programme
     path("programmes/", views.programme_list, name="programme-list"),
     path("programmes/create/", views.programme_create, name="programme-create"),
-    path("<int:pk>/", views.programme_detail, name="programme-detail"),
-    path("<int:pk>/edit/", views.programme_edit, name="programme-edit"),
-    path("<int:pk>/delete/", views.programme_delete, name="programme-delete"),
+    path("programmes/<int:pk>/", views.programme_detail, name="programme-detail"),
+    path("programmes/<int:pk>/edit/", views.programme_edit, name="programme-edit"),
+    path("programmes/<int:pk>/delete/", views.programme_delete, name="programme-delete"),
     # Student Groups
     path("groups/", views.studentgroup_list, name="group-list"),
     path("groups/create/", views.studentgroup_create, name="group-create"),
