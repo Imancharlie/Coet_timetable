@@ -128,20 +128,38 @@ class WorkshopAllocationForm(forms.ModelForm):
             "course_code",
             "group_code",
             "day",
+            "time_period",
             "start_time",
             "end_time",
             "venue",
+            "workshop",
+            "position",
+            "schedule_section",
+            "week_start",
+            "week_end",
+            "year_of_study",
         ]
         widgets = {
             "semester": forms.Select(attrs={"class": SELECT_CLS}),
             "course_code": forms.TextInput(
-                attrs={"class": INPUT_CLS, "placeholder": "e.g. TG201"}
+                attrs={"class": INPUT_CLS, "placeholder": "e.g. Building or TG201"}
             ),
             "group_code": forms.TextInput(
                 attrs={"class": INPUT_CLS, "placeholder": "e.g. C1"}
             ),
             "day": forms.Select(attrs={"class": SELECT_CLS}),
+            "time_period": forms.Select(attrs={"class": SELECT_CLS}),
             "venue": forms.TextInput(attrs={"class": INPUT_CLS, "placeholder": "e.g. TW101"}),
+            "workshop": forms.TextInput(
+                attrs={"class": INPUT_CLS, "placeholder": "e.g. Building"}
+            ),
+            "position": forms.NumberInput(attrs={"class": INPUT_CLS, "min": 1, "max": 6}),
+            "schedule_section": forms.TextInput(
+                attrs={"class": INPUT_CLS, "placeholder": "e.g. SCHEDULE 1"}
+            ),
+            "week_start": forms.NumberInput(attrs={"class": INPUT_CLS, "min": 1}),
+            "week_end": forms.NumberInput(attrs={"class": INPUT_CLS, "min": 1}),
+            "year_of_study": forms.NumberInput(attrs={"class": INPUT_CLS, "min": 1}),
             "start_time": forms.TimeInput(
                 attrs={"class": INPUT_CLS, "type": "time"}, format="%H:%M"
             ),

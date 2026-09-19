@@ -42,9 +42,6 @@
                     {% endfor %}
                     <td class="px-4 py-3 text-right whitespace-nowrap" @click.stop>
                         <div class="inline-flex items-center gap-1 opacity-0 group-hover:opacity-100 transition">
-                            <button onclick="openModal('{{ edit_name|default:''|cut:'' }}{{ item.pk|default:''|cut:'' }}#','Edit')"
-                                    hx-get="{{ edit_name|default:'edit' }}"
-                                    style="display:none"></button>
                             <a href="{{ item.pk }}/edit/"
                                onclick="event.preventDefault(); openEdit(this.getAttribute('href'))"
                                class="p-1.5 rounded-md text-gray-400 hover:text-blue-600 hover:bg-blue-50 transition"

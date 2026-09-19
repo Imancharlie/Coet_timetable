@@ -3,7 +3,7 @@ from pathlib import Path
 
 from django.db.models import Q, Count
 from django.http import HttpResponse, HttpResponseBadRequest
-from django.shortcuts import get_object_or_404, render
+from django.shortcuts import get_object_or_404, redirect, render
 
 from .forms import (
     FileUploadForm,
@@ -40,12 +40,24 @@ from .models import (
     WorkshopAllocation,
 )
 
-NAV = "active_nav"
 HTMX_HEADER = "HX-Request"
 
 
 def _htmx(request):
     return request.headers.get(HTMX_HEADER)
+
+
+def _write_response(request, trigger, redirect_name, *args):
+    """Success response that works with and without htmx.
+
+    For htmx requests return the trigger header the UI reacts to; for a plain
+    browser POST fall back to a normal redirect so saves never appear to hang.
+    """
+    if _htmx(request):
+        r = HttpResponse("")
+        r["HX-Trigger"] = trigger
+        return r
+    return redirect(redirect_name, *args)
 
 
 def _search(qs, q, fields):
@@ -76,7 +88,6 @@ def dashboard(request):
         request,
         "dashboard.html",
         {
-            NAV: "dashboard",
             "programme_count": Programme.objects.count(),
             "group_count": StudentGroup.objects.count(),
             "venue_count": Venue.objects.count(),
@@ -111,7 +122,6 @@ def programme_list(request):
         "columns": PROG_COLS,
         "detail_fields": PROG_FIELDS,
         "q": q,
-        NAV: "programmes",
         "page_title": "Programmes",
         "list_url": "/programmes/",
         "create_url": "/programmes/create/",
@@ -132,7 +142,6 @@ def programme_detail(request, pk):
     ctx = {
         "item": item,
         "detail_fields": PROG_FIELDS,
-        NAV: "programmes",
         "page_title": str(item),
         "edit_url": f"/programmes/{pk}/edit/",
         "delete_url": f"/programmes/{pk}/delete/",
@@ -148,9 +157,9 @@ def programme_create(request):
         form = ProgrammeForm(request.POST)
         if form.is_valid():
             form.save()
-            r = HttpResponse("")
-            r["HX-Trigger"] = "close-modal,refresh-table"
-            return r
+            return _write_response(
+                request, "close-modal,refresh-table", "programme-list"
+            )
     else:
         form = ProgrammeForm()
     return render(
@@ -166,9 +175,11 @@ def programme_edit(request, pk):
         form = ProgrammeForm(request.POST, instance=item)
         if form.is_valid():
             form.save()
-            r = HttpResponse("")
-            r["HX-Trigger"] = "close-modal,refresh-table,refresh-detail"
-            return r
+            return _write_response(
+                request,
+                "close-modal,refresh-table,refresh-detail",
+                "programme-list",
+            )
     else:
         form = ProgrammeForm(instance=item)
     return render(
@@ -186,9 +197,7 @@ def programme_delete(request, pk):
     item = get_object_or_404(Programme, pk=pk)
     if request.method == "POST":
         item.delete()
-        r = HttpResponse("")
-        r["HX-Trigger"] = "close-modal,refresh-table"
-        return r
+        return _write_response(request, "close-modal,refresh-table", "programme-list")
     return render(
         request,
         "core/delete.html",
@@ -223,7 +232,6 @@ def studentgroup_list(request):
         "columns": GRP_COLS,
         "detail_fields": GRP_FIELDS,
         "q": q,
-        NAV: "groups",
         "page_title": "Student Groups",
         "list_url": "/groups/",
         "create_url": "/groups/create/",
@@ -246,7 +254,6 @@ def studentgroup_detail(request, pk):
     ctx = {
         "item": item,
         "detail_fields": GRP_FIELDS,
-        NAV: "groups",
         "page_title": str(item),
         "edit_url": f"/groups/{pk}/edit/",
         "delete_url": f"/groups/{pk}/delete/",
@@ -262,9 +269,9 @@ def studentgroup_create(request):
         form = StudentGroupForm(request.POST)
         if form.is_valid():
             form.save()
-            r = HttpResponse("")
-            r["HX-Trigger"] = "close-modal,refresh-table"
-            return r
+            return _write_response(
+                request, "close-modal,refresh-table", "group-list"
+            )
     else:
         form = StudentGroupForm()
     return render(
@@ -280,9 +287,11 @@ def studentgroup_edit(request, pk):
         form = StudentGroupForm(request.POST, instance=item)
         if form.is_valid():
             form.save()
-            r = HttpResponse("")
-            r["HX-Trigger"] = "close-modal,refresh-table,refresh-detail"
-            return r
+            return _write_response(
+                request,
+                "close-modal,refresh-table,refresh-detail",
+                "group-list",
+            )
     else:
         form = StudentGroupForm(instance=item)
     return render(
@@ -300,9 +309,7 @@ def studentgroup_delete(request, pk):
     item = get_object_or_404(StudentGroup, pk=pk)
     if request.method == "POST":
         item.delete()
-        r = HttpResponse("")
-        r["HX-Trigger"] = "close-modal,refresh-table"
-        return r
+        return _write_response(request, "close-modal,refresh-table", "group-list")
     return render(
         request,
         "core/delete.html",
@@ -334,7 +341,6 @@ def venue_list(request):
         "columns": VENUE_COLS,
         "detail_fields": VENUE_FIELDS,
         "q": q,
-        NAV: "venues",
         "page_title": "Venues",
         "list_url": "/venues/",
         "create_url": "/venues/create/",
@@ -355,7 +361,6 @@ def venue_detail(request, pk):
     ctx = {
         "item": item,
         "detail_fields": VENUE_FIELDS,
-        NAV: "venues",
         "page_title": str(item),
         "edit_url": f"/venues/{pk}/edit/",
         "delete_url": f"/venues/{pk}/delete/",
@@ -371,9 +376,9 @@ def venue_create(request):
         form = VenueForm(request.POST)
         if form.is_valid():
             form.save()
-            r = HttpResponse("")
-            r["HX-Trigger"] = "close-modal,refresh-table"
-            return r
+            return _write_response(
+                request, "close-modal,refresh-table", "venue-list"
+            )
     else:
         form = VenueForm()
     return render(
@@ -389,9 +394,11 @@ def venue_edit(request, pk):
         form = VenueForm(request.POST, instance=item)
         if form.is_valid():
             form.save()
-            r = HttpResponse("")
-            r["HX-Trigger"] = "close-modal,refresh-table,refresh-detail"
-            return r
+            return _write_response(
+                request,
+                "close-modal,refresh-table,refresh-detail",
+                "venue-list",
+            )
     else:
         form = VenueForm(instance=item)
     return render(
@@ -405,9 +412,7 @@ def venue_delete(request, pk):
     item = get_object_or_404(Venue, pk=pk)
     if request.method == "POST":
         item.delete()
-        r = HttpResponse("")
-        r["HX-Trigger"] = "close-modal,refresh-table"
-        return r
+        return _write_response(request, "close-modal,refresh-table", "venue-list")
     return render(
         request,
         "core/delete.html",
@@ -439,7 +444,6 @@ def semester_list(request):
         "columns": SEM_COLS,
         "detail_fields": SEM_FIELDS,
         "q": q,
-        NAV: "semesters",
         "page_title": "Semesters",
         "list_url": "/semesters/",
         "create_url": "/semesters/create/",
@@ -460,7 +464,6 @@ def semester_detail(request, pk):
     ctx = {
         "item": item,
         "detail_fields": SEM_FIELDS,
-        NAV: "semesters",
         "page_title": str(item),
         "edit_url": f"/semesters/{pk}/edit/",
         "delete_url": f"/semesters/{pk}/delete/",
@@ -476,9 +479,9 @@ def semester_create(request):
         form = SemesterForm(request.POST)
         if form.is_valid():
             form.save()
-            r = HttpResponse("")
-            r["HX-Trigger"] = "close-modal,refresh-table"
-            return r
+            return _write_response(
+                request, "close-modal,refresh-table", "semester-list"
+            )
     else:
         form = SemesterForm()
     return render(
@@ -494,9 +497,11 @@ def semester_edit(request, pk):
         form = SemesterForm(request.POST, instance=item)
         if form.is_valid():
             form.save()
-            r = HttpResponse("")
-            r["HX-Trigger"] = "close-modal,refresh-table,refresh-detail"
-            return r
+            return _write_response(
+                request,
+                "close-modal,refresh-table,refresh-detail",
+                "semester-list",
+            )
     else:
         form = SemesterForm(instance=item)
     return render(
@@ -514,9 +519,7 @@ def semester_delete(request, pk):
     item = get_object_or_404(Semester, pk=pk)
     if request.method == "POST":
         item.delete()
-        r = HttpResponse("")
-        r["HX-Trigger"] = "close-modal,refresh-table"
-        return r
+        return _write_response(request, "close-modal,refresh-table", "semester-list")
     return render(
         request,
         "core/delete.html",
@@ -566,7 +569,6 @@ def session_list(request):
         "columns": SESS_COLS,
         "detail_fields": SESS_FIELDS,
         "q": q,
-        NAV: "sessions",
         "page_title": "Master Timetable",
         "list_url": "/sessions/",
         "create_url": "/sessions/create/",
@@ -600,7 +602,6 @@ def session_detail(request, pk):
         "groups": groups,
         "all_groups": all_groups,
         "session_pk": pk,
-        NAV: "sessions",
         "page_title": str(item),
         "edit_url": f"/sessions/{pk}/edit/",
         "delete_url": f"/sessions/{pk}/delete/",
@@ -623,9 +624,9 @@ def session_create(request):
             session = form.save()
             formset.instance = session
             formset.save()
-            r = HttpResponse("")
-            r["HX-Trigger"] = "close-modal,refresh-table"
-            return r
+            return _write_response(
+                request, "close-modal,refresh-table", "session-list"
+            )
     else:
         form = SessionForm()
         formset = SessionGroupFormSet()
@@ -650,9 +651,11 @@ def session_edit(request, pk):
             session = form.save()
             formset.instance = session
             formset.save()
-            r = HttpResponse("")
-            r["HX-Trigger"] = "close-modal,refresh-table,refresh-detail"
-            return r
+            return _write_response(
+                request,
+                "close-modal,refresh-table,refresh-detail",
+                "session-list",
+            )
     else:
         form = SessionForm(instance=item)
         formset = SessionGroupFormSet(instance=item)
@@ -672,9 +675,7 @@ def session_delete(request, pk):
     item = get_object_or_404(Session, pk=pk)
     if request.method == "POST":
         item.delete()
-        r = HttpResponse("")
-        r["HX-Trigger"] = "close-modal,refresh-table"
-        return r
+        return _write_response(request, "close-modal,refresh-table", "session-list")
     return render(
         request,
         "core/delete.html",
@@ -689,6 +690,8 @@ def session_add_group(request, pk):
         SessionGroup.objects.get_or_create(
             session=session, group_id=group_id
         )
+    if not _htmx(request):
+        return redirect("session-detail", pk=pk)
     groups = SessionGroup.objects.filter(session=session).select_related(
         "group__programme"
     )
@@ -707,6 +710,8 @@ def session_add_group(request, pk):
 def session_remove_group(request, pk, group_pk):
     SessionGroup.objects.filter(session_id=pk, group_id=group_pk).delete()
     session = get_object_or_404(Session, pk=pk)
+    if not _htmx(request):
+        return redirect("session-detail", pk=pk)
     groups = SessionGroup.objects.filter(session=session).select_related(
         "group__programme"
     )
@@ -730,6 +735,7 @@ WS_COLS = [
     {"key": "course_code", "label": "Course"},
     {"key": "group_code", "label": "Group"},
     {"key": "day", "label": "Day"},
+    {"key": "time_period", "label": "Period"},
     {"key": "start_time", "label": "Start"},
     {"key": "end_time", "label": "End"},
     {"key": "venue", "label": "Venue"},
@@ -738,10 +744,17 @@ WS_FIELDS = [
     {"label": "Semester", "key": "semester"},
     {"label": "Course Code", "key": "course_code"},
     {"label": "Group Code", "key": "group_code"},
+    {"label": "Workshop", "key": "workshop"},
     {"label": "Day", "key": "day"},
+    {"label": "Time Period", "key": "time_period"},
+    {"label": "Position", "key": "position"},
+    {"label": "Schedule Section", "key": "schedule_section"},
+    {"label": "Week Start", "key": "week_start"},
+    {"label": "Week End", "key": "week_end"},
     {"label": "Start Time", "key": "start_time"},
     {"label": "End Time", "key": "end_time"},
     {"label": "Venue", "key": "venue"},
+    {"label": "Year of Study", "key": "year_of_study"},
 ]
 
 
@@ -758,7 +771,6 @@ def workshop_list(request):
         "columns": WS_COLS,
         "detail_fields": WS_FIELDS,
         "q": q,
-        NAV: "workshops",
         "page_title": "Workshop Allocations",
         "list_url": "/workshops/",
         "create_url": "/workshops/create/",
@@ -783,7 +795,6 @@ def workshop_detail(request, pk):
     ctx = {
         "item": item,
         "detail_fields": WS_FIELDS,
-        NAV: "workshops",
         "page_title": str(item),
         "edit_url": f"/workshops/{pk}/edit/",
         "delete_url": f"/workshops/{pk}/delete/",
@@ -799,9 +810,9 @@ def workshop_create(request):
         form = WorkshopAllocationForm(request.POST)
         if form.is_valid():
             form.save()
-            r = HttpResponse("")
-            r["HX-Trigger"] = "close-modal,refresh-table"
-            return r
+            return _write_response(
+                request, "close-modal,refresh-table", "workshop-list"
+            )
     else:
         form = WorkshopAllocationForm()
     return render(
@@ -821,9 +832,11 @@ def workshop_edit(request, pk):
         form = WorkshopAllocationForm(request.POST, instance=item)
         if form.is_valid():
             form.save()
-            r = HttpResponse("")
-            r["HX-Trigger"] = "close-modal,refresh-table,refresh-detail"
-            return r
+            return _write_response(
+                request,
+                "close-modal,refresh-table,refresh-detail",
+                "workshop-list",
+            )
     else:
         form = WorkshopAllocationForm(instance=item)
     return render(
@@ -841,9 +854,7 @@ def workshop_delete(request, pk):
     item = get_object_or_404(WorkshopAllocation, pk=pk)
     if request.method == "POST":
         item.delete()
-        r = HttpResponse("")
-        r["HX-Trigger"] = "close-modal,refresh-table"
-        return r
+        return _write_response(request, "close-modal,refresh-table", "workshop-list")
     return render(
         request,
         "core/delete.html",
@@ -887,7 +898,6 @@ def td_list(request):
         "columns": TD_COLS,
         "detail_fields": TD_FIELDS,
         "q": q,
-        NAV: "td",
         "page_title": "Technical Drawing Allocations",
         "list_url": "/td/",
         "create_url": "/td/create/",
@@ -912,7 +922,6 @@ def td_detail(request, pk):
     ctx = {
         "item": item,
         "detail_fields": TD_FIELDS,
-        NAV: "td",
         "page_title": str(item),
         "edit_url": f"/td/{pk}/edit/",
         "delete_url": f"/td/{pk}/delete/",
@@ -928,9 +937,9 @@ def td_create(request):
         form = TechnicalDrawingAllocationForm(request.POST)
         if form.is_valid():
             form.save()
-            r = HttpResponse("")
-            r["HX-Trigger"] = "close-modal,refresh-table"
-            return r
+            return _write_response(
+                request, "close-modal,refresh-table", "td-list"
+            )
     else:
         form = TechnicalDrawingAllocationForm()
     return render(
@@ -950,9 +959,11 @@ def td_edit(request, pk):
         form = TechnicalDrawingAllocationForm(request.POST, instance=item)
         if form.is_valid():
             form.save()
-            r = HttpResponse("")
-            r["HX-Trigger"] = "close-modal,refresh-table,refresh-detail"
-            return r
+            return _write_response(
+                request,
+                "close-modal,refresh-table,refresh-detail",
+                "td-list",
+            )
     else:
         form = TechnicalDrawingAllocationForm(instance=item)
     return render(
@@ -966,9 +977,7 @@ def td_delete(request, pk):
     item = get_object_or_404(TechnicalDrawingAllocation, pk=pk)
     if request.method == "POST":
         item.delete()
-        r = HttpResponse("")
-        r["HX-Trigger"] = "close-modal,refresh-table"
-        return r
+        return _write_response(request, "close-modal,refresh-table", "td-list")
     return render(
         request,
         "core/delete.html",
@@ -1000,7 +1009,6 @@ def course_list(request):
         "columns": PC_COLS,
         "detail_fields": PC_FIELDS,
         "q": q,
-        NAV: "courses",
         "page_title": "Programme Courses",
         "list_url": "/courses/",
         "create_url": "/courses/create/",
@@ -1023,7 +1031,6 @@ def course_detail(request, pk):
     ctx = {
         "item": item,
         "detail_fields": PC_FIELDS,
-        NAV: "courses",
         "page_title": str(item),
         "edit_url": f"/courses/{pk}/edit/",
         "delete_url": f"/courses/{pk}/delete/",
@@ -1039,9 +1046,9 @@ def course_create(request):
         form = ProgrammeCourseForm(request.POST)
         if form.is_valid():
             form.save()
-            r = HttpResponse("")
-            r["HX-Trigger"] = "close-modal,refresh-table"
-            return r
+            return _write_response(
+                request, "close-modal,refresh-table", "course-list"
+            )
     else:
         form = ProgrammeCourseForm()
     return render(
@@ -1061,9 +1068,11 @@ def course_edit(request, pk):
         form = ProgrammeCourseForm(request.POST, instance=item)
         if form.is_valid():
             form.save()
-            r = HttpResponse("")
-            r["HX-Trigger"] = "close-modal,refresh-table,refresh-detail"
-            return r
+            return _write_response(
+                request,
+                "close-modal,refresh-table,refresh-detail",
+                "course-list",
+            )
     else:
         form = ProgrammeCourseForm(instance=item)
     return render(
@@ -1081,9 +1090,7 @@ def course_delete(request, pk):
     item = get_object_or_404(ProgrammeCourse, pk=pk)
     if request.method == "POST":
         item.delete()
-        r = HttpResponse("")
-        r["HX-Trigger"] = "close-modal,refresh-table"
-        return r
+        return _write_response(request, "close-modal,refresh-table", "course-list")
     return render(
         request,
         "core/delete.html",
@@ -1128,7 +1135,16 @@ IMPORT_TYPES = {
     },
     "workshop-allocation": {
         "title": "Workshop Allocation",
-        "columns": "course_code, group_code, day, start_time, end_time, venue",
+        "columns": (
+            "Flat: course_code, group_code, day, start_time, end_time, venue — "
+            "or drop in the raw university Workshop Schedule workbook (matrix) directly"
+        ),
+        "hint": (
+            "Both formats supported automatically. The raw university workshop "
+            "workbook (GROUPS/POSITION/SCHEDULE/KEY layout) is detected and parsed "
+            "as-is; week ranges, workshop, position, day and Morning/Afternoon "
+            "period come from the workbook, with the semester read from the title."
+        ),
         "fn": import_workshop_allocation_from_excel,
     },
     "td-allocation": {
@@ -1141,7 +1157,6 @@ IMPORT_TYPES = {
 
 def import_hub(request):
     ctx = {
-        NAV: "imports",
         "page_title": "Import Data",
         "import_types": IMPORT_TYPES,
     }
@@ -1154,20 +1169,31 @@ def import_upload(request, import_type):
     info = IMPORT_TYPES[import_type]
     if request.method == "POST":
         form = FileUploadForm(request.POST, request.FILES)
+        result: ImportResult = ImportResult()
         if form.is_valid():
             uploaded = form.cleaned_data["file"]
             try:
-                result: ImportResult = info["fn"](uploaded.temporary_file_path())
+                if hasattr(uploaded, "temporary_file_path"):
+                    result = info["fn"](uploaded.temporary_file_path())
+                else:
+                    uploaded.seek(0)
+                    result = info["fn"](uploaded)
             except Exception as exc:
-                result = ImportResult()
                 result.errors.append(str(exc))
-            ctx = {
-                "result": result,
-                "import_type": import_type,
-                "import_title": info["title"],
-                "columns": info["columns"],
-            }
+        else:
+            result.errors.append("No file attached or invalid upload.")
+        ctx = {
+            "result": result,
+            "import_type": import_type,
+            "import_title": info["title"],
+            "columns": info["columns"],
+            "hint": info.get("hint", ""),
+            "form": form,
+            "page_title": f"Import {info['title']}",
+        }
+        if _htmx(request):
             return render(request, "core/import_result.html", ctx)
+        return render(request, "core/import_upload.html", ctx)
     form = FileUploadForm()
     return render(
         request,
@@ -1177,7 +1203,7 @@ def import_upload(request, import_type):
             "import_type": import_type,
             "import_title": info["title"],
             "columns": info["columns"],
-            NAV: "imports",
+            "hint": info.get("hint", ""),
             "page_title": f"Import {info['title']}",
         },
     )

@@ -9,7 +9,10 @@ class Command(BaseCommand):
     help = (
         "Import the master timetable into Session records.\n"
         "Expected columns: course_code, activity_type, day, start_time, end_time\n"
-        "Optional columns: venue, group / groups / group_code"
+        "Optional columns: venue, group / groups / group_code\n"
+        "A reconciliation report is always produced first: missing reference "
+        "data is reported instead of guessed at, and 'ALL' group rows are "
+        "expanded through the ProgrammeCourse mapping."
     )
 
     def add_arguments(self, parser):
@@ -20,11 +23,20 @@ class Command(BaseCommand):
             default=1,
             help="PK of the Semester record (default: 1)",
         )
+        parser.add_argument(
+            "--dry-run",
+            action="store_true",
+            help="Reconcile and report without writing anything to the database",
+        )
 
     def handle(self, *args, **options):
         result = import_master_timetable_from_excel(
-            options["file"], semester_id=options["semester"]
+            options["file"],
+            semester_id=options["semester"],
+            dry_run=options["dry_run"],
         )
+        if options["dry_run"]:
+            self.stdout.write("DRY RUN — no records were written.\n")
         self.stdout.write(result.summary())
-        if result.errors:
+        if result.errors or result.conflicts:
             sys.exit(1)

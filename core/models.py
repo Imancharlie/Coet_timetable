@@ -19,6 +19,11 @@ class Day(models.TextChoices):
     SUNDAY = "SUNDAY", "Sunday"
 
 
+class TimePeriod(models.TextChoices):
+    MORNING = "MORNING", "Morning"
+    AFTERNOON = "AFTERNOON", "Afternoon"
+
+
 class Semester(models.Model):
     academic_year = models.CharField(max_length=20)
     semester = models.PositiveSmallIntegerField()
@@ -135,17 +140,28 @@ class WorkshopAllocation(models.Model):
     course_code = models.CharField(max_length=20)
     group_code = models.CharField(max_length=20)
     day = models.CharField(max_length=10, choices=Day.choices)
-    start_time = models.TimeField()
-    end_time = models.TimeField()
-    venue = models.CharField(max_length=50)
+    start_time = models.TimeField(null=True, blank=True)
+    end_time = models.TimeField(null=True, blank=True)
+    venue = models.CharField(max_length=50, blank=True)
+    workshop = models.CharField(max_length=50, blank=True)
+    time_period = models.CharField(
+        max_length=10, choices=TimePeriod.choices, blank=True
+    )
+    position = models.PositiveSmallIntegerField(null=True, blank=True)
+    schedule_section = models.CharField(max_length=20, blank=True)
+    week_start = models.PositiveSmallIntegerField(null=True, blank=True)
+    week_end = models.PositiveSmallIntegerField(null=True, blank=True)
+    year_of_study = models.PositiveSmallIntegerField(null=True, blank=True)
 
     class Meta:
         ordering = ["semester", "day", "start_time"]
 
     def __str__(self):
+        start = f"{self.start_time:%H:%M}" if self.start_time else "-"
+        end = f"{self.end_time:%H:%M}" if self.end_time else "-"
         return (
             f"{self.course_code} {self.get_day_display()} "
-            f"{self.start_time:%H:%M}-{self.end_time:%H:%M} {self.venue}"
+            f"{start}-{end} {self.venue}"
         )
 
 

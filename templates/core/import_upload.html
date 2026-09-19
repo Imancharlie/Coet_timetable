@@ -16,10 +16,14 @@
             <div class="bg-gray-50 border border-gray-200 rounded-lg p-4 mb-6">
                 <p class="text-sm text-gray-600 font-medium mb-2">Required Excel columns:</p>
                 <code class="text-xs bg-white border border-gray-200 rounded px-3 py-1.5 text-gray-700 block">{{ columns }}</code>
+                {% if hint %}
+                <p class="text-xs text-gray-500 mt-2">{{ hint }}</p>
+                {% endif %}
                 <p class="text-xs text-gray-400 mt-2">File must be .xlsx or .xls format. The first row should be headers. Column names are matched case-insensitively.</p>
             </div>
 
             <form method="post" enctype="multipart/form-data"
+                  action="{% url 'import-upload' import_type %}"
                   hx-post="{% url 'import-upload' import_type %}"
                   hx-target="#upload-result"
                   hx-swap="innerHTML"
@@ -52,7 +56,9 @@
                     </a>
                 </div>
             </form>
-            <div id="upload-result"></div>
+            <div id="upload-result">
+                {% if result %}{% include "core/import_result.html" %}{% endif %}
+            </div>
         </div>
     </div>
 </div>

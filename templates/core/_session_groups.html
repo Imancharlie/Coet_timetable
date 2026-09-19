@@ -26,7 +26,8 @@
         <p class="text-sm text-gray-400 mb-4">No groups assigned to this session yet.</p>
         {% endif %}
 
-        <form hx-post="/sessions/{{ session_pk }}/add-group/"
+        <form method="post" action="/sessions/{{ session_pk }}/add-group/"
+              hx-post="/sessions/{{ session_pk }}/add-group/"
               hx-target="#slide-content"
               hx-swap="innerHTML"
               class="flex flex-col sm:flex-row gap-2">

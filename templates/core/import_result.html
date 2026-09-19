@@ -6,7 +6,179 @@
         {% if result.errors %}border-amber-400 bg-amber-50
         {% else %}border-emerald-400 bg-emerald-50{% endif %}">
         <h3 class="font-semibold text-gray-800">
-            {% if result.errors %}
+{% if result.matched_courses %}
+    <div class="bg-white rounded-xl shadow-sm border border-emerald-200 overflow-hidden">
+        <div class="px-4 py-3 border-b border-emerald-100 bg-emerald-50">
+            <h4 class="text-sm font-semibold text-emerald-700">Reconciled ({{ result.matched_courses|length }})</h4>
+        </div>
+        <div class="px-4 py-2 flex flex-wrap gap-2">
+            {% for code in result.matched_courses %}
+            <span class="inline-flex items-center px-2.5 py-1 bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-full text-xs">{{ code }}</span>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+
+    {% if result.missing_courses %}
+    <div class="bg-white rounded-xl shadow-sm border border-red-200 overflow-hidden">
+        <div class="px-4 py-3 border-b border-red-100 bg-red-50">
+            <h4 class="text-sm font-semibold text-red-700">Missing Courses ({{ result.missing_courses|length }})</h4>
+        </div>
+        <ul class="divide-y divide-red-100">
+            {% for code in result.missing_courses %}
+            <li class="px-4 py-2 text-sm text-red-700 bg-red-50/30">{{ code }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+
+    {% if result.missing_groups %}
+    <div class="bg-white rounded-xl shadow-sm border border-red-200 overflow-hidden">
+        <div class="px-4 py-3 border-b border-red-100 bg-red-50">
+            <h4 class="text-sm font-semibold text-red-700">Missing Groups ({{ result.missing_groups|length }})</h4>
+        </div>
+        <ul class="divide-y divide-red-100">
+            {% for code in result.missing_groups %}
+            <li class="px-4 py-2 text-sm text-red-700 bg-red-50/30">{{ code }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+
+    {% if result.missing_venues %}
+    <div class="bg-white rounded-xl shadow-sm border border-amber-200 overflow-hidden">
+        <div class="px-4 py-3 border-b border-amber-100 bg-amber-50">
+            <h4 class="text-sm font-semibold text-amber-700">Venues created with capacity 0 ({{ result.missing_venues|length }})</h4>
+        </div>
+        <ul class="divide-y divide-amber-100">
+            {% for name in result.missing_venues %}
+            <li class="px-4 py-2 text-sm text-amber-700 bg-amber-50/30">{{ name }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+
+    {% if result.all_rows %}
+    <div class="bg-white rounded-xl shadow-sm border border-blue-200 overflow-hidden">
+        <div class="px-4 py-3 border-b border-blue-100 bg-blue-50">
+            <h4 class="text-sm font-semibold text-blue-700">'ALL' group expansions ({{ result.all_rows|length }})</h4>
+        </div>
+        <ul class="divide-y divide-blue-100 max-h-64 overflow-y-auto">
+            {% for entry in result.all_rows %}
+            <li class="px-4 py-2 text-sm text-blue-700 bg-blue-50/30">{{ entry }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+
+    {% if result.conflicts %}
+    <div class="bg-white rounded-xl shadow-sm border border-red-200 overflow-hidden">
+        <div class="px-4 py-3 border-b border-red-100 bg-red-50">
+            <h4 class="text-sm font-semibold text-red-700">Conflicts ({{ result.conflicts|length }})</h4>
+        </div>
+        <ul class="divide-y divide-red-100 max-h-64 overflow-y-auto">
+            {% for conflict in result.conflicts %}
+            <li class="px-4 py-2 text-sm text-red-700 bg-red-50/30">{{ conflict }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+
+    {% if result.detected_semester or result.format %}
+    <div class="bg-white rounded-xl shadow-sm border border-blue-200 overflow-hidden">
+        <div class="px-4 py-3 border-b border-blue-100 bg-blue-50">
+            <h4 class="text-sm font-semibold text-blue-700">Source</h4>
+        </div>
+        <ul class="divide-y divide-blue-100">
+            {% if result.format %}
+            <li class="px-4 py-2 text-sm text-blue-700 bg-blue-50/30">Format: {{ result.format }}</li>
+            {% endif %}
+            {% if result.detected_semester %}
+            <li class="px-4 py-2 text-sm text-blue-700 bg-blue-50/30">Detected semester: {{ result.detected_semester }}</li>
+            {% endif %}
+        </ul>
+    </div>
+    {% endif %}
+
+    {% if result.missing_references %}
+    <div class="bg-white rounded-xl shadow-sm border border-red-200 overflow-hidden">
+        <div class="px-4 py-3 border-b border-red-100 bg-red-50">
+            <h4 class="text-sm font-semibold text-red-700">Missing References ({{ result.missing_references|length }})</h4>
+        </div>
+        <ul class="divide-y divide-red-100 max-h-64 overflow-y-auto">
+            {% for ref in result.missing_references %}
+            <li class="px-4 py-2 text-sm text-red-700 bg-red-50/30">{{ ref }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+
+    {% if result.invalid_positions %}
+    <div class="bg-white rounded-xl shadow-sm border border-amber-200 overflow-hidden">
+        <div class="px-4 py-3 border-b border-amber-100 bg-amber-50">
+            <h4 class="text-sm font-semibold text-amber-700">Invalid Positions ({{ result.invalid_positions|length }})</h4>
+        </div>
+        <ul class="divide-y divide-amber-100 max-h-64 overflow-y-auto">
+            {% for entry in result.invalid_positions %}
+            <li class="px-4 py-2 text-sm text-amber-700 bg-amber-50/30">{{ entry }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+
+    {% if result.unknown_keys %}
+    <div class="bg-white rounded-xl shadow-sm border border-amber-200 overflow-hidden">
+        <div class="px-4 py-3 border-b border-amber-100 bg-amber-50">
+            <h4 class="text-sm font-semibold text-amber-700">Unknown KEY Positions ({{ result.unknown_keys|length }})</h4>
+        </div>
+        <ul class="divide-y divide-amber-100 max-h-64 overflow-y-auto">
+            {% for entry in result.unknown_keys %}
+            <li class="px-4 py-2 text-sm text-amber-700 bg-amber-50/30">{{ entry }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+
+    {% if result.ambiguous %}
+    <div class="bg-white rounded-xl shadow-sm border border-amber-200 overflow-hidden">
+        <div class="px-4 py-3 border-b border-amber-100 bg-amber-50">
+            <h4 class="text-sm font-semibold text-amber-700">Ambiguous ({{ result.ambiguous|length }})</h4>
+        </div>
+        <ul class="divide-y divide-amber-100 max-h-64 overflow-y-auto">
+            {% for entry in result.ambiguous %}
+            <li class="px-4 py-2 text-sm text-amber-700 bg-amber-50/30">{{ entry }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+
+    {% if result.duplicates %}
+    <div class="bg-white rounded-xl shadow-sm border border-amber-200 overflow-hidden">
+        <div class="px-4 py-3 border-b border-amber-100 bg-amber-50">
+            <h4 class="text-sm font-semibold text-amber-700">Duplicate Keys ({{ result.duplicates|length }})</h4>
+        </div>
+        <ul class="divide-y divide-amber-100 max-h-64 overflow-y-auto">
+            {% for entry in result.duplicates %}
+            <li class="px-4 py-2 text-sm text-amber-700 bg-amber-50/30">{{ entry }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+
+    {% if result.unrecognized_cells %}
+    <div class="bg-white rounded-xl shadow-sm border border-amber-200 overflow-hidden">
+        <div class="px-4 py-3 border-b border-amber-100 bg-amber-50">
+            <h4 class="text-sm font-semibold text-amber-700">Unrecognized Cells ({{ result.unrecognized_cells|length }})</h4>
+        </div>
+        <ul class="divide-y divide-amber-100 max-h-64 overflow-y-auto">
+            {% for cell in result.unrecognized_cells %}
+            <li class="px-4 py-2 text-sm text-amber-700 bg-amber-50/30">{{ cell }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+
+    {% if result.errors %}
                 Import completed with {{ result.errors|length }} error{{ result.errors|length|pluralize }}
             {% else %}
                 Import successful

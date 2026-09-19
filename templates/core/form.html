@@ -1,6 +1,7 @@
 {% load core_tags %}
 
-<form hx-post="{{ action }}" hx-target="#modal-content" hx-swap="innerHTML"
+<form method="post" action="{{ action }}"
+      hx-post="{{ action }}" hx-target="#modal-content" hx-swap="innerHTML"
       x-data="{ submitting: false }" @submit="submitting = true">
     {% csrf_token %}
     <div class="space-y-5">
