@@ -1,0 +1,25 @@
+{% extends "core/list.html" %}
+{% load core_tags %}
+
+{% block list_actions %}
+{% if has_issues %}
+<div class="flex flex-col md:flex-row md:items-center gap-3 mb-4 rounded-xl border border-amber-300 bg-amber-50 p-4">
+    <div class="flex items-center gap-3 flex-1">
+        <span class="text-2xl">&#9888;&#65039;</span>
+        <div>
+            <p class="text-sm font-semibold text-amber-800">
+                {{ recycle_count }} venue{{ recycle_count|pluralize }} came in with casing, spacing or duplicate problems
+            </p>
+            <p class="text-xs text-amber-700 mt-0.5">
+                Review the highlighted rows and recycle the fixes to clean the database.
+            </p>
+        </div>
+    </div>
+    <a href="{{ recycle_url }}"
+       class="inline-flex items-center gap-2 px-4 py-2 bg-amber-500 hover:bg-amber-600 text-white text-sm font-medium rounded-lg transition shadow-sm">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h5M20 4v5h-5M4 20v-5h5M20 20v-5h-5"/></svg>
+        Recycle &amp; Clean ({{ recycle_count }})
+    </a>
+</div>
+{% endif %}
+{% endblock %}

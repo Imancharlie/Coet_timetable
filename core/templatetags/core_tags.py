@@ -1,5 +1,7 @@
 from django import template
 
+from core.models import ActivityLog
+
 register = template.Library()
 
 
@@ -20,6 +22,15 @@ def time_short(value):
     return value
 
 
+@register.filter
+def get_item(mapping, key):
+    """Dictionary lookup by key; returns None when missing."""
+    try:
+        return mapping.get(key)
+    except AttributeError:
+        return None
+
+
 _NAV_SECTIONS = {
     "programme": "programmes",
     "group": "groups",
@@ -30,6 +41,8 @@ _NAV_SECTIONS = {
     "td": "td",
     "course": "courses",
     "import": "imports",
+    "export": "exports",
+    "activity": "activity",
 }
 
 
@@ -54,3 +67,25 @@ def active_cls(nav_section_value, section):
     if nav_section_value == section:
         return "bg-slate-800 text-white"
     return "hover:bg-slate-800/60 text-slate-300"
+
+
+@register.simple_tag
+def activity_logs(limit=10):
+    """Latest activity log entries for the sidebar."""
+    try:
+        return list(ActivityLog.objects.all()[: int(limit)])
+    except (TypeError, ValueError):
+        return list(ActivityLog.objects.all()[:10])
+
+
+@register.filter
+def log_badge_cls(action):
+    """Tailwind badge colour for a log action."""
+    return {
+        "CREATE": "bg-emerald-500",
+        "UPDATE": "bg-blue-500",
+        "DELETE": "bg-rose-500",
+        "IMPORT": "bg-indigo-500",
+        "ASSIGN": "bg-purple-500",
+        "REMOVE": "bg-amber-500",
+    }.get(action, "bg-slate-500")

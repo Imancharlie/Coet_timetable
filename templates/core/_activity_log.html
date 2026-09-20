@@ -1,0 +1,42 @@
+{% load core_tags %}
+
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+    <div class="divide-y divide-gray-100">
+        {% for log in items %}
+        <a href="{% url 'dashboard' %}?log={{ log.pk }}"
+           class="flex items-start gap-3 px-5 py-4 hover:bg-blue-50/50 transition">
+            <span class="mt-0.5 shrink-0 inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold text-white {{ log.action|log_badge_cls }}">
+                {{ log.get_action_display }}
+            </span>
+            <span class="min-w-0 flex-1">
+                <span class="block text-sm text-gray-800">{{ log.message }}</span>
+                <span class="block text-xs text-gray-400 mt-0.5">
+                    {{ log.created_at|date:"d M Y, H:i" }}
+                    {% if log.resource %}&middot; {{ log.resource }}{% endif %}
+                </span>
+            </span>
+            <svg class="w-4 h-4 text-gray-300 mt-1 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+        </a>
+        {% empty %}
+        <div class="px-5 py-16 text-center text-gray-400">
+            <svg class="w-10 h-10 mx-auto mb-3 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+            <p class="text-sm">No activity events found</p>
+            <p class="text-xs mt-1">Changes you make will appear here</p>
+        </div>
+        {% endfor %}
+    </div>
+
+    {% if pages > 1 %}
+    <div class="flex items-center justify-between px-5 py-3 border-t border-gray-200">
+        <span class="text-xs text-gray-500">Page {{ page }} of {{ pages }}</span>
+        <div class="flex gap-1">
+            {% if page > 1 %}
+            <a href="?page={{ page|add:"-1" }}&q={{ q }}" class="px-3 py-1 text-xs font-medium bg-gray-100 text-gray-600 rounded-md hover:bg-gray-200">Prev</a>
+            {% endif %}
+            {% if page < pages %}
+            <a href="?page={{ page|add:"1" }}&q={{ q }}" class="px-3 py-1 text-xs font-medium bg-gray-100 text-gray-600 rounded-md hover:bg-gray-200">Next</a>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
+</div>

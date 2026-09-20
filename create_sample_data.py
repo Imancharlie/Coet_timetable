@@ -38,7 +38,16 @@ pd.DataFrame(
 # --- Programme Courses ---
 pd.DataFrame(
     {"programme_code": ["CE", "CE", "CE", "EE", "EE", "ME", "ME", "IE"],
-     "course_code": ["MT161", "TG201", "ST101", "MT161", "EE101", "MT161", "ME101", "IE101"]}
+     "course_code": ["MT161", "TG201", "ST101", "MT161", "EE101", "MT161", "ME101", "IE101"],
+     "course_name": ["Mathematics 1",
+                     "Technical Drawing 1",
+                     "Statistics 1",
+                     "Mathematics 1",
+                     "Electrical Engineering 1",
+                     "Mathematics 1",
+                     "Mechanical Engineering 1",
+                     "Industrial Engineering 1"],
+     "semester": [1, 1, 2, 1, 1, 1, 1, 1]}
 ).to_excel(OUT / "programme_courses.xlsx", index=False)
 
 # --- Venues ---

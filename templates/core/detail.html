@@ -11,6 +11,13 @@
         <div class="px-6 py-4 border-b border-gray-200 flex flex-wrap items-center justify-between gap-3">
             <h2 class="text-lg font-semibold text-gray-800">{{ item }}</h2>
             <div class="flex gap-2">
+                {% if export_url %}
+                <a href="{{ export_url }}"
+                   class="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-green-700 bg-green-50 hover:bg-green-100 rounded-lg transition">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                    {{ export_label|default:"Export PDF" }}
+                </a>
+                {% endif %}
                 <a href="{{ edit_url }}" onclick="event.preventDefault(); openEdit(this.getAttribute('href'))"
                    class="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-lg transition">
                     Edit

@@ -1,0 +1,16 @@
+{% extends "core/list.html" %}
+
+{% block list_actions %}
+<div class="mb-4">
+    <button
+        hx-post="{% url 'session-assign-lecture-groups' %}"
+        hx-target="#assign-result"
+        hx-swap="innerHTML"
+        hx-confirm="Attach all Student Groups of the programme(s) that study each lecture course to those lecture sessions?"
+        class="inline-flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white text-sm font-medium rounded-lg hover:bg-emerald-700 transition">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.36-1.86M9 20H4v-2a3 3 0 015.36-1.86M16 7a3 3 0 11-6 0 3 3 0 016 0zm1 7a3 3 0 11-6 0 3 3 0 016 0zM6 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+        Assign Lecture Groups
+    </button>
+    <div id="assign-result" class="mt-3"></div>
+</div>
+{% endblock %}

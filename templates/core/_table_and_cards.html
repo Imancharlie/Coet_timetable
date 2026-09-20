@@ -9,12 +9,15 @@
                     {% for col in columns %}
                     <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">{{ col.label }}</th>
                     {% endfor %}
+                    {% if row_issues %}
+                    <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">Quality</th>
+                    {% endif %}
                     <th class="px-4 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Actions</th>
                 </tr>
             </thead>
             <tbody class="divide-y divide-gray-100">
                 {% for item in items %}
-                <tr class="hover:bg-blue-50/50 cursor-pointer transition-colors group"
+                <tr class="hover:bg-blue-50/50 cursor-pointer transition-colors group {% if row_issues and row_issues|get_item:item.pk %}bg-amber-50 hover:bg-amber-100/60{% endif %}"
                     hx-get="{{ item.pk }}/"
                     hx-target="#slide-content"
                     hx-swap="innerHTML"
@@ -40,6 +43,18 @@
                         {% endif %}
                     </td>
                     {% endfor %}
+                    {% if row_issues %}
+                    <td class="px-4 py-3 whitespace-nowrap">
+                        {% with issue=row_issues|get_item:item.pk %}
+                        {% if issue %}
+                        <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 text-xs font-medium"
+                              title="{{ issue.summary }}{% for other in issue.duplicate_of %}&#10;Matches: {{ other }}{% endfor %}">
+                            {{ issue.summary }}
+                        </span>
+                        {% endif %}
+                        {% endwith %}
+                    </td>
+                    {% endif %}
                     <td class="px-4 py-3 text-right whitespace-nowrap" @click.stop>
                         <div class="inline-flex items-center gap-1 opacity-0 group-hover:opacity-100 transition">
                             <a href="{{ item.pk }}/edit/"
@@ -88,7 +103,8 @@
 <!-- Mobile cards -->
 <div class="lg:hidden space-y-3">
     {% for item in items %}
-    <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden"
+    {% with issue=row_issues|get_item:item.pk %}
+    <div class="rounded-xl shadow-sm border overflow-hidden {% if issue %}bg-amber-50 border-amber-300{% else %}bg-white border-gray-200{% endif %}"
          hx-get="{{ item.pk }}/"
          hx-target="#slide-content"
          hx-swap="innerHTML"
@@ -103,6 +119,14 @@
                 <span class="text-xs text-gray-500">{{ item|get_attr:columns.1.key }}</span>
                 {% endif %}
             </div>
+            {% if issue %}
+            <div class="mb-2">
+                <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 text-xs font-medium"
+                      title="{{ issue.summary }}{% for other in issue.duplicate_of %}&#10;Matches: {{ other }}{% endfor %}">
+                    {{ issue.summary }}
+                </span>
+            </div>
+            {% endif %}
             <!-- Detail rows -->
             <div class="space-y-1">
                 {% for col in columns %}
@@ -141,6 +165,7 @@
             </div>
         </div>
     </div>
+    {% endwith %}
     {% empty %}
     <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-8 text-center text-gray-400">
         <p class="text-sm">No {{ page_title|default:"records"|lower }} found</p>

@@ -3,6 +3,25 @@
 
 {% block content %}
 <div class="max-w-7xl mx-auto">
+    {% if selected_log %}
+    <div class="mb-8 bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+        <div class="flex items-center justify-between gap-3 px-5 py-3 border-b border-gray-200 bg-gray-50">
+            <h2 class="text-sm font-semibold text-gray-800 flex items-center gap-2 min-w-0">
+                <span class="w-2 h-2 rounded-full {{ selected_log.action|log_badge_cls }} shrink-0"></span>
+                <span class="truncate">{{ selected_log.get_action_display }} {{ selected_log.resource }}</span>
+            </h2>
+            <a href="{% url 'dashboard' %}"
+               class="shrink-0 inline-flex items-center gap-1.5 text-xs font-medium text-gray-600 hover:text-gray-900 border border-gray-300 rounded-lg px-2.5 py-1.5 hover:bg-gray-100 transition">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                Cancel
+            </a>
+        </div>
+        <div class="px-5 py-4">
+            <p class="text-sm text-gray-800">{{ selected_log.message }}</p>
+            <p class="text-xs text-gray-400 mt-2">{{ selected_log.created_at|date:"d M Y, H:i" }}</p>
+        </div>
+    </div>
+    {% endif %}
     <!-- Stats grid -->
     <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4 mb-8">
         <a href="{% url 'programme-list' %}" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 hover:shadow-md hover:border-blue-200 transition">

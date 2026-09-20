@@ -4,7 +4,7 @@
 {% block content %}
 <div class="max-w-7xl mx-auto">
     <div class="mb-6">
-        <p class="text-sm text-gray-500">Import data from Excel files. Each importer validates the file structure, reports errors, and preserves the original data. Reference data (programmes, groups, venues, semesters) must be imported before timetable files.</p>
+        <p class="text-sm text-gray-500">Import data from Excel files. Each importer validates the file structure, reports errors, and preserves the original data. Headers are read flexibly (aliases accepted) and data is reshaped into the system's format automatically. Reference data (programmes, groups, venues) should be imported before timetable files.</p>
     </div>
 
     <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
@@ -33,7 +33,6 @@
             <div class="text-sm text-blue-800">
                 <p class="font-medium mb-1">Import order recommendation</p>
                 <ol class="list-decimal list-inside text-blue-700 space-y-1">
-                    <li>Semesters</li>
                     <li>Programmes</li>
                     <li>Student Groups</li>
                     <li>Programme Courses</li>
@@ -42,7 +41,7 @@
                     <li>Workshop Allocation</li>
                     <li>TD Allocation</li>
                 </ol>
-                <p class="mt-2 text-blue-600">The workshop & TD allocations preserve the exact venue text from the file (e.g. TW101) with no foreign key, as specified in Phase 1. The Workshop Allocation importer also accepts the raw university Workshop Schedule workbook directly — it auto-detects the matrix layout and extracts week ranges, workshop, position and Morning/Afternoon periods from the workbook.</p>
+                <p class="mt-2 text-blue-600">The workshop &amp; TD allocations preserve the exact venue text from the file (e.g. TW101) with no foreign key, as specified in Phase 1. The Workshop Allocation importer also accepts the raw university Workshop Schedule workbook directly — it auto-detects the matrix layout and extracts week ranges, workshop, position and Morning/Afternoon periods from the workbook. Missing semesters and programmes are created automatically where the system can derive them, and the report panel lists whatever was created so you always know what happened.</p>
             </div>
         </div>
     </div>

@@ -10,6 +10,11 @@ urlpatterns = [
     path("programmes/<int:pk>/", views.programme_detail, name="programme-detail"),
     path("programmes/<int:pk>/edit/", views.programme_edit, name="programme-edit"),
     path("programmes/<int:pk>/delete/", views.programme_delete, name="programme-delete"),
+    path(
+        "programmes/<int:pk>/timetable.pdf/",
+        views.programme_timetable_pdf,
+        name="programme-timetable-pdf",
+    ),
     # Student Groups
     path("groups/", views.studentgroup_list, name="group-list"),
     path("groups/create/", views.studentgroup_create, name="group-create"),
@@ -19,6 +24,7 @@ urlpatterns = [
     # Venues
     path("venues/", views.venue_list, name="venue-list"),
     path("venues/create/", views.venue_create, name="venue-create"),
+    path("venues/recycle/", views.venue_recycle, name="venue-recycle"),
     path("venues/<int:pk>/", views.venue_detail, name="venue-detail"),
     path("venues/<int:pk>/edit/", views.venue_edit, name="venue-edit"),
     path("venues/<int:pk>/delete/", views.venue_delete, name="venue-delete"),
@@ -30,6 +36,11 @@ urlpatterns = [
     path("semesters/<int:pk>/delete/", views.semester_delete, name="semester-delete"),
     # Sessions (Master Timetable)
     path("sessions/", views.session_list, name="session-list"),
+    path(
+        "sessions/assign-lecture-groups/",
+        views.session_assign_lecture_groups,
+        name="session-assign-lecture-groups",
+    ),
     path("sessions/create/", views.session_create, name="session-create"),
     path("sessions/<int:pk>/", views.session_detail, name="session-detail"),
     path("sessions/<int:pk>/edit/", views.session_edit, name="session-edit"),
@@ -43,6 +54,16 @@ urlpatterns = [
         "sessions/<int:pk>/remove-group/<int:group_pk>/",
         views.session_remove_group,
         name="session-remove-group",
+    ),
+    path(
+        "sessions/<int:pk>/remove-programme-groups/<int:programme_pk>/",
+        views.session_remove_programme_groups,
+        name="session-remove-programme-groups",
+    ),
+    path(
+        "sessions/<int:pk>/clear-groups/",
+        views.session_clear_groups,
+        name="session-clear-groups",
     ),
     # Workshop Allocations
     path("workshops/", views.workshop_list, name="workshop-list"),
@@ -69,4 +90,13 @@ urlpatterns = [
     # Imports
     path("import/", views.import_hub, name="import-hub"),
     path("import/<slug:import_type>/", views.import_upload, name="import-upload"),
+    # Exports
+    path("export/", views.export_timetable, name="export-timetable"),
+    path(
+        "export/programmes/<int:pk>/timetable.pdf/",
+        views.programme_timetable_pdf,
+        name="programme-timetable-export",
+    ),
+    # Activity Log
+    path("activity/", views.activity_list, name="activity-list"),
 ]

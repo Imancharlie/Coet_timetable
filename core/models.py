@@ -66,13 +66,15 @@ class ProgrammeCourse(models.Model):
         Programme, on_delete=models.CASCADE, related_name="programme_courses"
     )
     course_code = models.CharField(max_length=20)
+    course_name = models.CharField(max_length=200)
+    semester = models.PositiveSmallIntegerField()
 
     class Meta:
-        ordering = ["programme__code", "course_code"]
+        ordering = ["programme__code", "semester", "course_code"]
         unique_together = ["programme", "course_code"]
 
     def __str__(self):
-        return f"{self.programme.code} - {self.course_code}"
+        return f"{self.programme.code} - {self.course_code} {self.course_name}"
 
 
 class Venue(models.Model):
@@ -184,3 +186,30 @@ class TechnicalDrawingAllocation(models.Model):
             f"{self.course_code} {self.get_day_display()} "
             f"{self.start_time:%H:%M}-{self.end_time:%H:%M} {self.venue}"
         )
+
+
+class LogAction(models.TextChoices):
+    CREATE = "CREATE", "Created"
+    UPDATE = "UPDATE", "Updated"
+    DELETE = "DELETE", "Deleted"
+    IMPORT = "IMPORT", "Imported"
+    ASSIGN = "ASSIGN", "Assigned"
+    REMOVE = "REMOVE", "Removed"
+
+
+class ActivityLog(models.Model):
+    """Entry in the activity log (what happened / changes the user made)."""
+
+    action = models.CharField(max_length=20, choices=LogAction.choices)
+    resource = models.CharField(max_length=50, blank=True)
+    target = models.CharField(max_length=300, blank=True)
+    message = models.CharField(max_length=500)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Activity log"
+        verbose_name_plural = "Activity logs"
+
+    def __str__(self):
+        return self.message

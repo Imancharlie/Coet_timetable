@@ -1,8 +1,10 @@
 from django.contrib import admin
 
 from .models import (
+    ActivityLog,
     ActivityType,
     Day,
+    LogAction,
     Programme,
     ProgrammeCourse,
     Semester,
@@ -47,10 +49,10 @@ class StudentGroupAdmin(admin.ModelAdmin):
 
 @admin.register(ProgrammeCourse)
 class ProgrammeCourseAdmin(admin.ModelAdmin):
-    list_display = ("id", "programme", "course_code")
+    list_display = ("id", "programme", "course_code", "course_name", "semester")
     list_display_links = list_display
-    list_filter = ("programme",)
-    search_fields = ("course_code", "programme__code")
+    list_filter = ("programme", "semester")
+    search_fields = ("course_code", "course_name", "programme__code")
     raw_id_fields = ("programme",)
 
 
@@ -126,3 +128,12 @@ class TechnicalDrawingAllocationAdmin(admin.ModelAdmin):
     list_display_links = list_display
     list_filter = ("semester", "day")
     search_fields = ("course_code", "group_code")
+
+
+@admin.register(ActivityLog)
+class ActivityLogAdmin(admin.ModelAdmin):
+    list_display = ("id", "created_at", "action", "resource", "target", "message")
+    list_display_links = ("id", "message")
+    list_filter = ("action", "resource")
+    search_fields = ("resource", "target", "message")
+    readonly_fields = ("action", "resource", "target", "message", "created_at")

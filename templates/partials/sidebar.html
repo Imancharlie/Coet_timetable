@@ -67,6 +67,33 @@
             <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
             Import Data
         </a>
+
+        <div class="pt-3 pb-1 px-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Export</div>
+        <a href="{% url 'export-timetable' %}"
+           class="flex items-center gap-3 px-3 py-2.5 rounded-lg transition {{ nav|active_cls:'exports' }}">
+            <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+            Export Timetable
+        </a>
+
+        <div class="pt-3 pb-1 px-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Activity Log</div>
+        <a href="{% url 'activity-list' %}"
+           class="flex items-center gap-3 px-3 py-2.5 rounded-lg transition {{ nav|active_cls:'activity' }}">
+            <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+            Activity Log
+        </a>
+        {% activity_logs 6 as logs %}
+        {% for log in logs %}
+        <a href="{% url 'dashboard' %}?log={{ log.pk }}"
+           class="flex items-start gap-2 px-2 py-1.5 rounded-lg transition hover:bg-slate-800/60 group">
+            <span class="mt-1.5 w-1.5 h-1.5 rounded-full {{ log.action|log_badge_cls }} shrink-0"></span>
+            <span class="min-w-0 flex-1 leading-snug">
+                <span class="block text-xs text-slate-300 group-hover:text-white truncate">{{ log.message|truncatechars:44 }}</span>
+                <span class="block text-[11px] text-slate-500">{{ log.created_at|timesince }} ago</span>
+            </span>
+        </a>
+        {% empty %}
+        <p class="px-3 py-2 text-xs text-slate-500">No activity yet.</p>
+        {% endfor %}
     </nav>
     <!-- Version -->
     <div class="px-5 py-3 border-t border-slate-700 text-xs text-slate-500">v0.1 — Phase 1</div>

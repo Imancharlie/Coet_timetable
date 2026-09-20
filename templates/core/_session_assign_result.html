@@ -1,0 +1,18 @@
+{% if total_sessions == 0 %}
+<div class="bg-blue-50 border border-blue-200 rounded-lg p-4 text-sm text-blue-800">
+    <div class="font-semibold mb-1">No lecture sessions found</div>
+    <div>Add lecture sessions to the master timetable first, then assign groups.</div>
+</div>
+{% else %}
+<div class="bg-emerald-50 border border-emerald-200 rounded-lg p-4 text-sm text-emerald-800">
+    <div class="font-semibold mb-1">Lecture group assignment complete</div>
+    <ul class="space-y-0.5">
+        <li>Lecture sessions processed: {{ processed }} of {{ total_sessions }}</li>
+        <li>Group links created: {{ created_links }}</li>
+        <li>Already linked: {{ already_linked }}</li>
+        {% if skipped_courses %}
+        <li class="text-amber-700 mt-1">No programme mapping found for: {{ skipped_courses|join:", " }} — groups not assigned.</li>
+        {% endif %}
+    </ul>
+</div>
+{% endif %}

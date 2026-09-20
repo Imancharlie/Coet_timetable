@@ -58,6 +58,19 @@
     </div>
     {% endif %}
 
+    {% if result.programmes_created %}
+    <div class="bg-white rounded-xl shadow-sm border border-blue-200 overflow-hidden">
+        <div class="px-4 py-3 border-b border-blue-100 bg-blue-50">
+            <h4 class="text-sm font-semibold text-blue-700">Programmes created automatically ({{ result.programmes_created|length }})</h4>
+        </div>
+        <ul class="divide-y divide-blue-100 max-h-64 overflow-y-auto">
+            {% for entry in result.programmes_created %}
+            <li class="px-4 py-2 text-sm text-blue-700 bg-blue-50/30">{{ entry }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+
     {% if result.all_rows %}
     <div class="bg-white rounded-xl shadow-sm border border-blue-200 overflow-hidden">
         <div class="px-4 py-3 border-b border-blue-100 bg-blue-50">

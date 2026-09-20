@@ -1,5 +1,6 @@
+import re
 from dataclasses import dataclass, field
-from datetime import time
+from datetime import date, time
 from pathlib import Path
 
 import pandas as pd
@@ -17,6 +18,7 @@ from core.models import (
     Venue,
     WorkshopAllocation,
 )
+from core.venue_quality import base_key
 from core.workshop_parser import (
     detect_format,
     parse_workbook,
@@ -64,6 +66,99 @@ def normalise_activity_type(raw: str) -> str:
     return mapping.get(upper, upper)
 
 
+def _norm_col(name) -> str:
+    """Normalise a header for alias matching: lowercase alphanumerics only."""
+    return "".join(ch.lower() for ch in str(name) if ch.isalnum())
+
+
+def _match_col(df, *aliases):
+    """Return the real column matching any alias (case/punctuation-insensitive)."""
+    norm = {}
+    for c in df.columns:
+        norm.setdefault(_norm_col(c), c)
+    for alias in aliases:
+        key = _norm_col(alias)
+        if key in norm:
+            return norm[key]
+    return None
+
+
+def _split_csv(value: str) -> list[str]:
+    """Split a comma/semicolon separated cell into stripped, non-empty parts."""
+    return [
+        p.strip()
+        for p in str(value).replace(";", ",").split(",")
+        if p.strip()
+    ]
+
+
+def _split_range(value):
+    """Split a '09:00-12:00' time range into (start, end) strings."""
+    text = (
+        str(value)
+        .replace("\u2013", "-")
+        .replace("\u2014", "-")
+        .replace(" to ", "-")
+    )
+    parts = [p.strip() for p in text.split("-") if p.strip()]
+    start = parts[0] if parts else ""
+    end = parts[1] if len(parts) > 1 else ""
+    return start, end
+
+
+def _fill_down(values) -> list[str]:
+    """Forward-fill blank cells produced by merged/pivoted Excel layouts."""
+    out = []
+    last = ""
+    for v in values:
+        s = "" if pd.isna(v) else str(v).strip()
+        if s:
+            last = s
+        out.append(last)
+    return out
+
+
+_FILLER_WORDS = {
+    "bsc",
+    "bsc",
+    "bachelor",
+    "of",
+    "in",
+    "and",
+    "the",
+    "science",
+    "sciences",
+    "technology",
+}
+
+
+def _derive_code(name: str) -> str:
+    """Build a programme code from a full programme name (e.g. 'BSc. in Chemical
+    and Processing Engineering' -> 'CPE'). Existing-candidate codes are skipped."""
+    words = re.split(r"[^A-Za-z0-9]+", name)
+    significant = [w for w in words if w and w.lower() not in _FILLER_WORDS]
+    letters = "".join(w[0].upper() for w in significant[:4])
+    if len(letters) < 2 and significant:
+        letters = significant[0][:2].upper()
+    if not letters:
+        letters = "PRG"
+    base = letters[:20]
+    n = 1
+    while Programme.objects.filter(code__iexact=base).exists():
+        n += 1
+        base = f"{letters[:17]}{n}"
+    return base
+
+
+def _default_reference_semester():
+    """The semester used by imports that do not need one supplied explicitly."""
+    year = date.today().year
+    semester, _ = Semester.objects.get_or_create(
+        academic_year=f"{year}/{year + 1}", semester=1
+    )
+    return semester
+
+
 @dataclass
 class ImportResult:
     created: int = 0
@@ -84,6 +179,7 @@ class ImportResult:
     ambiguous: list = field(default_factory=list)
     duplicates: list = field(default_factory=list)
     unrecognized_cells: list = field(default_factory=list)
+    programmes_created: list = field(default_factory=list)
 
     @property
     def total(self):
@@ -99,6 +195,11 @@ class ImportResult:
             lines.append(f"Detected format: {self.format}")
         if self.detected_semester:
             lines.append(f"Detected semester: {self.detected_semester}")
+        if self.programmes_created:
+            lines.append(
+                f"Programmes created automatically: "
+                f"{', '.join(self.programmes_created[:20])}"
+            )
         if self.matched_courses:
             lines.append(
                 f"Reconciled courses: {', '.join(self.matched_courses[:20])}"
@@ -146,18 +247,19 @@ def import_programmes_from_excel(path: str | Path) -> ImportResult:
     df = pd.read_excel(path, dtype=str).fillna("")
     result = ImportResult()
 
-    required = {"code", "name"}
-    cols = set(c.strip().lower() for c in df.columns)
-    if not required.issubset(cols):
-        missing = required - cols
-        result.errors.append(f"Missing columns: {missing}")
+    code_col = _match_col(df, "code", "programme_code", "program code", "program_code", "programme", "program")
+    name_col = _match_col(df, "name", "programme_name", "program_name", "title")
+    missing = [c for c, col in (("code", code_col), ("name", name_col)) if not col]
+    if missing:
+        result.errors.append(
+            f"Missing columns: {', '.join(missing)} "
+            f"(found: {', '.join(map(str, df.columns))})"
+        )
         return result
 
-    col_map = {c.strip().lower(): c for c in df.columns}
-
     for _, row in df.iterrows():
-        code = str(row[col_map["code"]]).strip()
-        name = str(row[col_map["name"]]).strip()
+        code = str(row[code_col]).strip()
+        name = str(row[name_col]).strip()
         if not code:
             result.errors.append(f"Row: empty programme code, skipped")
             result.skipped += 1
@@ -177,21 +279,39 @@ def import_student_groups_from_excel(path: str | Path) -> ImportResult:
     df = pd.read_excel(path, dtype=str).fillna("")
     result = ImportResult()
 
-    required = {"programme_code", "group_code"}
-    cols = set(c.strip().lower() for c in df.columns)
-    if not required.issubset(cols):
-        missing = required - cols
-        result.errors.append(f"Missing columns: {missing}")
+    prog_col = _match_col(
+        df,
+        "programme_code",
+        "programme",
+        "program",
+        "program_code",
+        "program code",
+        "programme code",
+        "programme_name",
+        "program_name",
+        "programme name",
+        "program name",
+    )
+    grp_col = _match_col(df, "group_code", "group", "groups", "group_name")
+    missing = [
+        c
+        for c, col in (
+            ("programme_code", prog_col),
+            ("group_code", grp_col),
+        )
+        if not col
+    ]
+    if missing:
+        result.errors.append(f"Missing columns: {', '.join(missing)}")
         return result
 
-    col_map = {c.strip().lower(): c for c in df.columns}
-
     for _, row in df.iterrows():
-        prog_code = str(row[col_map["programme_code"]]).strip()
-        grp_code = str(row[col_map["group_code"]]).strip()
-        try:
-            programme = Programme.objects.get(code=prog_code)
-        except Programme.DoesNotExist:
+        prog_code = str(row[prog_col]).strip()
+        grp_code = str(row[grp_col]).strip()
+        programme = Programme.objects.filter(code=prog_code).first()
+        if programme is None:
+            programme = Programme.objects.filter(name__iexact=prog_code).first()
+        if programme is None:
             result.errors.append(
                 f"Programme '{prog_code}' not found for group '{grp_code}'"
             )
@@ -212,28 +332,78 @@ def import_programme_courses_from_excel(path: str | Path) -> ImportResult:
     df = pd.read_excel(path, dtype=str).fillna("")
     result = ImportResult()
 
-    required = {"programme_code", "course_code"}
-    cols = set(c.strip().lower() for c in df.columns)
-    if not required.issubset(cols):
-        missing = required - cols
-        result.errors.append(f"Missing columns: {missing}")
+    prog_col = _match_col(
+        df,
+        "programme_code",
+        "programme",
+        "program",
+        "program_code",
+        "program code",
+        "programme code",
+        "programme_name",
+        "program_name",
+        "programme name",
+        "program name",
+    )
+    code_col = _match_col(
+        df, "course_code", "course code", "code", "subject_code", "unit_code"
+    )
+    name_col = _match_col(
+        df,
+        "course_name",
+        "course",
+        "course_title",
+        "course title",
+        "subject",
+        "subject_name",
+        "unit_name",
+    )
+    sem_col = _match_col(df, "semester", "sem", "term")
+
+    missing = [
+        c
+        for c, col in (
+            ("programme_code", prog_col),
+            ("course_code", code_col),
+            ("course_name", name_col),
+            ("semester", sem_col),
+        )
+        if not col
+    ]
+    if missing:
+        result.errors.append(
+            f"Missing required columns: {', '.join(missing)} "
+            f"(found: {', '.join(map(str, df.columns))})"
+        )
         return result
 
-    col_map = {c.strip().lower(): c for c in df.columns}
-
     for _, row in df.iterrows():
-        prog_code = str(row[col_map["programme_code"]]).strip()
-        crs_code = str(row[col_map["course_code"]]).strip()
+        prog_raw = str(row[prog_col]).strip()
+        crs_code = str(row[code_col]).strip()
+        crs_name = str(row[name_col]).strip()
         try:
-            programme = Programme.objects.get(code=prog_code)
-        except Programme.DoesNotExist:
+            sem = int(float(str(row[sem_col]).strip()))
+        except (ValueError, TypeError):
             result.errors.append(
-                f"Programme '{prog_code}' not found for course '{crs_code}'"
+                f"Invalid semester value for course '{crs_code}' "
+                f"in programme '{prog_raw}'"
             )
             result.skipped += 1
             continue
+        programme = Programme.objects.filter(code=prog_raw).first()
+        if programme is None:
+            programme = Programme.objects.filter(name__iexact=prog_raw).first()
+        if programme is None:
+            programme = Programme.objects.create(
+                code=_derive_code(prog_raw), name=prog_raw
+            )
+            result.programmes_created.append(
+                f"{programme.name} -> {programme.code}"
+            )
         _, created = ProgrammeCourse.objects.update_or_create(
-            programme=programme, course_code=crs_code
+            programme=programme,
+            course_code=crs_code,
+            defaults={"course_name": crs_name, "semester": sem},
         )
         if created:
             result.created += 1
@@ -247,23 +417,56 @@ def import_venues_from_excel(path: str | Path) -> ImportResult:
     df = pd.read_excel(path, dtype=str).fillna("")
     result = ImportResult()
 
-    required = {"name", "capacity"}
-    cols = set(c.strip().lower() for c in df.columns)
-    if not required.issubset(cols):
-        missing = required - cols
-        result.errors.append(f"Missing columns: {missing}")
+    name_col = _match_col(
+        df,
+        "name",
+        "venue",
+        "venue_name",
+        "room",
+        "room_name",
+        "location",
+        "location_name",
+    )
+    cap_col = _match_col(df, "capacity", "seats", "seat_capacity", "size")
+    missing = [
+        c for c, col in (("name", name_col), ("capacity", cap_col)) if not col
+    ]
+    if missing:
+        result.errors.append(
+            f"Missing columns: {', '.join(missing)} "
+            f"(found: {', '.join(map(str, df.columns))})"
+        )
         return result
 
-    col_map = {c.strip().lower(): c for c in df.columns}
-
+    existing_keys = {
+        base_key(n): n for n in Venue.objects.values_list("name", flat=True)
+    }
+    seen = {}
     for _, row in df.iterrows():
-        name = str(row[col_map["name"]]).strip()
+        name = str(row[name_col]).strip()
+        if not name:
+            result.errors.append(f"Row: empty venue name, skipped")
+            result.skipped += 1
+            continue
         try:
-            cap = int(float(str(row[col_map["capacity"]]).strip()))
+            cap = int(float(str(row[cap_col]).strip()))
         except (ValueError, TypeError):
             result.errors.append(f"Invalid capacity for venue '{name}'")
             result.skipped += 1
             continue
+        key = base_key(name)
+        clash = None
+        if key in existing_keys and existing_keys[key] != name:
+            clash = existing_keys[key]
+        elif key in seen and seen[key] != name:
+            clash = seen[key]
+        if clash is not None:
+            result.conflicts.append(
+                f"Venue '{name}' matches existing venue '{clash}' "
+                f"(normalised as '{key}') - same venue written with different "
+                f"casing/spacing; it will be highlighted for recycling."
+            )
+        seen[key] = name
         _, created = Venue.objects.update_or_create(
             name=name, defaults={"capacity": cap}
         )
@@ -279,19 +482,24 @@ def import_semesters_from_excel(path: str | Path) -> ImportResult:
     df = pd.read_excel(path, dtype=str).fillna("")
     result = ImportResult()
 
-    required = {"academic_year", "semester"}
-    cols = set(c.strip().lower() for c in df.columns)
-    if not required.issubset(cols):
-        missing = required - cols
-        result.errors.append(f"Missing columns: {missing}")
+    year_col = _match_col(df, "academic_year", "academic year", "year", "session")
+    sem_col = _match_col(df, "semester", "sem", "term")
+    missing = [
+        c
+        for c, col in (
+            ("academic_year", year_col),
+            ("semester", sem_col),
+        )
+        if not col
+    ]
+    if missing:
+        result.errors.append(f"Missing columns: {', '.join(missing)}")
         return result
 
-    col_map = {c.strip().lower(): c for c in df.columns}
-
     for _, row in df.iterrows():
-        year = str(row[col_map["academic_year"]]).strip()
+        year = str(row[year_col]).strip()
         try:
-            sem = int(float(str(row[col_map["semester"]]).strip()))
+            sem = int(float(str(row[sem_col]).strip()))
         except (ValueError, TypeError):
             result.errors.append(f"Invalid semester value for year '{year}'")
             result.skipped += 1
@@ -313,42 +521,80 @@ def import_semesters_from_excel(path: str | Path) -> ImportResult:
 
 MASTER_REQUIRED = {"course_code", "activity_type", "day", "start_time", "end_time"}
 
+MASTER_COLUMN_ALIASES = {
+    "course_code": [
+        "course_code", "course code", "course", "code", "subject_code", "unit_code",
+    ],
+    "activity_type": [
+        "activity_type", "activity type", "activity", "type",
+    ],
+    "day": ["day", "day_of_week", "dayofweek"],
+    "start_time": ["start_time", "start", "time_from"],
+    "end_time": ["end_time", "end", "time_to"],
+    "venue": ["venue", "room", "room_name", "venue_name"],
+    "group": ["group", "groups", "group_code", "group_name"],
+}
+
+
+def _missing_columns(df, required, aliases) -> list[str]:
+    """Canonical names that could not be matched to a real column."""
+    return [
+        name
+        for name in required
+        if _match_col(df, *aliases.get(name, [name])) is None
+    ]
+
 
 def _read_master_rows(df) -> list[dict]:
-    cols_lower = {c.strip().lower(): c for c in df.columns}
-
-    def col(name):
-        return cols_lower.get(name, None)
+    venue_col = _match_col(df, *MASTER_COLUMN_ALIASES["venue"])
+    code_col = _match_col(df, *MASTER_COLUMN_ALIASES["course_code"])
+    act_col = _match_col(df, *MASTER_COLUMN_ALIASES["activity_type"])
+    day_col = _match_col(df, *MASTER_COLUMN_ALIASES["day"])
+    start_col = _match_col(df, *MASTER_COLUMN_ALIASES["start_time"])
+    end_col = _match_col(df, *MASTER_COLUMN_ALIASES["end_time"])
+    group_col = _match_col(df, *MASTER_COLUMN_ALIASES["group"])
 
     rows = []
-    group_col = col("group") or col("groups") or col("group_code")
     for idx, row in df.iterrows():
-        venue_val = row.get(col("venue"), None)
-        if pd.isna(venue_val):
+        venue_val = row.get(venue_col, None) if venue_col else None
+        if venue_val is None or pd.isna(venue_val):
             venue_raw = ""
         else:
             venue_raw = str(venue_val).strip()
-        rows.append(
-            {
-                "row_no": idx + 2,
-                "course_code": str(row.get(col("course_code"), "")).strip(),
-                "activity_raw": str(row.get(col("activity_type"), "")).strip(),
-                "activity_type": None,
-                "day_raw": str(row.get(col("day"), "")).strip(),
-                "day": None,
-                "start_raw": str(row.get(col("start_time"), "")).strip(),
-                "end_raw": str(row.get(col("end_time"), "")).strip(),
-                "start_time": None,
-                "end_time": None,
-                "venue_raw": venue_raw,
-                "raw_groups": str(row.get(group_col, "")).strip()
-                if group_col
-                else "",
-                "group_codes": [],
-                "expanded_groups": [],
-                "conflict": False,
-            }
-        )
+        raw_code = str(row.get(code_col, "")).strip() if code_col else ""
+        # Comma-separated course codes are split into one session per code; the
+        # venue cell is kept verbatim (a multi-room row stays a single session).
+        codes = _split_csv(raw_code) if "," in raw_code else ([raw_code] if raw_code else [])
+        for code in codes:
+            rows.append(
+                {
+                    "row_no": idx + 2,
+                    "course_code": code,
+                    "activity_raw": str(
+                        row.get(act_col, "") if act_col else ""
+                    ).strip(),
+                    "activity_type": None,
+                    "day_raw": str(
+                        row.get(day_col, "") if day_col else ""
+                    ).strip(),
+                    "day": None,
+                    "start_raw": str(
+                        row.get(start_col, "") if start_col else ""
+                    ).strip(),
+                    "end_raw": str(
+                        row.get(end_col, "") if end_col else ""
+                    ).strip(),
+                    "start_time": None,
+                    "end_time": None,
+                    "venue_raw": venue_raw,
+                    "raw_groups": str(
+                        row.get(group_col, "") if group_col else ""
+                    ).strip(),
+                    "group_codes": [],
+                    "expanded_groups": [],
+                    "conflict": False,
+                }
+            )
     return rows
 
 
@@ -387,11 +633,11 @@ def _validate_master_rows(df, result) -> list[dict]:
 def _reconcile_master(df, semester_id) -> ImportResult:
     """Read-only pass: validate rows and report what would be missing."""
     result = ImportResult()
-    cols_lower = {c.strip().lower(): c for c in df.columns}
-    required = MASTER_REQUIRED - set(cols_lower)
-    if required:
+    missing = _missing_columns(df, MASTER_REQUIRED, MASTER_COLUMN_ALIASES)
+    if missing:
         result.errors.append(
-            f"Missing required columns: {', '.join(sorted(required))}"
+            f"Missing required columns: {', '.join(missing)} "
+            f"(found: {', '.join(map(str, df.columns))})"
         )
         return result
 
@@ -481,15 +727,28 @@ def import_master_timetable_from_excel(
 ) -> ImportResult:
     """Import the master timetable idempotently (get_or_create on a natural key).
 
-    Reconciles first; missing reference data is reported, never guessed at.
-    Rows with unresolvable 'ALL' expansions are imported with no group links and
-    listed under conflicts. With dry_run=True nothing is written.
+    When no semester is supplied and none exists yet, the current academic
+    year's semester 1 is created automatically. Missing reference data is
+    reported, never guessed at. Rows with unresolvable 'ALL' expansions are
+    imported with no group links and listed under conflicts. With dry_run=True
+    nothing is written.
     """
     df = pd.read_excel(path, dtype=str).fillna("")
-    result = _reconcile_master(df, semester_id)
 
-    cols_lower = {c.strip().lower(): c for c in df.columns}
-    if MASTER_REQUIRED - set(cols_lower):
+    auto_sem = None
+    if semester_id is None and not dry_run:
+        semester = Semester.objects.filter(pk=1).first()
+        if semester is None:
+            semester = _default_reference_semester()
+            auto_sem = semester
+        semester_id = semester.pk
+
+    result = _reconcile_master(df, semester_id)
+    if auto_sem:
+        result.detected_semester = str(auto_sem)
+
+    missing = _missing_columns(df, MASTER_REQUIRED, MASTER_COLUMN_ALIASES)
+    if missing:
         # Missing columns already reported by the reconcile pass.
         return result
 
@@ -498,22 +757,19 @@ def import_master_timetable_from_excel(
     if semester is None:
         return result
 
-    for idx, row in df.iterrows():
-        course_code = str(row.get(cols_lower.get("course_code"), "")).strip()
+    for rec in _read_master_rows(df):
+        course_code = rec["course_code"]
         if not course_code:
             continue
         try:
-            day = normalise_day(str(row.get(cols_lower.get("day"), "")).strip())
-            start_time = parse_time(str(row.get(cols_lower.get("start_time"), "")).strip())
-            end_time = parse_time(str(row.get(cols_lower.get("end_time"), "")).strip())
+            day = normalise_day(rec["day_raw"])
+            start_time = parse_time(rec["start_raw"])
+            end_time = parse_time(rec["end_raw"])
         except (ValueError, TypeError):
             continue
-        activity_type = normalise_activity_type(
-            str(row.get(cols_lower.get("activity_type"), "")).strip()
-        )
+        activity_type = normalise_activity_type(rec["activity_raw"])
 
-        venue_val = row.get(cols_lower.get("venue"), None)
-        venue_raw = "" if pd.isna(venue_val) else str(venue_val).strip()
+        venue_raw = rec["venue_raw"]
         if not venue_raw:
             venue = None
         else:
@@ -544,10 +800,7 @@ def import_master_timetable_from_excel(
         else:
             result.updated += 1
 
-        group_col = (
-            cols_lower.get("group") or cols_lower.get("groups") or cols_lower.get("group_code")
-        )
-        raw_groups = str(row.get(group_col, "")).strip() if group_col else ""
+        raw_groups = rec["raw_groups"]
 
         if raw_groups.upper() == "ALL":
             progs = list(
@@ -679,10 +932,23 @@ def import_university_workshop_workbook(
 ) -> ImportResult:
     """Import the raw matrix workshop workbook idempotently.
 
-    Reconciles first; a missing Semester blocks the import. Records are written
+    When no semester is supplied, the one detected from the workbook title is
+    used (created automatically if it does not exist yet). Records are written
     under a full natural key so re-imports are no-ops. With dry_run=True nothing
-    is written.
+    is written and a missing semester is reported, not created.
     """
+    if semester_id is None and not dry_run:
+        parsed = parse_workbook(path)
+        semester = _resolve_workshop_semester(parsed, None)
+        if semester is None:
+            if parsed.academic_year and parsed.semester:
+                semester = Semester.objects.get_or_create(
+                    academic_year=parsed.academic_year, semester=parsed.semester
+                )[0]
+            else:
+                semester = _default_reference_semester()
+        semester_id = semester.pk
+
     result = reconcile_workshop_workbook(path, semester_id=semester_id)
     result.format = "raw university workshop matrix"
 
@@ -728,31 +994,77 @@ def import_workshop_allocation_from_excel(
 
     df = pd.read_excel(path, dtype=str).fillna("")
     result = ImportResult()
-    result.format = "flat (course_code, group_code, day, start_time, end_time, venue)"
 
-    cols_lower = {c.strip().lower(): c for c in df.columns}
+    course_col = _match_col(df, "course_code", "course code", "code")
+    group_col = _match_col(df, "group_code", "group", "groups", "group_name")
+    day_col = _match_col(df, "day", "day_of_week", "dayofweek")
+    start_col = _match_col(df, "start_time", "start", "time_from")
+    end_col = _match_col(df, "end_time", "end", "time_to")
+    time_col = _match_col(
+        df, "time", "time_range", "time range", "time_slot", "time slot", "period"
+    )
+    venue_col = _match_col(df, "venue", "room", "room_name", "venue_name")
 
-    def col(name, default=None):
-        return cols_lower.get(name.lower(), default)
+    if (
+        group_col is None
+        or day_col is None
+        or venue_col is None
+        or (time_col is None and (start_col is None or end_col is None))
+    ):
+        required = [
+            "group_code",
+            "day",
+            "a time column ('time' range, or 'start_time' + 'end_time')",
+            "venue",
+        ]
+        if course_col is not None:
+            required.insert(0, "course_code")
+        result.errors.append(
+            "Invalid workshop format. Expected FORMAT A (course_code, group_code, "
+            "day, start_time, end_time, venue) or FORMAT B (group_code, day, "
+            "start_time, end_time, venue where course_code is derived from venue). "
+            f"Required columns: {', '.join(required)}. "
+            f"Found columns: {', '.join(map(str, df.columns))}"
+        )
+        return result
+
+    if course_col is None:
+        result.format = (
+            "workshop format (group_code, day, start_time, end_time, venue) — "
+            "course_code derived from venue"
+        )
+    else:
+        result.format = (
+            "full format (course_code, group_code, day, start_time, end_time, venue)"
+        )
 
     if semester_id is None:
         semester_id = 1
 
     semester = Semester.objects.filter(pk=semester_id).first()
+    if semester is None and not dry_run:
+        semester = _default_reference_semester()
+        result.detected_semester = str(semester)
     if semester is None:
         result.errors.append(f"Semester {semester_id} does not exist")
         return result
 
     for idx, row in df.iterrows():
-        course_code = str(row.get(col("course_code", "course_code"), "")).strip()
-        group_code = str(row.get(col("group_code", "group_code"), "")).strip()
+        venue_raw = str(row.get(venue_col, "")).strip() if venue_col else ""
+        # FORMAT B has no course_code column: derive it from the workshop venue
+        # (e.g. venue=Electrical => course_code=Electrical). A blank cell in
+        # FORMAT A falls back to the venue the same way.
+        course_code = (
+            str(row.get(course_col, "")).strip() if course_col else ""
+        ) or venue_raw
+        group_code = str(row.get(group_col, "")).strip() if group_col else ""
 
         if not course_code or not group_code:
-            result.errors.append(f"Row {idx + 2}: missing course_code or group_code")
+            result.errors.append(f"Row {idx + 2}: missing group_code or venue/course_code")
             result.skipped += 1
             continue
 
-        day_raw = str(row.get(col("day", "day"), "")).strip()
+        day_raw = str(row.get(day_col, "")).strip() if day_col else ""
         try:
             day = normalise_day(day_raw)
         except Exception:
@@ -760,8 +1072,11 @@ def import_workshop_allocation_from_excel(
             result.skipped += 1
             continue
 
-        start_raw = str(row.get(col("start_time", "start_time"), "")).strip()
-        end_raw = str(row.get(col("end_time", "end_time"), "")).strip()
+        if time_col:
+            start_raw, end_raw = _split_range(row.get(time_col, ""))
+        else:
+            start_raw = str(row.get(start_col, "")).strip() if start_col else ""
+            end_raw = str(row.get(end_col, "")).strip() if end_col else ""
         try:
             start_time = parse_time(start_raw)
             end_time = parse_time(end_raw)
@@ -769,8 +1084,6 @@ def import_workshop_allocation_from_excel(
             result.errors.append(f"Row {idx + 2}: time parse error: {exc}")
             result.skipped += 1
             continue
-
-        venue_raw = str(row.get(col("venue", "venue"), "")).strip()
 
         basis = dict(
             semester=semester,
@@ -802,29 +1115,70 @@ def import_td_allocation_from_excel(
     df = pd.read_excel(path, dtype=str).fillna("")
     result = ImportResult()
 
-    cols_lower = {c.strip().lower(): c for c in df.columns}
+    course_col = _match_col(df, "course_code", "course code", "course")
+    group_col = _match_col(df, "group_code", "group", "groups", "group_name")
+    day_col = _match_col(df, "day", "day_of_week", "dayofweek")
+    start_col = _match_col(df, "start_time", "start", "time_from")
+    end_col = _match_col(df, "end_time", "end", "time_to")
+    time_col = _match_col(
+        df, "time", "time_range", "time range", "time_slot", "time slot", "period"
+    )
+    venue_col = _match_col(df, "venue", "room", "room_name", "venue_name")
 
-    def col(name, default=None):
-        return cols_lower.get(name.lower(), default)
+    missing = [
+        name
+        for name, col in (
+            ("course_code", course_col),
+            ("group_code", group_col),
+            ("day", day_col),
+            ("venue", venue_col),
+        )
+        if not col
+    ]
+    if time_col is None and (start_col is None or end_col is None):
+        missing.append("a time column ('time' range, or 'start_time'+'end_time')")
+    if missing:
+        result.errors.append(
+            f"Missing required columns: {', '.join(missing)} "
+            f"(found: {', '.join(map(str, df.columns))})"
+        )
+        return result
 
     if semester_id is None:
         semester_id = 1
 
     semester = Semester.objects.filter(pk=semester_id).first()
     if semester is None:
+        semester = _default_reference_semester()
+        result.detected_semester = str(semester)
+    if semester is None:
         result.errors.append(f"Semester {semester_id} does not exist")
         return result
 
-    for idx, row in df.iterrows():
-        course_code = str(row.get(col("course_code", "course_code"), "")).strip()
-        group_code = str(row.get(col("group_code", "group_code"), "")).strip()
+    # Pivoted layouts (Day/Time/Group/Venue) only fill the merged header cell of
+    # each group block — forward-fill day/time/venue so every group gets them.
+    days = _fill_down(df[day_col])
+    times = _fill_down(df[time_col]) if time_col else [""] * len(df)
+    venues = _fill_down(df[venue_col]) if venue_col else [""] * len(df)
 
-        if not course_code or not group_code:
-            result.errors.append(f"Row {idx + 2}: missing course_code or group_code")
+    for idx in range(len(df)):
+        row = df.iloc[idx]
+        course_code = str(row.get(course_col, "")).strip()
+        group_code = str(row.get(group_col, "")).strip()
+
+        if not group_code:
+            continue
+        if not course_code:
+            result.errors.append(
+                f"Row {idx + 2}: missing course_code (group '{group_code}')"
+            )
             result.skipped += 1
             continue
 
-        day_raw = str(row.get(col("day", "day"), "")).strip()
+        day_raw = days[idx]
+        if not day_raw:
+            result.skipped += 1
+            continue
         try:
             day = normalise_day(day_raw)
         except Exception:
@@ -832,8 +1186,11 @@ def import_td_allocation_from_excel(
             result.skipped += 1
             continue
 
-        start_raw = str(row.get(col("start_time", "start_time"), "")).strip()
-        end_raw = str(row.get(col("end_time", "end_time"), "")).strip()
+        if time_col:
+            start_raw, end_raw = _split_range(row.get(time_col, ""))
+        else:
+            start_raw = str(row.get(start_col, "")).strip()
+            end_raw = str(row.get(end_col, "")).strip()
         try:
             start_time = parse_time(start_raw)
             end_time = parse_time(end_raw)
@@ -842,7 +1199,7 @@ def import_td_allocation_from_excel(
             result.skipped += 1
             continue
 
-        venue_raw = str(row.get(col("venue", "venue"), "")).strip()
+        venue_raw = venues[idx]
 
         _, created = TechnicalDrawingAllocation.objects.update_or_create(
             semester=semester,

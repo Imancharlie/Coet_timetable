@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% load core_tags %}
+
+{% block content %}
+<div class="max-w-5xl mx-auto">
+    <div class="mb-6">
+        <h1 class="text-xl font-semibold text-gray-800">Export Timetable</h1>
+        <p class="text-sm text-gray-500 mt-1">Pick a registered programme and export its weekly timetable as a PDF. The grid follows the standard layout &mdash; TIME column plus MONDAY&ndash;FRIDAY, with multi-hour sessions merged into a single cell.</p>
+    </div>
+
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+        <div class="flex flex-wrap items-end gap-4">
+            <div>
+                <label for="semester" class="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Semester</label>
+                <select id="semester" class="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                    {% for s in semesters %}
+                    <option value="{{ s.pk }}" {% if s.pk == default_semester.pk %}selected{% endif %}>{{ s }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div>
+                <label for="year" class="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Year of Study</label>
+                <select id="year" class="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                    {% for y in year_options %}
+                    <option value="{{ y }}">{{ y }} {% if y == 1 %}st{% elif y == 2 %}nd{% elif y == 3 %}rd{% else %}th{% endif %} Year</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <p class="text-xs text-gray-400 pb-2.5">These choices apply to every export on this page.</p>
+        </div>
+    </div>
+
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+        <div class="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+            <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">Registered Programmes</h2>
+            <span class="text-xs text-gray-500">{{ programmes|length }} programme{{ programmes|length|pluralize }}</span>
+        </div>
+        {% if programmes %}
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 p-5">
+            {% for p in programmes %}
+            <div class="border border-gray-200 rounded-lg p-4 flex items-center justify-between gap-4 hover:border-blue-300 hover:shadow-sm transition">
+                <div class="min-w-0">
+                    <p class="font-semibold text-gray-800">{{ p.name }}</p>
+                    <p class="text-sm text-gray-500">{{ p.code }} &middot; {{ p.student_groups.count }} group{{ p.student_groups.count|pluralize }}</p>
+                </div>
+                <button type="button" onclick="doExport(this, {{ p.pk }})"
+                        class="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-green-700 bg-green-50 hover:bg-green-100 rounded-lg transition shrink-0">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                    Export PDF
+                </button>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <p class="p-6 text-sm text-gray-500">No programmes registered yet. Add programmes first, then come back to export their timetables.</p>
+        {% endif %}
+    </div>
+</div>
+<script>
+function doExport(btn, pk) {
+    const semester = document.getElementById('semester').value;
+    const year = document.getElementById('year').value;
+    const base = "{% url 'programme-timetable-export' 0 %}";
+    const url = base.replace('/0/', '/' + pk + '/') + "?semester=" + encodeURIComponent(semester) + "&year=" + encodeURIComponent(year);
+    window.location.href = url;
+}
+</script>
+{% endblock %}

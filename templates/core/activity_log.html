@@ -3,17 +3,7 @@
 
 {% block content %}
 <div class="max-w-7xl mx-auto">
-    <!-- Toolbar -->
-    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
-        <div class="text-sm text-gray-500">{{ total }} record{{ total|pluralize }}</div>
-        <button onclick="openModal('{{ create_url }}', '{{ "Create " }}{{ page_title }}')"
-                class="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
-            Add New
-        </button>
-    </div>
-
-    {% block list_actions %}{% endblock %}
+    <div class="text-sm text-gray-500 mb-4">{{ total }} activity event{{ total|pluralize }}</div>
 
     <!-- Filter bar -->
     <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4 mb-4">
@@ -21,10 +11,9 @@
             <div class="flex flex-col md:flex-row gap-3">
                 <div class="flex-1 relative">
                     <svg class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
-                    <input type="text" name="q" value="{{ q }}" placeholder="Search..."
+                    <input type="text" name="q" value="{{ q }}" placeholder="Search activity..."
                            class="w-full pl-9 pr-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
                 </div>
-                {% block filters %}
                 {% for f in filters %}
                     {% if f.type == "select" %}
                     <select name="{{ f.name }}" class="shrink-0 px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
@@ -33,18 +22,8 @@
                         <option value="{{ v }}" {% if f.value == v %}selected{% endif %}>{{ label }}</option>
                         {% endfor %}
                     </select>
-                    {% elif f.type == "time" %}
-                    <input type="time" name="{{ f.name }}" value="{{ f.value }}" title="{{ f.label }}"
-                           class="shrink-0 px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
-                    {% elif f.type == "number" %}
-                    <input type="number" name="{{ f.name }}" value="{{ f.value }}" placeholder="{{ f.label }}"
-                           class="shrink-0 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
-                    {% else %}
-                    <input type="text" name="{{ f.name }}" value="{{ f.value }}" placeholder="{{ f.label }}"
-                           class="shrink-0 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
                     {% endif %}
                 {% endfor %}
-                {% endblock %}
                 <button type="submit" class="px-4 py-2 bg-gray-800 text-white text-sm font-medium rounded-lg hover:bg-gray-900 transition">
                     Filter
                 </button>
@@ -55,14 +34,12 @@
         </form>
     </div>
 
-    <!-- Table + Mobile cards container -->
+    <!-- Events -->
     <div id="data-table-wrap"
          hx-get="{{ list_url }}{{ query }}"
          hx-trigger="refresh from:window"
-         hx-swap="innerHTML"
-         hx-indicator="#loading-indicator">
-        {% include "core/_table_and_cards.html" %}
+         hx-swap="innerHTML">
+        {% include "core/_activity_log.html" %}
     </div>
 </div>
-
 {% endblock %}

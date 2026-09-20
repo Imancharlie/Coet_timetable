@@ -1,5 +1,6 @@
 ﻿import os
 import tempfile
+from datetime import time
 from pathlib import Path
 
 import pandas as pd
@@ -9,12 +10,16 @@ from openpyxl import Workbook
 
 from core.importers import (
     import_master_timetable_from_excel,
+    import_programme_courses_from_excel,
     import_td_allocation_from_excel,
+    import_venues_from_excel,
     import_workshop_allocation_from_excel,
     reconcile_master_timetable,
     reconcile_workshop_workbook,
 )
 from core.models import (
+    ActivityLog,
+    LogAction,
     Programme,
     ProgrammeCourse,
     Semester,
@@ -25,6 +30,7 @@ from core.models import (
     Venue,
     WorkshopAllocation,
 )
+from core.venue_quality import analyse_venues, base_key, issues_for, suggested_name
 from core.workshop_parser import parse_workbook
 
 XLSX_CONTENT_TYPE = (
@@ -168,9 +174,15 @@ class ImporterTestCase(TestCase):
         self.g1 = StudentGroup.objects.create(programme=self.prog_a, code="A1")
         self.g2 = StudentGroup.objects.create(programme=self.prog_a, code="A2")
         self.g3 = StudentGroup.objects.create(programme=self.prog_b, code="B1")
-        ProgrammeCourse.objects.create(programme=self.prog_a, course_code="MT161")
-        ProgrammeCourse.objects.create(programme=self.prog_b, course_code="MT161")
-        ProgrammeCourse.objects.create(programme=self.prog_a, course_code="TG201")
+        ProgrammeCourse.objects.create(
+            programme=self.prog_a, course_code="MT161", course_name="Mathematics 1", semester=1
+        )
+        ProgrammeCourse.objects.create(
+            programme=self.prog_b, course_code="MT161", course_name="Mathematics 1", semester=1
+        )
+        ProgrammeCourse.objects.create(
+            programme=self.prog_a, course_code="TG201", course_name="Technical Drawing 1", semester=1
+        )
         Venue.objects.create(name="LH1", capacity=80)
         Venue.objects.create(name="NB102", capacity=40)
 
@@ -332,6 +344,48 @@ class WorkshopTdImportTests(ImporterTestCase):
         self.assertEqual(second.updated, 1)
         self.assertEqual(WorkshopAllocation.objects.count(), 1)
 
+    def test_workshop_format_b_derives_course_code_from_venue(self):
+        self._seed()
+        path = make_xlsx(
+            [["E1", "MONDAY", "09:00", "13:00", "Electrical"]],
+            ["group_code", "day", "start_time", "end_time", "venue"],
+        )
+        first = import_workshop_allocation_from_excel(path, semester_id=self.sem1.pk)
+        self.assertEqual(first.errors, [])
+        self.assertEqual(first.created, 1)
+        wa = WorkshopAllocation.objects.get()
+        self.assertEqual(wa.course_code, "Electrical")
+        self.assertEqual(wa.venue, "Electrical")
+        self.assertEqual(wa.group_code, "E1")
+
+        second = import_workshop_allocation_from_excel(path, semester_id=self.sem1.pk)
+        self.assertEqual(second.created, 0)
+        self.assertEqual(second.updated, 1)
+        self.assertEqual(WorkshopAllocation.objects.count(), 1)
+
+    def test_workshop_format_a_blank_course_code_falls_back_to_venue(self):
+        self._seed()
+        path = make_xlsx(
+            [["", "E1", "MONDAY", "09:00", "13:00", "Electrical"]],
+            ["course_code", "group_code", "day", "start_time", "end_time", "venue"],
+        )
+        first = import_workshop_allocation_from_excel(path, semester_id=self.sem1.pk)
+        self.assertEqual(first.created, 1)
+        wa = WorkshopAllocation.objects.get()
+        self.assertEqual(wa.course_code, "Electrical")
+        self.assertEqual(wa.venue, "Electrical")
+
+    def test_workshop_invalid_format_reports_clear_error(self):
+        self._seed()
+        path = make_xlsx(
+            [["E1", "MONDAY", "Electrical"]],
+            ["group_code", "day", "venue"],
+        )
+        result = import_workshop_allocation_from_excel(path, semester_id=self.sem1.pk)
+        self.assertTrue(result.errors)
+        self.assertIn("Invalid workshop format", result.errors[0])
+        self.assertEqual(WorkshopAllocation.objects.count(), 0)
+
     def test_td_import_is_idempotent(self):
         self._seed()
         path = make_xlsx(
@@ -343,6 +397,165 @@ class WorkshopTdImportTests(ImporterTestCase):
         second = import_td_allocation_from_excel(path, semester_id=self.sem1.pk)
         self.assertEqual(second.updated, 1)
         self.assertEqual(TechnicalDrawingAllocation.objects.count(), 1)
+
+
+class AdaptiveImportTests(ImporterTestCase):
+    """Importers accept readable aliases and reshape data into the required model."""
+
+    def test_programme_courses_auto_create_programmes_from_names(self):
+        self._seed()
+        path = make_xlsx(
+            [
+                ["BSc. in Chemical and Processing Engineering", "CPE100", "Process Units", 1],
+                ["BSc. in Textile Design and Technology", "TDT101", "Weaving", 2],
+            ],
+            ["Program", "Course Code", "Course", "Semester"],
+        )
+        result = import_programme_courses_from_excel(path)
+        self.assertEqual(result.created, 2)
+        self.assertEqual(
+            sorted(Programme.objects.filter(code__iexact="CPE").values_list("code", flat=True)),
+            ["CPE"],
+        )
+        self.assertTrue(
+            ProgrammeCourse.objects.filter(
+                course_code="TDT101", course_name="Weaving", semester=2
+            ).exists()
+        )
+        self.assertEqual(len(result.programmes_created), 2)
+
+    def test_programme_courses_take_program_code_column(self):
+        self._seed()
+        result = import_programme_courses_from_excel(
+            make_xlsx(
+                [["ME", "ST101", "Strength of Materials", 1]],
+                ["Program Code", "Course Code", "Course", "Semester"],
+            )
+        )
+        self.assertEqual(result.created, 1)
+        self.assertEqual(result.programmes_created, [])
+        pc = ProgrammeCourse.objects.get(course_code="ST101")
+        self.assertEqual(pc.programme, self.prog_b)
+        self.assertEqual(pc.semester, 1)
+
+    def test_programme_courses_resolve_existing_code_or_name(self):
+        self._seed()
+        result = import_programme_courses_from_excel(
+            make_xlsx(
+                [["ME", "ST101", "Strength of Materials", 1]],
+                ["Program", "Course Code", "Course", "Semester"],
+            )
+        )
+        self.assertEqual(result.created, 1)
+        self.assertEqual(result.programmes_created, [])
+
+        result = import_programme_courses_from_excel(
+            make_xlsx(
+                [["Civil Engineering", "CV101", "Intro to Surveying", 1]],
+                ["Program", "Course Code", "Course", "Semester"],
+            )
+        )
+        self.assertEqual(result.created, 1)
+        self.assertEqual(result.programmes_created, [])
+        self.assertTrue(
+            ProgrammeCourse.objects.filter(
+                programme=self.prog_a, course_code="CV101"
+            ).exists()
+        )
+
+    def test_venue_alias_headers_accepted(self):
+        self._seed()
+        result = import_venues_from_excel(
+            make_xlsx(
+                [["Hall A", 120], ["Lab 1", 30]],
+                ["Room", "Seats"],
+            )
+        )
+        self.assertEqual(result.created, 2)
+        self.assertTrue(Venue.objects.filter(name="Hall A", capacity=120).exists())
+        self.assertTrue(Venue.objects.filter(name="Lab 1", capacity=30).exists())
+
+    def test_master_import_reads_alias_headers(self):
+        self._seed()
+        result = import_master_timetable_from_excel(
+            make_xlsx(
+                [["MT161", "LECTURE", "MONDAY", "08:00", "10:00", "LH1", "A1"]],
+                ["Course", "Type", "Day", "Start", "End", "Room", "Groups"],
+            ),
+            semester_id=self.sem1.pk,
+        )
+        self.assertEqual(result.created, 1)
+        self.assertEqual(Session.objects.get(course_code="MT161").course_code, "MT161")
+
+    def test_master_import_splits_comma_separated_course_codes(self):
+        self._seed()
+        result = import_master_timetable_from_excel(
+            make_xlsx(
+                [["MT161, TG201", "LECTURE", "MONDAY", "08:00", "10:00", "LH1", "A1"]],
+                ["course_code", "activity_type", "day", "start_time", "end_time", "venue", "group"],
+            ),
+            semester_id=self.sem1.pk,
+        )
+        self.assertEqual(result.created, 2)
+        self.assertTrue(Session.objects.filter(course_code="MT161").exists())
+        self.assertTrue(Session.objects.filter(course_code="TG201").exists())
+
+    def test_master_import_auto_creates_default_semester(self):
+        Semester.objects.all().delete()
+        result = import_master_timetable_from_excel(
+            make_xlsx(
+                [["MT161", "LECTURE", "MONDAY", "08:00", "10:00", "LH1", "A1"]],
+                MASTER_COLS,
+            )
+        )
+        self.assertTrue(Semester.objects.exists())
+        self.assertTrue(result.detected_semester)
+        self.assertEqual(Session.objects.count(), 1)
+
+    def test_workshop_flat_accepts_time_range_column(self):
+        self._seed()
+        result = import_workshop_allocation_from_excel(
+            make_xlsx(
+                [["TG201", "C1", "MONDAY", "08:00-10:00", "TW101"]],
+                ["course_code", "group_code", "day", "time", "venue"],
+            )
+        )
+        self.assertEqual(result.created, 1)
+        wa = WorkshopAllocation.objects.get(course_code="TG201", group_code="C1")
+        self.assertEqual(wa.start_time, time(8, 0))
+        self.assertEqual(wa.end_time, time(10, 0))
+
+    def test_td_pivoted_layout_requires_course_code(self):
+        self._seed()
+        result = import_td_allocation_from_excel(
+            make_xlsx(
+                [["A1", "09:00-12:00"]],
+                ["Group", "Time"],
+            )
+        )
+        self.assertIn("course_code", " ".join(result.errors))
+        self.assertEqual(TechnicalDrawingAllocation.objects.count(), 0)
+
+    def test_td_pivoted_layout_with_course_code(self):
+        self._seed()
+        result = import_td_allocation_from_excel(
+            make_xlsx(
+                [
+                    ["TG201", "MONDAY", "A1", "09:00-12:00", "S112"],
+                    ["TG201", "", "A2", "13:00-15:00", ""],
+                ],
+                ["course_code", "Day", "Group", "Time", "Venue"],
+            )
+        )
+        self.assertEqual(result.created, 2)
+        rec = TechnicalDrawingAllocation.objects.get(group_code="A1")
+        self.assertEqual(rec.venue, "S112")
+        self.assertEqual(rec.start_time, time(9, 0))
+        self.assertEqual(rec.end_time, time(12, 0))
+        # Merged-cell day/time/venue are filled down from the first group row.
+        rec2 = TechnicalDrawingAllocation.objects.get(group_code="A2")
+        self.assertEqual(rec2.day, "MONDAY")
+        self.assertEqual(rec2.venue, "S112")
 
 
 class CrudResponseTests(TestCase):
@@ -475,7 +688,12 @@ class CrudResponseTests(TestCase):
             ),
             (
                 "/courses/create/",
-                {"programme": self.programme.pk, "course_code": "MT161"},
+                {
+                    "programme": self.programme.pk,
+                    "course_code": "MT161",
+                    "course_name": "Mathematics 1",
+                    "semester": "1",
+                },
                 ProgrammeCourse,
             ),
             (
@@ -607,7 +825,9 @@ class ImportUploadViewTests(TestCase):
         sem = Semester.objects.create(academic_year="2026/2027", semester=1)
         prog = Programme.objects.create(code="CE", name="Civil Engineering")
         StudentGroup.objects.create(programme=prog, code="A1")
-        ProgrammeCourse.objects.create(programme=prog, course_code="MT161")
+        ProgrammeCourse.objects.create(
+            programme=prog, course_code="MT161", course_name="Mathematics 1", semester=1
+        )
         Venue.objects.create(name="LH1", capacity=80)
         self.client.get("/import/master-timetable/")
         path = make_xlsx(
@@ -791,12 +1011,15 @@ class WorkshopMatrixImportTests(ImporterTestCase):
         self.assertEqual(second.updated, 18)
         self.assertEqual(WorkshopAllocation.objects.count(), 18)
 
-    def test_import_matrix_blocked_without_semester(self):
+    def test_import_matrix_auto_creates_missing_semester(self):
         Semester.objects.filter(academic_year="2025/2026", semester=1).delete()
         result = import_workshop_allocation_from_excel(self._matrix_path())
-        self.assertTrue(result.missing_references)
-        self.assertTrue(any("blocked" in err for err in result.errors))
-        self.assertEqual(WorkshopAllocation.objects.count(), 0)
+        self.assertEqual(result.detected_semester, "2025/2026 - Semester 1")
+        self.assertFalse(result.missing_references)
+        self.assertEqual(result.created, 18)
+        self.assertTrue(
+            Semester.objects.filter(academic_year="2025/2026", semester=1).exists()
+        )
 
     def test_matrix_dry_run_writes_nothing(self):
         result = import_workshop_allocation_from_excel(
@@ -821,3 +1044,575 @@ class WorkshopMatrixImportTests(ImporterTestCase):
         result = reconcile_workshop_workbook(self._matrix_path())
         self.assertTrue(result.missing_references)
         self.assertEqual(result.skipped, 18)
+
+
+class SessionAssignLectureGroupsTests(TestCase):
+    """Assign button: LECTURE sessions get every group of the programme(s)
+    that study the course, regardless of subgroup."""
+
+    def setUp(self):
+        self._seed()
+
+    def _seed(self):
+        self.sem = Semester.objects.create(academic_year="2025/2026", semester=1)
+        self.prog_a = Programme.objects.create(code="CE", name="Civil Engineering")
+        self.prog_b = Programme.objects.create(code="ME", name="Mechanical Engineering")
+        ProgrammeCourse.objects.create(
+            programme=self.prog_a, course_code="MT161", course_name="Mathematics 1", semester=1
+        )
+        ProgrammeCourse.objects.create(
+            programme=self.prog_b, course_code="MT161", course_name="Mathematics 1", semester=1
+        )
+        ProgrammeCourse.objects.create(
+            programme=self.prog_a, course_code="TG201", course_name="Technical Drawing 1", semester=1
+        )
+        self.groups = {
+            "A1": StudentGroup.objects.create(programme=self.prog_a, code="A1"),
+            "A2": StudentGroup.objects.create(programme=self.prog_a, code="A2"),
+            "B1": StudentGroup.objects.create(programme=self.prog_b, code="B1"),
+            "B2": StudentGroup.objects.create(programme=self.prog_b, code="B2"),
+        }
+        venue = Venue.objects.create(name="LH1", capacity=0)
+        self.lecture_mt161 = Session.objects.create(
+            semester=self.sem,
+            course_code="MT161",
+            activity_type="LECTURE",
+            day="MONDAY",
+            start_time="08:00",
+            end_time="10:00",
+            venue=venue,
+        )
+        self.lecture_tg201 = Session.objects.create(
+            semester=self.sem,
+            course_code="TG201",
+            activity_type="LECTURE",
+            day="TUESDAY",
+            start_time="08:00",
+            end_time="10:00",
+            venue=venue,
+        )
+        self.lecture_nomapping = Session.objects.create(
+            semester=self.sem,
+            course_code="PHY200",
+            activity_type="LECTURE",
+            day="WEDNESDAY",
+            start_time="08:00",
+            end_time="10:00",
+            venue=venue,
+        )
+        self.workshop_mt161 = Session.objects.create(
+            semester=self.sem,
+            course_code="MT161",
+            activity_type="WORKSHOP",
+            day="THURSDAY",
+            start_time="08:00",
+            end_time="10:00",
+            venue=venue,
+        )
+
+    def test_assigns_all_programme_groups_to_lectures_only(self):
+        page = self.client.get("/sessions/")
+        self.assertContains(page, "Assign Lecture Groups")
+        self.client.get("/sessions/")
+        resp = self.client.post(
+            "/sessions/assign-lecture-groups/", {}, HTTP_HX_REQUEST="true"
+        )
+        self.assertEqual(resp.status_code, 200)
+        html = resp.content.decode()
+        self.assertIn("Lecture group assignment complete", html)
+        self.assertIn("Group links created: 6", html)
+        self.assertIn("PHY200", html)
+        self.assertEqual(
+            set(
+                SessionGroup.objects.filter(
+                    session=self.lecture_mt161
+                ).values_list("group__code", flat=True)
+            ),
+            {"A1", "A2", "B1", "B2"},
+        )
+        self.assertEqual(
+            set(
+                SessionGroup.objects.filter(
+                    session=self.lecture_tg201
+                ).values_list("group__code", flat=True)
+            ),
+            {"A1", "A2"},
+        )
+        self.assertEqual(
+            SessionGroup.objects.filter(session=self.lecture_nomapping).count(), 0
+        )
+        self.assertEqual(
+            SessionGroup.objects.filter(session=self.workshop_mt161).count(), 0
+        )
+
+    def test_reassign_is_idempotent(self):
+        self.client.post("/sessions/assign-lecture-groups/", {}, HTTP_HX_REQUEST="true")
+        resp = self.client.post(
+            "/sessions/assign-lecture-groups/", {}, HTTP_HX_REQUEST="true"
+        )
+        html = resp.content.decode()
+        self.assertIn("Group links created: 0", html)
+        self.assertEqual(SessionGroup.objects.filter(session=self.lecture_mt161).count(), 4)
+
+    def test_get_redirects_to_list(self):
+        resp = self.client.get("/sessions/assign-lecture-groups/")
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(resp.url, "/sessions/")
+
+
+class SessionProgrammeSummaryTests(TestCase):
+    """Session detail shows programme-level allocation, All marking and cancel."""
+
+    def setUp(self):
+        self.sem = Semester.objects.create(academic_year="2025/2026", semester=1)
+        self.prog_a = Programme.objects.create(code="CE", name="Civil Engineering")
+        self.prog_b = Programme.objects.create(code="ME", name="Mechanical Engineering")
+        self.g1 = StudentGroup.objects.create(programme=self.prog_a, code="A1")
+        self.g2 = StudentGroup.objects.create(programme=self.prog_a, code="A2")
+        self.g3 = StudentGroup.objects.create(programme=self.prog_b, code="B1")
+        self.g4 = StudentGroup.objects.create(programme=self.prog_b, code="B2")
+        venue = Venue.objects.create(name="LH1", capacity=80)
+        self.session = Session.objects.create(
+            semester=self.sem,
+            course_code="MT161",
+            activity_type="LECTURE",
+            day="MONDAY",
+            start_time="08:00",
+            end_time="10:00",
+            venue=venue,
+        )
+
+    def _assign(self, *groups):
+        for g in groups:
+            SessionGroup.objects.create(session=self.session, group=g)
+
+    def test_detail_shows_programmes_at_top_with_all_marker(self):
+        self._assign(self.g1, self.g2, self.g3)  # CE all, ME partial
+        resp = self.client.get("/sessions/%d/" % self.session.pk)
+        html = resp.content.decode()
+        self.assertIn("Civil Engineering", html)
+        self.assertIn("Mechanical Engineering", html)
+        self.assertIn("All (2 groups)", html)
+        self.assertIn("1 of 2 groups", html)
+        self.assertIn("CE A1", html)
+        self.assertIn("CE A2", html)
+        self.assertIn("ME B1", html)
+        # programmes/groups panel renders above the detail fields
+        self.assertLess(
+            html.find("Programmes &amp; Groups Attending"),
+            html.find("Course Code"),
+        )
+
+    def test_htmx_detail_partial_shows_summary(self):
+        self._assign(self.g1, self.g2, self.g3)
+        resp = self.client.get(
+            "/sessions/%d/" % self.session.pk, HTTP_HX_REQUEST="true"
+        )
+        html = resp.content.decode()
+        self.assertIn("All (2 groups)", html)
+        self.assertIn("1 of 2 groups", html)
+
+    def test_remove_programme_groups_cancels_only_that_programme(self):
+        self._assign(self.g1, self.g2, self.g3, self.g4)
+        resp = self.client.post(
+            "/sessions/%d/remove-programme-groups/%d/"
+            % (self.session.pk, self.prog_b.pk),
+            {},
+            HTTP_HX_REQUEST="true",
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotIn("Mechanical Engineering", resp.content.decode())
+        remaining = set(
+            SessionGroup.objects.filter(session=self.session).values_list(
+                "group__code", flat=True
+            )
+        )
+        self.assertEqual(remaining, {"A1", "A2"})
+
+    def test_clear_groups_cancels_whole_assignment(self):
+        self._assign(self.g1, self.g2, self.g3)
+        resp = self.client.post(
+            "/sessions/%d/clear-groups/" % self.session.pk,
+            {},
+            HTTP_HX_REQUEST="true",
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("No groups assigned", resp.content.decode())
+        self.assertEqual(SessionGroup.objects.filter(session=self.session).count(), 0)
+
+    def test_clear_groups_plain_post_redirects(self):
+        self._assign(self.g1)
+        resp = self.client.post("/sessions/%d/clear-groups/" % self.session.pk, {})
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(resp.url, "/sessions/%d/" % self.session.pk)
+        self.assertEqual(SessionGroup.objects.filter(session=self.session).count(), 0)
+
+
+class ListFilterTests(TestCase):
+    """Column filters on list views, especially the master timetable."""
+
+    def setUp(self):
+        self.sem = Semester.objects.create(academic_year="2026/2027", semester=1)
+        self.venue_lh1 = Venue.objects.create(name="LH1", capacity=80)
+        self.venue_nb = Venue.objects.create(name="NB102", capacity=40)
+        self.s_mon = Session.objects.create(
+            semester=self.sem,
+            course_code="MT161",
+            activity_type="LECTURE",
+            day="MONDAY",
+            start_time="08:00",
+            end_time="10:00",
+            venue=self.venue_lh1,
+        )
+        self.s_tue = Session.objects.create(
+            semester=self.sem,
+            course_code="TG201",
+            activity_type="PRACTICAL",
+            day="TUESDAY",
+            start_time="14:00",
+            end_time="17:00",
+            venue=self.venue_nb,
+        )
+
+    def test_session_list_renders_filter_controls(self):
+        resp = self.client.get("/sessions/")
+        html = resp.content.decode()
+        for control in (
+            'name="day"',
+            'name="activity_type"',
+            'name="semester"',
+            'name="venue"',
+            'name="start_from"',
+            'name="start_to"',
+        ):
+            self.assertIn(control, html)
+
+    def test_session_day_filter(self):
+        resp = self.client.get("/sessions/", {"day": "MONDAY"})
+        html = resp.content.decode()
+        self.assertContains(resp, "MT161")
+        self.assertNotContains(resp, "TG201")
+
+    def test_session_time_range_filter(self):
+        resp = self.client.get(
+            "/sessions/", {"start_from": "09:00", "start_to": "12:00"}
+        )
+        self.assertContains(resp, "MT161")
+        self.assertNotContains(resp, "TG201")
+
+    def test_session_venue_filter(self):
+        resp = self.client.get("/sessions/", {"venue": "LH1"})
+        self.assertContains(resp, "MT161")
+        self.assertNotContains(resp, "TG201")
+        self.assertContains(resp, "1 record")
+
+    def test_course_semester_filter(self):
+        ProgrammeCourse.objects.create(
+            programme=Programme.objects.create(
+                code="CE", name="Civil Engineering"
+            ),
+            course_code="MT161",
+            course_name="Mathematics 1",
+            semester=1,
+        )
+        ProgrammeCourse.objects.create(
+            programme=Programme.objects.get(code="CE"),
+            course_code="TG201",
+            course_name="Technical Drawing 1",
+            semester=2,
+        )
+        resp = self.client.get("/courses/", {"semester": "1"})
+        self.assertContains(resp, "MT161")
+        self.assertNotContains(resp, "TG201")
+
+    def test_venue_capacity_range_filter(self):
+        resp = self.client.get("/venues/", {"capacity_min": "50"})
+        self.assertContains(resp, "LH1")
+        self.assertNotContains(resp, "NB102")
+
+
+class ActivityLogTests(TestCase):
+    """Sidebar vlogs: changes logged, clickable from dashboard, cancellable."""
+
+    def setUp(self):
+        self.client = Client(enforce_csrf_checks=True)
+        self.programme = Programme.objects.create(code="CE", name="Civil Engineering")
+
+    def _post(self, url, data, hx=False):
+        self.client.get("/")
+        token = self.client.cookies.get("csrftoken").value
+        headers = {}
+        if hx:
+            headers["HTTP_HX_REQUEST"] = "true"
+        return self.client.post(
+            url, {**data, "csrfmiddlewaretoken": token}, **headers
+        )
+
+    def test_create_logs_event(self):
+        resp = self._post(
+            "/programmes/create/", {"code": "ME", "name": "Mech Eng"}, hx=True
+        )
+        self.assertEqual(resp.headers["HX-Trigger"], "close-modal,refresh-table")
+        log = ActivityLog.objects.get(action=LogAction.CREATE)
+        self.assertEqual(log.resource, "Programme")
+        self.assertIn("ME", log.message)
+
+    def test_edit_logs_event(self):
+        self._post("/programmes/%d/edit/" % self.programme.pk,
+                   {"code": "CE", "name": "Civil Updated"})
+        log = ActivityLog.objects.get(action=LogAction.UPDATE)
+        self.assertEqual(log.resource, "Programme")
+        self.assertIn("Civil Updated", log.message)
+
+    def test_delete_logs_event(self):
+        self._post("/programmes/%d/delete/" % self.programme.pk, {})
+        log = ActivityLog.objects.get(action=LogAction.DELETE)
+        self.assertIn("Civil Engineering", log.message)
+        self.assertFalse(Programme.objects.filter(pk=self.programme.pk).exists())
+
+    def test_import_logs_event(self):
+        self.client.get("/")
+        token = self.client.cookies.get("csrftoken").value
+        path = make_xlsx([["ME", "Mechanical Engineering"]], ["code", "name"])
+        with open(path, "rb") as fh:
+            resp = self.client.post(
+                "/import/programmes/",
+                {
+                    "file": SimpleUploadedFile(
+                        "prog.xlsx", fh.read(), content_type=XLSX_CONTENT_TYPE
+                    ),
+                    "csrfmiddlewaretoken": token,
+                },
+                HTTP_HX_REQUEST="true",
+            )
+        self.assertEqual(resp.status_code, 200)
+        log = ActivityLog.objects.get(action=LogAction.IMPORT)
+        self.assertEqual(log.resource, "Programmes")
+        self.assertIn("1 created", log.message)
+
+    def test_sidebar_lists_latest_events(self):
+        ActivityLog.objects.create(
+            action=LogAction.CREATE,
+            message="Created Venue ZZZ99",
+            resource="Venue",
+            target="ZZZ99",
+        )
+        resp = self.client.get("/")
+        html = resp.content.decode()
+        self.assertIn("Activity Log", html)
+        self.assertIn("Created Venue ZZZ99", html)
+        self.assertIn("/?log=", html)
+
+    def test_dashboard_shows_selected_log_and_cancel(self):
+        log = ActivityLog.objects.create(
+            action=LogAction.UPDATE,
+            message="Updated Venue LH1",
+            resource="Venue",
+            target="LH1",
+        )
+        resp = self.client.get("/", {"log": log.pk})
+        html = resp.content.decode()
+        self.assertContains(resp, "Updated Venue LH1")
+        self.assertEqual(html.count("Cancel"), 1)
+        # Cancel is a plain link back to the bare dashboard (no ?log param).
+        cancel_idx = html.find("Cancel")
+        self.assertNotIn("?log=", html[max(0, cancel_idx - 200):cancel_idx])
+
+    def test_invalid_log_param_is_ignored(self):
+        resp = self.client.get("/", {"log": "999999"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotContains(resp, "Cancel")
+
+    def test_activity_page_lists_and_filters(self):
+        ActivityLog.objects.create(
+            action=LogAction.CREATE, message="alpha one", resource="Venue"
+        )
+        ActivityLog.objects.create(
+            action=LogAction.DELETE, message="beta two", resource="Venue"
+        )
+        resp = self.client.get("/activity/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "alpha one")
+        self.assertContains(resp, "beta two")
+        # htmx partial has no sidebar, so the filter is isolated to the list.
+        filtered = self.client.get(
+            "/activity/", {"action": "CREATE"}, HTTP_HX_REQUEST="true"
+        )
+        self.assertContains(filtered, "alpha one")
+        self.assertNotContains(filtered, "beta two")
+
+    def test_session_group_ops_logged(self):
+        sem = Semester.objects.create(academic_year="2026/2027", semester=1)
+        venue = Venue.objects.create(name="LH1", capacity=80)
+        group = StudentGroup.objects.create(programme=self.programme, code="A1")
+        session = Session.objects.create(
+            semester=sem,
+            course_code="MT161",
+            activity_type="LECTURE",
+            day="MONDAY",
+            start_time="08:00",
+            end_time="10:00",
+            venue=venue,
+        )
+        self._post("/sessions/%d/add-group/" % session.pk, {"group_id": group.pk})
+        self.assertTrue(ActivityLog.objects.filter(action=LogAction.ASSIGN).exists())
+        self._post(
+            "/sessions/%d/remove-group/%d/" % (session.pk, group.pk), {}
+        )
+        self.assertTrue(ActivityLog.objects.filter(action=LogAction.REMOVE).exists())
+
+
+class VenueQualityTests(TestCase):
+    """Venue name normalisation, quality flags and the recycle workbench."""
+
+    def setUp(self):
+        self.client = Client()
+
+    def test_base_key_normalises_case_and_spacing(self):
+        self.assertEqual(base_key("A104"), "A104")
+        self.assertEqual(base_key("a104"), "A104")
+        self.assertEqual(base_key("A 104"), "A104")
+        self.assertEqual(base_key("  a104  "), "A104")
+        self.assertEqual(
+            base_key("DO1 luhanga hall kijitonyama"),
+            base_key("DO1 kijitonyama"),
+        )
+        # Compound codes are kept whole, never fused with a single room key.
+        self.assertNotEqual(base_key("B4-206"), base_key("B4"))
+        self.assertNotEqual(base_key("A104, A106"), base_key("A104"))
+        self.assertEqual(base_key("A104, A106"), base_key(" a104 , a106 "))
+
+    def test_issues_for_labels_problem_kinds(self):
+        self.assertEqual(issues_for("a104"), ["Casing"])
+        self.assertEqual(issues_for("A 104"), ["Spacing"])
+        self.assertEqual(issues_for("THEATER 1"), ["Spacing"])
+        self.assertEqual(issues_for("DO1 luhanga hall kijitonyama"), ["Casing"])
+        self.assertEqual(suggested_name("a104"), "A104")
+        self.assertEqual(suggested_name("A 104"), "A104")
+        self.assertEqual(
+            suggested_name("DO1 luhanga hall kijitonyama"), "DO1"
+        )
+        self.assertEqual(issues_for("A104"), [])
+
+    def test_analyse_venues_flags_duplicates_and_formatting(self):
+        v1 = Venue.objects.create(name="D01 KIJITONYAMA", capacity=200)
+        v2 = Venue.objects.create(name="D01 Luhanga Hall Kijitonyama", capacity=220)
+        Venue.objects.create(name="a104", capacity=60)
+        Venue.objects.create(name="A104", capacity=60)
+        Venue.objects.create(name="B4", capacity=30)
+        Venue.objects.create(name="B4-206", capacity=40)
+        clean = Venue.objects.create(name="LH1", capacity=80)
+
+        issues_map, groups, has_issues = analyse_venues()
+        self.assertTrue(has_issues)
+        for name in (v1.name, v2.name, "a104"):
+            pk = Venue.objects.get(name=name).pk
+            self.assertIn(pk, issues_map)
+            self.assertIn("Duplicate", issues_map[pk]["issues"])
+        # Formatting-only venue is flagged but not in a duplicate group.
+        self.assertIn(
+            "Casing", issues_map[Venue.objects.get(name="a104").pk]["issues"]
+        )
+        self.assertNotIn(clean.pk, issues_map)
+        self.assertNotIn(Venue.objects.get(name="B4").pk, issues_map)
+        self.assertNotIn(Venue.objects.get(name="B4-206").pk, issues_map)
+        keys = {g["key"] for g in groups}
+        self.assertEqual(keys, {"D01", "A104"})
+
+    def test_venue_list_shows_recycle_button_only_when_problems(self):
+        Venue.objects.create(name="a104", capacity=60)
+        resp = self.client.get("/venues/")
+        html = resp.content.decode()
+        self.assertIn("Recycle &amp; Clean", html)
+        self.assertIn(">Quality<", html)
+        self.assertContains(resp, "Casing")
+
+        # A pristine dataset hides both the banner column and the recycle button.
+        Venue.objects.get(name="a104").delete()
+        resp = self.client.get("/venues/")
+        self.assertNotIn("Recycle &amp; Clean", resp.content.decode())
+        self.assertNotIn(">Quality<", resp.content.decode())
+
+    def test_recycle_page_lists_problem_venues_and_offers_fixes(self):
+        Venue.objects.create(name="A 104", capacity=60)
+        Venue.objects.create(name="A104", capacity=60)
+        resp = self.client.get("/venues/recycle/")
+        self.assertEqual(resp.status_code, 200)
+        html = resp.content.decode()
+        self.assertIn("A 104", html)
+        self.assertIn("name='action' value='edit'", html.replace('"', "'"))
+        self.assertIn("name='action' value='delete'", html.replace('"', "'"))
+
+    def test_recycle_edit_fixes_name_and_updates_database(self):
+        v = Venue.objects.create(name="A 104", capacity=60)
+        resp = self.client.post(
+            "/venues/recycle/",
+            {"action": "edit", "pk": v.pk, "name": "A104", "capacity": "60"},
+        )
+        v.refresh_from_db()
+        self.assertEqual(v.name, "A104")
+        self.assertContains(resp, "Database updated")
+        self.assertEqual(
+            ActivityLog.objects.filter(
+                action=LogAction.UPDATE, target="A104"
+            ).count(),
+            1,
+        )
+
+    def test_recycle_edit_merges_into_case_insensitive_clash(self):
+        sem = Semester.objects.create(academic_year="2026/2027", semester=1)
+        keep = Venue.objects.create(name="A104", capacity=0)
+        dup = Venue.objects.create(name="a104", capacity=60)
+        session = Session.objects.create(
+            semester=sem,
+            course_code="MT161",
+            activity_type="LECTURE",
+            day="MONDAY",
+            start_time="08:00",
+            end_time="10:00",
+            venue=dup,
+        )
+        resp = self.client.post(
+            "/venues/recycle/",
+            {"action": "edit", "pk": dup.pk, "name": "A104", "capacity": "60"},
+        )
+        self.assertContains(resp, "Merged")
+        self.assertFalse(Venue.objects.filter(pk=dup.pk).exists())
+        self.assertTrue(Venue.objects.filter(pk=keep.pk).exists())
+        session.refresh_from_db()
+        self.assertEqual(session.venue_id, keep.pk)
+
+    def test_recycle_delete_folds_duplicate_and_repoints_references(self):
+        sem = Semester.objects.create(academic_year="2025/2026", semester=1)
+        dup = Venue.objects.create(name="D01 Luhanga Hall Kijitonyama", capacity=220)
+        keep = Venue.objects.create(name="D01 KIJITONYAMA", capacity=200)
+        session = Session.objects.create(
+            semester=sem,
+            course_code="MT161",
+            activity_type="LECTURE",
+            day="TUESDAY",
+            start_time="10:00",
+            end_time="12:00",
+            venue=dup,
+        )
+        WorkshopAllocation.objects.create(
+            semester=sem,
+            course_code="ME201",
+            group_code="A1",
+            day="TUESDAY",
+            start_time="14:00",
+            end_time="17:00",
+            venue=dup.name,
+        )
+        resp = self.client.post(
+            "/venues/recycle/",
+            {"action": "delete", "pk": dup.pk},
+        )
+        self.assertContains(resp, "Removed duplicate")
+        self.assertFalse(Venue.objects.filter(pk=dup.pk).exists())
+        session.refresh_from_db()
+        self.assertEqual(session.venue_id, keep.pk)
+        self.assertEqual(
+            WorkshopAllocation.objects.get(course_code="ME201").venue,
+            keep.name,
+        )

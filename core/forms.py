@@ -54,12 +54,19 @@ class StudentGroupForm(forms.ModelForm):
 class ProgrammeCourseForm(forms.ModelForm):
     class Meta:
         model = ProgrammeCourse
-        fields = ["programme", "course_code"]
+        fields = ["programme", "course_code", "course_name", "semester"]
         widgets = {
             "programme": forms.Select(attrs={"class": SELECT_CLS}),
             "course_code": forms.TextInput(
                 attrs={"class": INPUT_CLS, "placeholder": "e.g. MT161"}
             ),
+            "course_name": forms.TextInput(
+                attrs={
+                    "class": INPUT_CLS,
+                    "placeholder": "e.g. Mathematics 1",
+                }
+            ),
+            "semester": forms.NumberInput(attrs={"class": INPUT_CLS, "min": 1}),
         }
 
 
