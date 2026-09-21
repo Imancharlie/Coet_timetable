@@ -5,16 +5,17 @@
 <div class="max-w-5xl mx-auto">
     <div class="mb-6">
         <h1 class="text-xl font-semibold text-gray-800">Export Timetable</h1>
-        <p class="text-sm text-gray-500 mt-1">Pick a registered programme and export its weekly timetable as a PDF. The grid follows the standard layout &mdash; TIME column plus MONDAY&ndash;FRIDAY, with multi-hour sessions merged into a single cell.</p>
+        <p class="text-sm text-gray-500 mt-1">Search for a programme or a student group to download that group's weekly timetable as a PDF — A4 with DAY columns and TIME rows, shaded by activity type (Lecture grey, Workshop green, Technical Drawing pink). Sessions spanning multiple time slots are merged into a single cell.</p>
     </div>
 
+    <!-- Shared semester / year controls -->
     <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
         <div class="flex flex-wrap items-end gap-4">
             <div>
                 <label for="semester" class="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Semester</label>
                 <select id="semester" class="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
                     {% for s in semesters %}
-                    <option value="{{ s.pk }}" {% if s.pk == default_semester.pk %}selected{% endif %}>{{ s }}</option>
+                    <option value="{{ s.pk }}" {% if default_semester and s.pk == default_semester.pk %}selected{% endif %}>{{ s }}</option>
                     {% endfor %}
                 </select>
             </div>
@@ -30,38 +31,86 @@
         </div>
     </div>
 
+    <!-- Results -->
     <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-        <div class="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
-            <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">Registered Programmes</h2>
-            <span class="text-xs text-gray-500">{{ programmes|length }} programme{{ programmes|length|pluralize }}</span>
-        </div>
-        {% if programmes %}
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 p-5">
-            {% for p in programmes %}
-            <div class="border border-gray-200 rounded-lg p-4 flex items-center justify-between gap-4 hover:border-blue-300 hover:shadow-sm transition">
-                <div class="min-w-0">
-                    <p class="font-semibold text-gray-800">{{ p.name }}</p>
-                    <p class="text-sm text-gray-500">{{ p.code }} &middot; {{ p.student_groups.count }} group{{ p.student_groups.count|pluralize }}</p>
+        <div class="px-6 py-4 border-b border-gray-200 flex flex-wrap items-center justify-between gap-3">
+            <div>
+                <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">Student Groups</h2>
+                <p class="text-xs text-gray-500 mt-0.5">Export a single group's timetable, or the whole programme.</p>
+            </div>
+            <form method="get" action="." class="flex items-center gap-2">
+                <div class="relative">
+                    <svg class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+                    <input type="text" name="q" value="{{ q }}" placeholder="Search group or programme..."
+                           class="w-64 pl-9 pr-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
                 </div>
-                <button type="button" onclick="doExport(this, {{ p.pk }})"
-                        class="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-green-700 bg-green-50 hover:bg-green-100 rounded-lg transition shrink-0">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
-                    Export PDF
-                </button>
+                <button type="submit" class="px-4 py-2 bg-gray-800 text-white text-sm font-medium rounded-lg hover:bg-gray-900 transition">Search</button>
+                {% if q %}
+                <a href="?" class="px-4 py-2 text-sm font-medium text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 transition">Reset</a>
+                {% endif %}
+            </form>
+        </div>
+        {% if rows %}
+        <p class="px-6 pt-4 text-xs text-gray-500">
+            {% if q %}Matched <strong>{{ rows|length }}</strong> programme{{ rows|length|pluralize }} for "<span class="font-medium text-gray-700">{{ q }}</span>". {% endif %}{{ total_groups }} group{{ total_groups|pluralize }} registered.
+        </p>
+        <div class="divide-y divide-gray-100">
+            {% for r in rows %}
+            <div>
+                <div class="px-6 py-4 flex flex-wrap items-center justify-between gap-3 bg-gray-50/70">
+                    <div class="min-w-0">
+                        <p class="font-semibold text-gray-800">{{ r.programme.name }}</p>
+                        <p class="text-xs text-gray-500 mt-0.5">{{ r.programme.code }} &middot; {{ r.groups|length }} group{{ r.groups|length|pluralize }}</p>
+                    </div>
+                    <button type="button" onclick="doExport(this)"
+                            data-base="{% url 'programme-timetable-export' r.programme.pk %}"
+                            class="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition shrink-0"
+                            title="Download one PDF with every group of {{ r.programme.code }} combined">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                        Whole programme
+                    </button>
+                </div>
+                <div class="px-6 py-4 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+                    {% for g in r.groups %}
+                    <div class="border border-gray-200 rounded-lg p-3 flex items-center justify-between gap-2 hover:border-green-300 hover:shadow-sm transition">
+                        <div class="min-w-0">
+                            <p class="font-semibold text-gray-800">{{ g.code }}</p>
+                            <p class="text-xs text-gray-500">{{ r.programme.code }} &middot; group timetable</p>
+                        </div>
+                        <button type="button" onclick="doExport(this)"
+                                data-base="{% url 'group-timetable-export' g.pk %}"
+                                class="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-green-700 bg-green-50 hover:bg-green-100 rounded-lg transition shrink-0">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                            Export PDF
+                        </button>
+                    </div>
+                    {% empty %}
+                    <p class="text-sm text-gray-500 col-span-full">No groups registered for this programme yet. Add groups first, then come back to export them.</p>
+                    {% endfor %}
+                </div>
             </div>
             {% endfor %}
         </div>
+        {% elif q %}
+        <div class="p-12 text-center text-gray-400">
+            <p class="text-sm">No programmes or groups match "{{ q }}".</p>
+            <p class="text-xs mt-1">Try a group code (e.g. C1) or a programme name.</p>
+        </div>
         {% else %}
-        <p class="p-6 text-sm text-gray-500">No programmes registered yet. Add programmes first, then come back to export their timetables.</p>
+        <div class="p-12 text-center text-gray-400">
+            <p class="text-sm">No programmes registered yet.</p>
+            <p class="text-xs mt-1">Add a programme and its student groups, then come back to export their timetables.</p>
+        </div>
         {% endif %}
     </div>
 </div>
 <script>
-function doExport(btn, pk) {
+function doExport(btn) {
     const semester = document.getElementById('semester').value;
     const year = document.getElementById('year').value;
-    const base = "{% url 'programme-timetable-export' 0 %}";
-    const url = base.replace('/0/', '/' + pk + '/') + "?semester=" + encodeURIComponent(semester) + "&year=" + encodeURIComponent(year);
+    const url = btn.dataset.base
+        + '?semester=' + encodeURIComponent(semester)
+        + '&year=' + encodeURIComponent(year);
     window.location.href = url;
 }
 </script>

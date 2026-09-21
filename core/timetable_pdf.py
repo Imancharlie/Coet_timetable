@@ -1,10 +1,12 @@
 """Programme timetable PDF generation (reportlab).
 
-Produces a weekly grid — TIME column (07:00-07:55 .. 19:00-19:55) plus
-MONDAY..FRIDAY day columns — matching the layout of the university's
-"skeleton" timetable PDF. Sessions that span multiple hourly slots merge
-their cells on that day. External activities (workshops / technical drawing)
-that only carry a Morning/Afternoon period are placed in the full morning
+Produces a classic weekly grid, A4 portrait: the DAYS run across the first row
+and the hourly TIME slots (07:00-07:55 .. 19:00-19:55) run down the first
+column, matching the on-screen timetable in ``core/timetable.html``. Sessions
+that span multiple hourly slots merge their cells on that day. Each cell is
+shaded by activity type — Lecture faded grey, Workshop faded green, Technical
+Drawing faded pink. External activities (workshops / technical drawing) that
+only carry a Morning/Afternoon period are placed in the full morning
 (08:00-12:55) or afternoon (13:00-17:55) range.
 """
 
@@ -30,8 +32,7 @@ from core.models import (
     TimePeriod,
     WorkshopAllocation,
 )
-
-DAY_ORDER = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY"]
+from core.timetable_grid import build_time_day_grid, time_day_grid_to_table
 
 HOUR_START = 7
 HOUR_END = 19  # inclusive last hour (19:00-19:55)
@@ -49,13 +50,23 @@ def _ordinal(n):
     return f"{n}{suffix}"
 
 
-def _entry_label(session, groups_text=""):
-    venue = session.venue.name if session.venue and session.venue.name else "-"
+def _session_entry(session, groups_text=""):
+    venue = session.venue.name if session.venue and session.venue.name else ""
     lines = [f"{session.course_code} {session.get_activity_type_display()}"]
     if groups_text:
         lines.append(groups_text)
-    lines.append(venue)
-    return "\n".join(lines)
+    lines.append(venue or "-")
+    return {
+        "key": ("session", session.pk),
+        "day": session.day,
+        "hours": _covered_hours(session.start_time, session.end_time),
+        "label": "\n".join(lines),
+        "kind": session.activity_type.lower(),
+        "course_code": session.course_code,
+        "type_label": session.get_activity_type_display(),
+        "venue": venue,
+        "groups": groups_text,
+    }
 
 
 def _workshop_entry(rec):
@@ -67,17 +78,44 @@ def _workshop_entry(rec):
     if rec.venue:
         bits.append(rec.venue)
     lines.append(" ".join(bits))
+    note = ""
     if rec.week_start and rec.week_end:
-        lines.append(f"Wk {rec.week_start}-{rec.week_end}")
-    return "\n".join(lines)
+        note = f"Wk {rec.week_start}-{rec.week_end}"
+        lines.append(note)
+    return {
+        "key": ("workshop", rec.pk),
+        "day": rec.day,
+        "hours": (
+            _covered_hours(rec.start_time, rec.end_time)
+            if rec.start_time is not None
+            else _period_hours(rec.time_period)
+        ),
+        "label": "\n".join(lines),
+        "kind": "workshop",
+        "course_code": rec.course_code,
+        "type_label": "Workshop",
+        "venue": rec.venue,
+        "groups": rec.group_code,
+        "note": note,
+    }
 
 
 def _td_entry(rec):
-    return "\n".join([
-        f"{rec.course_code} TECHNICAL DRAWING",
-        f"{rec.group_code}",
-        rec.venue or "-",
-    ])
+    return {
+        "key": ("td", rec.pk),
+        "day": rec.day,
+        "hours": _covered_hours(rec.start_time, rec.end_time),
+        "label": "\n".join([
+            f"{rec.course_code} TECHNICAL DRAWING",
+            f"{rec.group_code}",
+            rec.venue or "-",
+        ]),
+        "kind": "td",
+        "course_code": rec.course_code,
+        "type_label": "Technical Drawing",
+        "venue": rec.venue,
+        "groups": rec.group_code,
+    }
 
 
 def _covered_hours(start, end):
@@ -98,8 +136,16 @@ def _period_hours(time_period):
     return set()
 
 
-def collect_entries(programme, semester):
-    """Gather timetable entries for one programme's groups in a semester."""
+def collect_entries(programme, semester, group=None):
+    """Gather timetable entries for one programme's groups in a semester.
+
+    When ``group`` is given only that single student group's timetable is
+    collected (sessions a group actually attends plus its workshops/TDs),
+    which backs the per-group export.
+    """
+    if group is not None:
+        return collect_group_entries(group, semester)
+
     groups = list(StudentGroup.objects.filter(programme=programme))
     group_codes = {g.code for g in groups}
     group_pk_by_code = {g.code: g.pk for g in groups}
@@ -122,110 +168,108 @@ def collect_entries(programme, semester):
         groups_text = ""
         if 0 < len(attending) < len(groups):
             groups_text = ", ".join(sorted(attending))
-        entries.append(
-            {
-                "key": ("session", session.pk),
-                "day": session.day,
-                "hours": _covered_hours(session.start_time, session.end_time),
-                "label": _entry_label(session, groups_text),
-            }
-        )
+        entries.append(_session_entry(session, groups_text))
 
     workshops = WorkshopAllocation.objects.filter(
         semester=semester, group_code__in=group_codes
     )
     for rec in workshops:
-        entries.append(
-            {
-                "key": ("workshop", rec.pk),
-                "day": rec.day,
-                "hours": (
-                    _covered_hours(rec.start_time, rec.end_time)
-                    if rec.start_time is not None
-                    else _period_hours(rec.time_period)
-                ),
-                "label": _workshop_entry(rec),
-            }
-        )
+        entries.append(_workshop_entry(rec))
 
     tds = TechnicalDrawingAllocation.objects.filter(
         semester=semester, group_code__in=group_codes
     )
     for rec in tds:
-        entries.append(
-            {
-                "key": ("td", rec.pk),
-                "day": rec.day,
-                "hours": _covered_hours(rec.start_time, rec.end_time),
-                "label": _td_entry(rec),
-            }
-        )
+        entries.append(_td_entry(rec))
+
+    return entries
+
+
+def collect_group_entries(group, semester):
+    """Gather timetable entries for ONE student group in a semester.
+
+    Sessions are those the group actually attends (via ``SessionGroup``);
+    workshops and technical drawing slots are matched on the group's code.
+    """
+    entries = []
+
+    sessions = (
+        Session.objects.filter(semester=semester, session_groups__group=group)
+        .select_related("venue")
+        .distinct()
+    )
+    for session in sessions:
+        entries.append(_session_entry(session))
+
+    workshops = WorkshopAllocation.objects.filter(
+        semester=semester, group_code=group.code
+    )
+    for rec in workshops:
+        entries.append(_workshop_entry(rec))
+
+    tds = TechnicalDrawingAllocation.objects.filter(
+        semester=semester, group_code=group.code
+    )
+    for rec in tds:
+        entries.append(_td_entry(rec))
 
     return entries
 
 
 def build_grid(entries):
-    """Return table data (list of rows) plus (from,to) SPAN commands.
+    """Return table data (list of rows), SPAN commands and fill colours.
 
-    Column layout: [TIME, MONDAY, TUESDAY, WEDNESDAY, THURSDAY, FRIDAY].
-    Row 0 is the weekday header; rows 1..n are hourly slots. Consecutive
-    slots whose entry signature is identical are merged via SPAN.
+    Classic layout: column 0 is TIME, columns 1..n are the weekdays, row 0 is
+    the DAY header. Uses the shared ``core.timetable_grid`` builder so the PDF
+    matches the on-screen timetable. SPAN commands merge multi-slot session
+    blocks vertically; fills carries one BACKGROUND command per block,
+    colour-coded by activity type (Lecture grey, Workshop green, TD pink).
     """
-    hours = _slot_hours()
-    data = [["TIME"] + DAY_ORDER]
-    for h in hours:
-        data.append([f"{h:02d}:00 - {h:02d}:55"] + [""] * len(DAY_ORDER))
-
-    by_col = {day: i + 1 for i, day in enumerate(DAY_ORDER)}
-    spans = []
-
-    for day in DAY_ORDER:
-        col = by_col[day]
-        cells = []
-        for h in hours:
-            cells.append(
-                sorted(
-                    (
-                        e
-                        for e in entries
-                        if e["day"] == day and h in e["hours"]
-                    ),
-                    key=lambda e: e["label"],
-                )
-            )
-
-        row = 1
-        while row <= len(hours):
-            current = cells[row - 1]
-            if not current:
-                row += 1
-                continue
-            sig = [e["key"] for e in current]
-            end = row
-            while end < len(hours) and [e["key"] for e in cells[end]] == sig:
-                end += 1
-            body = "\n\n".join(e["label"] for e in current)
-            data[row][col] = body
-            if end - row + 1 > 1:
-                spans.append(((col, row), (col, end)))  # (col,row) start
-            row = end + 1
-
-    return data, spans
+    grid = build_time_day_grid(entries)
+    return time_day_grid_to_table(grid)
 
 
 def render_programme_timetable(programme, semester, year_of_study=1, out=None):
     """Render the programme timetable PDF to `out` (file-like or a path)."""
     entries = collect_entries(programme, semester)
-    data, spans = build_grid(entries)
+    return _render_grid(
+        entries,
+        title=f"{programme.name.upper()}",
+        subtitle=f"{_ordinal(year_of_study)} YEAR · {semester.academic_year}",
+        semester=semester,
+        doc_title=f"{programme.name} Timetable",
+        out=out,
+    )
+
+
+def render_group_timetable(group, semester, year_of_study=1, out=None):
+    """Render ONE student group's timetable PDF to `out` (file-like/path)."""
+    entries = collect_entries(group.programme, semester, group=group)
+    return _render_grid(
+        entries,
+        title=f"{group.programme.name.upper()}",
+        subtitle=(
+            f"{_ordinal(year_of_study)} YEAR · GROUP {group.code} · "
+            f"{semester.academic_year}"
+        ),
+        semester=semester,
+        doc_title=f"{group.programme.code} {group.code} Timetable",
+        out=out,
+    )
+
+
+def _render_grid(entries, title, subtitle, semester, doc_title, out):
+    """Render the weekly grid PDF to `out` (file-like or a path)."""
+    data, spans, fills = build_grid(entries)
 
     doc = SimpleDocTemplate(
         out,
         pagesize=A4,
-        leftMargin=14 * mm,
-        rightMargin=14 * mm,
-        topMargin=16 * mm,
-        bottomMargin=16 * mm,
-        title=f"{programme.name} Timetable",
+        leftMargin=11 * mm,
+        rightMargin=11 * mm,
+        topMargin=13 * mm,
+        bottomMargin=14 * mm,
+        title=doc_title,
     )
 
     title_style = ParagraphStyle(
@@ -247,46 +291,61 @@ def render_programme_timetable(programme, semester, year_of_study=1, out=None):
         leading=10,
     )
     cell_style = ParagraphStyle(
-        "cell", fontName="Helvetica", fontSize=7, leading=8.5, alignment=TA_CENTER
+        "cell", fontName="Helvetica-Bold", fontSize=6.5, leading=8, alignment=TA_CENTER
     )
     time_style = ParagraphStyle(
         "time",
         fontName="Helvetica-Bold",
-        fontSize=7,
+        fontSize=6.5,
         alignment=TA_CENTER,
-        leading=8.5,
+        leading=8,
     )
     foot_style = ParagraphStyle(
         "foot", fontName="Helvetica", fontSize=8, alignment=TA_CENTER
     )
 
-    title = f"{programme.name.upper()} {_ordinal(year_of_study)} YEAR {semester.academic_year} TIME TABLE"
     elements = [
         Paragraph(title, title_style),
-        Paragraph(f"SEMESTER {semester.semester} · {semester.academic_year}", sub_style),
+        Paragraph(subtitle, sub_style),
+        Paragraph(f"SEMESTER {semester.semester}", sub_style),
         Spacer(1, 4 * mm),
     ]
 
-    widths = None
-    usable = A4[0] - 28 * mm
-    time_w = 46
-    day_w = (usable - time_w) / len(DAY_ORDER)
-    widths = [time_w] + [day_w] * len(DAY_ORDER)
+    n_days = max(len(data[0]) - 1, 1) if data else 1
+    usable = A4[0] - 22 * mm
+    time_w = 44
+    day_w = (usable - time_w) / n_days
+    widths = [time_w] + [day_w] * n_days
 
     table_data = [[Paragraph(item, head_style) for item in data[0]]]
     for row in data[1:]:
         table_data.append(
             [
-                Paragraph(row[0], time_style),
+                Paragraph(row[0], time_style) if row[0] else "",
             ]
             + [Paragraph(cell, cell_style) if cell else "" for cell in row[1:]]
         )
 
-    grid = Table(table_data, colWidths=widths, repeatRows=1)
+    n_rows = len(data) - 1
+    row_h = None
+    if n_rows:
+        title_block = 18 + 12 + 12 + 4 * mm
+        footer_block = 6 * mm + 8
+        usable_h = A4[1] - doc.topMargin - doc.bottomMargin
+        avail = max(usable_h - title_block - footer_block, n_rows * 18)
+        row_h = min(avail / n_rows, 42)
+
+    grid = Table(
+        table_data,
+        colWidths=widths,
+        repeatRows=1,
+        rowHeights=[None] + [row_h] * n_rows if row_h else None,
+    )
     style = [
         ("GRID", (0, 0), (-1, -1), 0.4, colors.black),
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#dce6f1")),
-        ("SPAN", (0, 0), (0, 0)),
+        ("BACKGROUND", (0, 0), (0, 0), colors.HexColor("#eceff4")),
+        ("BACKGROUND", (0, 1), (0, -1), colors.HexColor("#f8fafc")),
+        ("BACKGROUND", (1, 0), (-1, 0), colors.HexColor("#dce6f1")),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("TOPPADDING", (0, 0), (-1, -1), 3),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
@@ -295,11 +354,14 @@ def render_programme_timetable(programme, semester, year_of_study=1, out=None):
     ]
     for start, end in spans:
         style.append(("SPAN", start, end))
+    for start, end, hex_color in fills:
+        style.append(("BACKGROUND", start, end, colors.HexColor(hex_color)))
     grid.setStyle(TableStyle(style))
 
     elements.append(grid)
     elements.append(Spacer(1, 6 * mm))
-    elements.append(Paragraph("Prepared for personal use", foot_style))
+    export_date = datetime.date.today().strftime("%d %B %Y")
+    elements.append(Paragraph(f"Prepared for personal use · {export_date}", foot_style))
 
     doc.build(elements)
     return doc

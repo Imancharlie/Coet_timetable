@@ -3,11 +3,16 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 from django.db.models import Q, Count
-from django.http import HttpResponse, HttpResponseBadRequest
+from django.http import HttpResponse, HttpResponseBadRequest, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 
-from .timetable_pdf import render_programme_timetable
+from .timetable_grid import build_time_day_grid
+from .timetable_pdf import (
+    collect_entries,
+    render_group_timetable,
+    render_programme_timetable,
+)
 
 from .forms import (
     FileUploadForm,
@@ -23,6 +28,7 @@ from .forms import (
 )
 from .importers import (
     ImportResult,
+    assign_lecture_groups,
     import_master_timetable_from_excel,
     import_programme_courses_from_excel,
     import_programmes_from_excel,
@@ -285,13 +291,49 @@ def programme_delete(request, pk):
     )
 
 
+def _latest_semester_with_data():
+    """Most recent semester that holds any timetable data, else the latest one."""
+    return (
+        Semester.objects.filter(
+            Q(sessions__isnull=False)
+            | Q(workshop_allocations__isnull=False)
+            | Q(td_allocations__isnull=False)
+        )
+        .order_by("-academic_year", "-semester")
+        .distinct()
+        .first()
+        or Semester.objects.order_by("-academic_year", "-semester").first()
+    )
+
+
 def export_timetable(request):
-    """Page listing every registered programme, each with an Export button."""
+    """Export hub: search programmes/groups, then export per group or programme."""
+    q = request.GET.get("q", "").strip()
     programmes = Programme.objects.all()
-    semester = Semester.objects.order_by("-academic_year", "-semester").first()
+    if q:
+        programmes = programmes.filter(
+            Q(code__icontains=q)
+            | Q(name__icontains=q)
+            | Q(student_groups__code__icontains=q)
+        ).distinct()
+    semester = _latest_semester_with_data()
+    rows = []
+    for p in programmes:
+        groups = p.student_groups.all()
+        if q:
+            groups = [
+                g
+                for g in groups
+                if q.lower() in g.code.lower()
+                or q.lower() in p.code.lower()
+                or q.lower() in p.name.lower()
+            ]
+        rows.append({"programme": p, "groups": groups})
     ctx = {
         "page_title": "Export Timetable",
-        "programmes": programmes,
+        "rows": rows,
+        "q": q,
+        "total_groups": StudentGroup.objects.count(),
         "semesters": Semester.objects.all(),
         "default_semester": semester,
         "year_options": [1, 2, 3, 4],
@@ -307,13 +349,21 @@ def programme_timetable_pdf(request, pk):
     if sem_id:
         semester = get_object_or_404(Semester, pk=sem_id)
     else:
+        group_codes = list(
+            StudentGroup.objects.filter(programme=programme).values_list(
+                "code", flat=True
+            )
+        )
         semester = (
             Semester.objects.filter(
-                sessions__session_groups__group__programme=programme
+                Q(sessions__session_groups__group__programme=programme)
+                | Q(workshop_allocations__group_code__in=group_codes)
+                | Q(td_allocations__group_code__in=group_codes)
             )
             .order_by("-academic_year", "-semester")
+            .distinct()
             .first()
-            or Semester.objects.first()
+            or _latest_semester_with_data()
         )
     try:
         year = int(request.GET.get("year", 1))
@@ -326,6 +376,119 @@ def programme_timetable_pdf(request, pk):
     response["Content-Disposition"] = disposition
     render_programme_timetable(programme, semester, year, out=response)
     return response
+
+
+def group_timetable_pdf(request, pk):
+    """Export a single student group's timetable as a PDF grid (merged cells)."""
+    group = get_object_or_404(
+        StudentGroup.objects.select_related("programme"), pk=pk
+    )
+    sem_id = request.GET.get("semester", "")
+    semester = None
+    if sem_id:
+        semester = get_object_or_404(Semester, pk=sem_id)
+    else:
+        semester = (
+            Semester.objects.filter(
+                Q(sessions__session_groups__group=group)
+                | Q(workshop_allocations__group_code=group.code)
+                | Q(td_allocations__group_code=group.code)
+            )
+            .order_by("-academic_year", "-semester")
+            .distinct()
+            .first()
+            or _latest_semester_with_data()
+        )
+    try:
+        year = int(request.GET.get("year", 1))
+    except (TypeError, ValueError):
+        year = 1
+    response = HttpResponse(content_type="application/pdf")
+    filename = f"timetable_{group.programme.code}_{group.code}_{year}.pdf"
+    response["Content-Disposition"] = f'attachment; filename="{filename}"'
+    render_group_timetable(group, semester, year, out=response)
+    return response
+
+
+def timetable_view(request):
+    """Screen timetable grid: DAYS across the first row, TIME down the first column.
+
+    Built from the session/workshop/TD records of the selected programme and
+    semester via ``core.timetable_grid.build_time_day_grid`` (same data source
+    as the PDF export), so any programme renders correctly. Cells are shaded
+    by activity type (Lecture grey, Workshop green, Technical Drawing pink).
+    """
+    programmes = list(Programme.objects.all())
+    semesters = list(Semester.objects.order_by("-academic_year", "-semester"))
+
+    active_programme = None
+    programme_id = request.GET.get("programme")
+    if programme_id and programme_id != "all":
+        active_programme = Programme.objects.filter(pk=programme_id).first()
+
+    active_group = None
+    group_id = request.GET.get("group")
+    if group_id and active_programme:
+        active_group = StudentGroup.objects.filter(pk=group_id, programme=active_programme).first()
+
+    active_semester = None
+    if request.GET.get("semester"):
+        active_semester = Semester.objects.filter(
+            pk=request.GET["semester"]
+        ).first()
+    if active_semester is None:
+        active_semester = _latest_semester_with_data()
+
+    year = 1
+    raw_year = request.GET.get("year", "")
+    if raw_year.strip().isdigit():
+        year = max(1, min(4, int(raw_year)))
+
+    entries = []
+    grid = {"slots": [], "days": [], "rows": []}
+    if active_semester:
+        if active_group:
+            entries = collect_group_entries(active_group, active_semester)
+        elif active_programme:
+            entries = collect_entries(active_programme, active_semester)
+        elif programmes:
+            for prog in programmes:
+                entries.extend(collect_entries(prog, active_semester))
+        grid = build_time_day_grid(entries)
+
+    ordinal = {1: "1st", 2: "2nd", 3: "3rd", 4: "4th"}
+    
+    groups_for_programme = []
+    if active_programme:
+        groups_for_programme = list(StudentGroup.objects.filter(programme=active_programme))
+    
+    ctx = {
+        "page_title": "Timetable",
+        "programmes": programmes,
+        "semesters": semesters,
+        "active_programme": active_programme,
+        "active_group": active_group,
+        "groups_for_programme": groups_for_programme,
+        "active_semester": active_semester,
+        "year": year,
+        "year_options": [1, 2, 3, 4],
+        "year_ordinal": ordinal.get(year, f"{year}th"),
+        "grid": grid,
+        "entry_count": len(entries),
+        "show_all": programme_id == "all",
+    }
+    return render(request, "core/timetable.html", ctx)
+
+
+def timetable_groups_json(request):
+    """JSON endpoint to fetch groups for a selected programme."""
+    programme_id = request.GET.get("programme")
+    groups = []
+    if programme_id:
+        groups = list(
+            StudentGroup.objects.filter(programme_id=programme).values("id", "code")
+        )
+    return JsonResponse({"groups": groups})
 
 
 # ──────────────────────────────────────────────
@@ -395,6 +558,8 @@ def studentgroup_detail(request, pk):
         "edit_url": f"/groups/{pk}/edit/",
         "delete_url": f"/groups/{pk}/delete/",
         "back_url": "/groups/",
+        "export_url": reverse("group-timetable-export", args=[pk]),
+        "export_label": "Export Timetable (PDF)",
     }
     if _htmx(request):
         return render(request, "core/_detail_content.html", ctx)
@@ -1033,28 +1198,9 @@ def session_assign_lecture_groups(request):
     if request.method != "POST":
         return redirect("session-list")
     sessions = Session.objects.filter(activity_type="LECTURE")
-    processed = 0
-    created_links = 0
-    already_linked = 0
-    skipped_courses = set()
-    for session in sessions:
-        prog_ids = list(
-            ProgrammeCourse.objects.filter(course_code=session.course_code).values_list(
-                "programme_id", flat=True
-            )
-        )
-        if not prog_ids:
-            skipped_courses.add(session.course_code)
-            continue
-        for group in StudentGroup.objects.filter(programme_id__in=prog_ids):
-            _, created = SessionGroup.objects.get_or_create(
-                session=session, group=group
-            )
-            if created:
-                created_links += 1
-            else:
-                already_linked += 1
-        processed += 1
+    processed, created_links, already_linked, skipped_courses = (
+        assign_lecture_groups()
+    )
     _log(
         LogAction.ASSIGN,
         f"Lecture group assignment complete: {created_links} link(s) created, "
@@ -1066,7 +1212,7 @@ def session_assign_lecture_groups(request):
         "processed": processed,
         "created_links": created_links,
         "already_linked": already_linked,
-        "skipped_courses": sorted(skipped_courses),
+        "skipped_courses": skipped_courses,
     }
     if _htmx(request):
         return render(request, "core/_session_assign_result.html", ctx)
@@ -1800,11 +1946,13 @@ IMPORT_TYPES = {
     "master-timetable": {
         "title": "Master Timetable",
         "columns": "course_code, activity_type, day, start_time, end_time, venue, group",
+        "semester": "required",
         "hint": (
             "Readable aliases accepted ('course', 'type', 'start', 'end', 'room', "
             "'groups', ...). Comma-separated course codes are split into separate "
-            "sessions. If no semester exists yet, the current academic year's "
-            "semester 1 is created automatically."
+            "sessions. Choose the academic Semester this timetable belongs to above — "
+            "it is never auto-detected. LECTURE sessions are automatically linked to "
+            "every programme group that studies the course."
         ),
         "fn": import_master_timetable_from_excel,
     },
@@ -1814,19 +1962,22 @@ IMPORT_TYPES = {
             "Flat: course_code, group_code, day, start_time, end_time, venue — "
             "or drop in the raw university Workshop Schedule workbook (matrix) directly"
         ),
+        "semester": "optional",
         "hint": (
             "Both formats supported automatically. The raw university workshop "
             "workbook (GROUPS/POSITION/SCHEDULE/KEY layout) is detected and parsed "
             "as-is; week ranges, workshop, position, day and Morning/Afternoon "
             "period come from the workbook, with the semester read from the title "
             "(created automatically if missing). The flat format also accepts a "
-            "single 'time' range column such as 08:00-10:00."
+            "single 'time' range column such as 08:00-10:00. Leave the semester "
+            "unset to auto-detect it."
         ),
         "fn": import_workshop_allocation_from_excel,
     },
     "td-allocation": {
         "title": "TD Allocation",
         "columns": "course_code, group_code, day, start_time, end_time, venue",
+        "semester": "optional",
         "hint": (
             "Requires a course_code column. Accepts the pivoted layout "
             "(Day/Time/Group/Venue with merged cells): day, time and venue are "
@@ -1850,17 +2001,42 @@ def import_upload(request, import_type):
     if import_type not in IMPORT_TYPES:
         return HttpResponseBadRequest("Unknown import type")
     info = IMPORT_TYPES[import_type]
+    semester_choice = info.get("semester", "")
+    semesters = Semester.objects.all()
+    no_semester = semester_choice == "required" and not semesters
+    active_semester = ""
     if request.method == "POST":
         form = FileUploadForm(request.POST, request.FILES)
         result: ImportResult = ImportResult()
-        if form.is_valid():
+        semester_id = None
+        if semester_choice:
+            active_semester = request.POST.get("semester", "").strip()
+            if not active_semester:
+                if semester_choice == "required":
+                    result.errors.append(
+                        "Please choose the academic semester this timetable belongs to."
+                    )
+            else:
+                try:
+                    sem = Semester.objects.get(pk=active_semester)
+                except (ValueError, Semester.DoesNotExist):
+                    result.errors.append(
+                        f"Semester '{active_semester}' does not exist — create it first."
+                    )
+                else:
+                    semester_id = sem.pk
+        if form.is_valid() and not result.errors:
             uploaded = form.cleaned_data["file"]
             try:
                 if hasattr(uploaded, "temporary_file_path"):
-                    result = info["fn"](uploaded.temporary_file_path())
+                    source = uploaded.temporary_file_path()
                 else:
                     uploaded.seek(0)
-                    result = info["fn"](uploaded)
+                    source = uploaded
+                if semester_id is not None:
+                    result = info["fn"](source, semester_id=semester_id)
+                else:
+                    result = info["fn"](source)
             except Exception as exc:
                 result.errors.append(str(exc))
             msg = f"Imported {info['title']}: {result.created} created, {result.updated} updated"
@@ -1874,7 +2050,7 @@ def import_upload(request, import_type):
                 info["title"],
                 getattr(uploaded, "name", "")[:300],
             )
-        else:
+        elif not form.is_valid():
             result.errors.append("No file attached or invalid upload.")
         ctx = {
             "result": result,
@@ -1883,6 +2059,10 @@ def import_upload(request, import_type):
             "columns": info["columns"],
             "hint": info.get("hint", ""),
             "form": form,
+            "semester_choice": semester_choice,
+            "semesters": semesters,
+            "active_semester": active_semester,
+            "no_semester": no_semester,
             "page_title": f"Import {info['title']}",
         }
         if _htmx(request):
@@ -1898,6 +2078,10 @@ def import_upload(request, import_type):
             "import_title": info["title"],
             "columns": info["columns"],
             "hint": info.get("hint", ""),
+            "semester_choice": semester_choice,
+            "semesters": semesters,
+            "active_semester": active_semester,
+            "no_semester": no_semester,
             "page_title": f"Import {info['title']}",
         },
     )

@@ -27,9 +27,12 @@ from core.models import (
     SessionGroup,
     StudentGroup,
     TechnicalDrawingAllocation,
+    TimePeriod,
     Venue,
     WorkshopAllocation,
 )
+from core.timetable_grid import build_time_day_grid, time_day_grid_to_table
+from core.timetable_pdf import build_grid, collect_entries
 from core.venue_quality import analyse_venues, base_key, issues_for, suggested_name
 from core.workshop_parser import parse_workbook
 
@@ -256,7 +259,7 @@ class MasterTimetableImportTests(ImporterTestCase):
         self.assertEqual(second.created, 0)
         self.assertEqual(second.updated, 3)
         self.assertEqual(Session.objects.count(), 3)
-        self.assertEqual(SessionGroup.objects.count(), 3)
+        self.assertEqual(SessionGroup.objects.count(), 5)
 
     def test_exact_course_codes_preserved(self):
         self._seed()
@@ -303,7 +306,9 @@ class MasterTimetableImportTests(ImporterTestCase):
         self.assertIn("A9", result.missing_groups)
         self.assertTrue(result.errors)
         session = Session.objects.get(course_code="MT161", semester=self.sem1)
-        self.assertEqual(session.session_groups.count(), 0)
+        self.assertNotIn(
+            "A9", session.session_groups.values_list("group__code", flat=True)
+        )
         self.assertEqual(Venue.objects.get(name="NO_SUCH_VENUE").capacity, 0)
 
     def test_dry_run_writes_nothing(self):
@@ -500,7 +505,7 @@ class AdaptiveImportTests(ImporterTestCase):
         self.assertTrue(Session.objects.filter(course_code="MT161").exists())
         self.assertTrue(Session.objects.filter(course_code="TG201").exists())
 
-    def test_master_import_auto_creates_default_semester(self):
+    def test_master_import_without_semester_is_blocked(self):
         Semester.objects.all().delete()
         result = import_master_timetable_from_excel(
             make_xlsx(
@@ -508,9 +513,61 @@ class AdaptiveImportTests(ImporterTestCase):
                 MASTER_COLS,
             )
         )
-        self.assertTrue(Semester.objects.exists())
-        self.assertTrue(result.detected_semester)
-        self.assertEqual(Session.objects.count(), 1)
+        self.assertTrue(
+            any("semester" in err.lower() for err in result.errors), result.errors
+        )
+        self.assertFalse(Semester.objects.exists())
+        self.assertEqual(Session.objects.count(), 0)
+
+    def test_master_import_auto_assigns_lecture_groups(self):
+        self._seed()
+        path = make_xlsx(
+            [["MT161", "LECTURE", "MONDAY", "08:00", "10:00", "LH1", ""]],
+            MASTER_COLS,
+        )
+        result = import_master_timetable_from_excel(path, semester_id=self.sem1.pk)
+        session = Session.objects.get(course_code="MT161", semester=self.sem1)
+        self.assertEqual(
+            set(session.session_groups.values_list("group__code", flat=True)),
+            {"A1", "A2", "B1"},
+        )
+        self.assertEqual(result.lecture_sessions_processed, 1)
+        self.assertEqual(result.lecture_groups_linked, 3)
+        self.assertEqual(result.lecture_groups_existing, 0)
+
+    def test_master_import_auto_assign_is_idempotent(self):
+        self._seed()
+        path = make_xlsx(
+            [["MT161", "LECTURE", "MONDAY", "08:00", "10:00", "LH1", ""]],
+            MASTER_COLS,
+        )
+        import_master_timetable_from_excel(path, semester_id=self.sem1.pk)
+        second = import_master_timetable_from_excel(path, semester_id=self.sem1.pk)
+        self.assertEqual(second.lecture_groups_linked, 0)
+        self.assertEqual(second.lecture_groups_existing, 3)
+        self.assertEqual(SessionGroup.objects.count(), 3)
+
+    def test_master_import_auto_assign_skips_non_lectures(self):
+        self._seed()
+        path = make_xlsx(
+            [["TG201", "TUTORIAL", "TUESDAY", "11:00", "12:00", "LH1", "A1"]],
+            MASTER_COLS,
+        )
+        result = import_master_timetable_from_excel(path, semester_id=self.sem1.pk)
+        session = Session.objects.get(course_code="TG201", semester=self.sem1)
+        self.assertEqual(session.session_groups.count(), 1)  # only the explicit A1
+        self.assertEqual(result.lecture_sessions_processed, 0)
+
+    def test_master_import_auto_assign_reports_unmapped_courses(self):
+        self._seed()
+        path = make_xlsx(
+            [["GHOST100", "LECTURE", "MONDAY", "08:00", "10:00", "LH1", ""]],
+            MASTER_COLS,
+        )
+        result = import_master_timetable_from_excel(path, semester_id=self.sem1.pk)
+        self.assertIn("GHOST100", result.lecture_skipped_courses)
+        session = Session.objects.get(course_code="GHOST100", semester=self.sem1)
+        self.assertEqual(session.session_groups.count(), 0)
 
     def test_workshop_flat_accepts_time_range_column(self):
         self._seed()
@@ -840,7 +897,8 @@ class ImportUploadViewTests(TestCase):
                 {
                     "file": SimpleUploadedFile(
                         "mt.xlsx", fh.read(), content_type=XLSX_CONTENT_TYPE
-                    )
+                    ),
+                    "semester": sem.pk,
                 },
                 HTTP_HX_REQUEST="true",
             )
@@ -848,9 +906,75 @@ class ImportUploadViewTests(TestCase):
         html = resp.content.decode()
         self.assertIn("Reconciled", html)
         self.assertIn("ALL", html)
+        self.assertIn("2026/2027 - Semester 1", html)
         self.assertEqual(Session.objects.count(), 1)
         session = Session.objects.first()
         self.assertEqual(session.session_groups.count(), 1)
+
+    def test_master_timetable_upload_requires_semester(self):
+        sem = Semester.objects.create(academic_year="2026/2027", semester=1)
+        prog = Programme.objects.create(code="CE", name="Civil Engineering")
+        StudentGroup.objects.create(programme=prog, code="A1")
+        ProgrammeCourse.objects.create(
+            programme=prog, course_code="MT161", course_name="Mathematics 1", semester=1
+        )
+        Venue.objects.create(name="LH1", capacity=80)
+        self.client.get("/import/master-timetable/")
+        path = make_xlsx(
+            [["MT161", "LECTURE", "MONDAY", "08:00", "10:00", "LH1", "ALL"]],
+            MASTER_COLS,
+        )
+        with open(path, "rb") as fh:
+            resp = self.client.post(
+                "/import/master-timetable/",
+                {
+                    "file": SimpleUploadedFile(
+                        "mt.xlsx", fh.read(), content_type=XLSX_CONTENT_TYPE
+                    )
+                },
+                HTTP_HX_REQUEST="true",
+            )
+        self.assertEqual(resp.status_code, 200)
+        html = resp.content.decode()
+        self.assertIn("semester", html.lower())
+        self.assertEqual(Session.objects.count(), 0)
+
+    def test_master_timetable_upload_bad_semester_blocked(self):
+        sem = Semester.objects.create(academic_year="2026/2027", semester=1)
+        prog = Programme.objects.create(code="CE", name="Civil Engineering")
+        StudentGroup.objects.create(programme=prog, code="A1")
+        ProgrammeCourse.objects.create(
+            programme=prog, course_code="MT161", course_name="Mathematics 1", semester=1
+        )
+        self.client.get("/import/master-timetable/")
+        path = make_xlsx(
+            [["MT161", "LECTURE", "MONDAY", "08:00", "10:00", "LH1", "ALL"]],
+            MASTER_COLS,
+        )
+        with open(path, "rb") as fh:
+            resp = self.client.post(
+                "/import/master-timetable/",
+                {
+                    "file": SimpleUploadedFile(
+                        "mt.xlsx", fh.read(), content_type=XLSX_CONTENT_TYPE
+                    ),
+                    "semester": 9999,
+                },
+                HTTP_HX_REQUEST="true",
+            )
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("does not exist", resp.content.decode())
+        self.assertEqual(Session.objects.count(), 0)
+
+    def test_master_timetable_upload_shows_semester_select(self):
+        Semester.objects.create(academic_year="2026/2027", semester=1)
+        resp = self.client.get("/import/master-timetable/")
+        self.assertEqual(resp.status_code, 200)
+        html = resp.content.decode()
+        self.assertIn("Academic Semester", html)
+        self.assertIn('name="semester"', html)
+        self.assertIn('value="1"', html)
+        self.assertIn("* required", html)
 
 
 class WorkshopMatrixParserTests(TestCase):
@@ -1616,3 +1740,237 @@ class VenueQualityTests(TestCase):
             WorkshopAllocation.objects.get(course_code="ME201").venue,
             keep.name,
         )
+
+
+class TimetableGridTests(TestCase):
+    """Classic grid: DAYS as columns, TIME slots as rows, session spanning."""
+
+    def setUp(self):
+        self.sem = Semester.objects.create(academic_year="2026/2027", semester=1)
+        self.prog = Programme.objects.create(
+            code="EE", name="BSc. in Electrical Engineering"
+        )
+        self.g1 = StudentGroup.objects.create(programme=self.prog, code="C1")
+        self.g2 = StudentGroup.objects.create(programme=self.prog, code="C2")
+        self.venue = Venue.objects.create(name="YOMBO5", capacity=80)
+
+        def make(course, atype, day, start, end):
+            return Session.objects.create(
+                semester=self.sem,
+                course_code=course,
+                activity_type=atype,
+                day=day,
+                start_time=start,
+                end_time=end,
+                venue=self.venue,
+            )
+
+        self.s1 = make("MT171", "LECTURE", "MONDAY", "08:00", "09:00")
+        self.s2 = make("EE153", "LECTURE", "WEDNESDAY", "07:00", "09:55")
+        self.s3 = make("EE131", "LECTURE", "MONDAY", "08:00", "10:00")
+        SessionGroup.objects.create(session=self.s1, group=self.g1)
+        SessionGroup.objects.create(session=self.s2, group=self.g1)
+        SessionGroup.objects.create(session=self.s3, group=self.g2)
+
+    def test_grid_slots_and_weekday_columns(self):
+        grid = build_time_day_grid(collect_entries(self.prog, self.sem))
+        self.assertEqual(grid["slots"][0]["label"], "07:00-07:55")
+        labels = [d["day"] for d in grid["days"]]
+        self.assertEqual(labels, ["MONDAY", "WEDNESDAY"])
+        self.assertNotIn("SATURDAY", labels)
+        self.assertEqual(len(grid["rows"]), 3)
+
+    def test_multi_slot_session_spans_rows(self):
+        grid = build_time_day_grid(collect_entries(self.prog, self.sem))
+        di = [d["day"] for d in grid["days"]].index("WEDNESDAY")
+        cell = grid["rows"][0]["cols"][di]
+        self.assertEqual(cell["rowspan"], 3)
+        self.assertEqual(cell["entries"][0]["course_code"], "EE153")
+        self.assertIsNone(grid["rows"][1]["cols"][di])
+        self.assertIsNone(grid["rows"][2]["cols"][di])
+
+    def test_overlapping_sessions_share_a_block(self):
+        grid = build_time_day_grid(collect_entries(self.prog, self.sem))
+        di = [d["day"] for d in grid["days"]].index("MONDAY")
+        cell = grid["rows"][1]["cols"][di]
+        codes = sorted(e["course_code"] for e in cell["entries"])
+        self.assertEqual(codes, ["EE131", "MT171"])
+        self.assertEqual(grid["rows"][0]["cols"][di]["empty"], True)
+
+    def test_pdf_grid_table_is_classic(self):
+        entries = collect_entries(self.prog, self.sem)
+        data, spans, fills = build_grid(entries)
+        self.assertEqual(data[0][0], "TIME")
+        self.assertEqual(data[0][1], "MONDAY")
+        self.assertEqual(data[0][2], "WEDNESDAY")
+        self.assertEqual(data[1][0], "07:00-07:55")
+        self.assertIn(((2, 1), (2, 3)), spans)
+        self.assertIn(((2, 1), (2, 3), "#d1d5db"), fills)
+
+    def test_lecture_workshop_td_fill_colors(self):
+        workshop = WorkshopAllocation.objects.create(
+            semester=self.sem,
+            course_code="EE151",
+            workshop="W1",
+            group_code="C1",
+            day="WEDNESDAY",
+            start_time="10:00",
+            end_time="12:00",
+            venue="WORKSHOP 1",
+        )
+        td = TechnicalDrawingAllocation.objects.create(
+            semester=self.sem,
+            course_code="EE153",
+            group_code="C1",
+            day="FRIDAY",
+            start_time="13:00",
+            end_time="17:00",
+            venue="TD LAB",
+        )
+        data, spans, fills = build_grid(collect_entries(self.prog, self.sem))
+        fill_map = {(start, end): color for start, end, color in fills}
+        workshop_cell = (
+            (2, 4),
+            (2, 5),
+        )
+        self.assertEqual(fill_map[workshop_cell], "#dcfce7")
+        self.assertIn("#fce7f3", fill_map.values())
+
+    def test_collect_entries_for_single_group(self):
+        g1_entries = collect_entries(self.prog, self.sem, group=self.g1)
+        self.assertEqual(
+            {e["course_code"] for e in g1_entries}, {"MT171", "EE153"}
+        )
+        g2_entries = collect_entries(self.prog, self.sem, group=self.g2)
+        self.assertEqual({e["course_code"] for e in g2_entries}, {"EE131"})
+        self.assertNotIn("EE131", {e["course_code"] for e in g1_entries})
+
+
+class TimetablePageTests(TestCase):
+    """On-screen timetable page and the PDF export (classic grid)."""
+
+    def setUp(self):
+        self.sem = Semester.objects.create(academic_year="2026/2027", semester=1)
+        self.prog_a = Programme.objects.create(
+            code="EE", name="BSc. in Electrical Engineering"
+        )
+        Programme.objects.create(code="AB", name="Alpha Programme")
+        group = StudentGroup.objects.create(programme=self.prog_a, code="C1")
+        venue = Venue.objects.create(name="YOMBO5", capacity=80)
+        session = Session.objects.create(
+            semester=self.sem,
+            course_code="MT171",
+            activity_type="LECTURE",
+            day="MONDAY",
+            start_time="08:00",
+            end_time="09:00",
+            venue=venue,
+        )
+        SessionGroup.objects.create(session=session, group=group)
+
+    def test_page_renders_classic_grid(self):
+        resp = self.client.get(
+            "/timetable/",
+            {"programme": self.prog_a.pk, "semester": self.sem.pk},
+            HTTP_HOST="localhost",
+        )
+        self.assertEqual(resp.status_code, 200)
+        html = resp.content.decode()
+        self.assertIn("TIME", html)
+        self.assertIn("Monday", html)
+        self.assertIn("08:00", html)
+        self.assertIn("08:55", html)
+        self.assertIn("MT171", html)
+        self.assertIn("Lecture", html)
+        self.assertIn("YOMBO5", html)
+        self.assertIn("tt-card", html)
+        self.assertIn("tt-kind-lecture", html)
+        self.assertIn("tt-time", html)
+
+    def test_page_falls_back_when_programme_unknown(self):
+        resp = self.client.get(
+            "/timetable/", {"programme": "9999"}, HTTP_HOST="localhost"
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("Timetable", resp.content.decode())
+
+    def test_empty_timetable_shows_message(self):
+        prog = Programme.objects.get(code="AB")
+        resp = self.client.get(
+            "/timetable/", {"programme": prog.pk}, HTTP_HOST="localhost"
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("No sessions scheduled", resp.content.decode())
+
+    def test_classic_pdf_export(self):
+        resp = self.client.get(
+            "/export/programmes/%d/timetable.pdf/" % self.prog_a.pk,
+            {"semester": self.sem.pk, "year": "1"},
+            HTTP_HOST="localhost",
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp["Content-Type"], "application/pdf")
+        self.assertTrue(resp.content.startswith(b"%PDF-"))
+
+    def test_group_pdf_export(self):
+        group = StudentGroup.objects.get(programme=self.prog_a, code="C1")
+        resp = self.client.get(
+            "/export/groups/%d/timetable.pdf/" % group.pk,
+            {"semester": self.sem.pk, "year": "1"},
+            HTTP_HOST="localhost",
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp["Content-Type"], "application/pdf")
+        self.assertTrue(resp.content.startswith(b"%PDF-"))
+        self.assertIn("attachment; filename=", resp["Content-Disposition"])
+        self.assertIn("C1", resp["Content-Disposition"])
+
+    def test_group_pdf_export_falls_back_to_a_semester(self):
+        group = StudentGroup.objects.get(programme=self.prog_a, code="C1")
+        resp = self.client.get(
+            "/export/groups/%d/timetable.pdf/" % group.pk,
+            HTTP_HOST="localhost",
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.content.startswith(b"%PDF-"))
+        self.assertIn(b"/Title (EE C1 Timetable)", resp.content)
+
+    def test_group_pdf_default_skips_empty_newer_semester(self):
+        empty = Semester.objects.create(academic_year="2026/2027", semester=2)
+        group = StudentGroup.objects.get(programme=self.prog_a, code="C1")
+        resp = self.client.get(
+            "/export/groups/%d/timetable.pdf/" % group.pk,
+            HTTP_HOST="localhost",
+        )
+        empty_resp = self.client.get(
+            "/export/groups/%d/timetable.pdf/" % group.pk,
+            {"semester": empty.pk},
+            HTTP_HOST="localhost",
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.content.startswith(b"%PDF-"))
+        self.assertIn(b"/Title (EE C1 Timetable)", resp.content)
+        # The default must not land on the newer-but-empty semester.
+        self.assertGreater(len(resp.content), len(empty_resp.content))
+
+    def test_export_page_defaults_to_semester_with_data(self):
+        empty = Semester.objects.create(academic_year="2026/2027", semester=2)
+        resp = self.client.get("/export/", HTTP_HOST="localhost")
+        html = resp.content.decode()
+        self.assertIn(f'value="{self.sem.pk}" selected', html)
+        self.assertNotIn(f'value="{empty.pk}" selected', html)
+
+    def test_export_page_searches_groups(self):
+        resp = self.client.get("/export/", {"q": "C1"}, HTTP_HOST="localhost")
+        html = resp.content.decode()
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("EE", html)
+        self.assertIn("C1", html)
+        self.assertNotIn("Alpha Programme", html)
+        self.assertIn("/export/groups/", html)
+
+    def test_export_page_empty_search(self):
+        resp = self.client.get("/export/", {"q": "zzz"}, HTTP_HOST="localhost")
+        html = resp.content.decode()
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("No programmes or groups match", html)

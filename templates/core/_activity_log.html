@@ -1,7 +1,8 @@
 {% load core_tags %}
 
 <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-    <div class="divide-y divide-gray-100">
+    <div class="overflow-x-auto -mx-4 px-4">
+        <div class="divide-y divide-gray-100 min-w-full">
         {% for log in items %}
         <a href="{% url 'dashboard' %}?log={{ log.pk }}"
            class="flex items-start gap-3 px-5 py-4 hover:bg-blue-50/50 transition">
@@ -24,6 +25,7 @@
             <p class="text-xs mt-1">Changes you make will appear here</p>
         </div>
         {% endfor %}
+    </div>
     </div>
 
     {% if pages > 1 %}

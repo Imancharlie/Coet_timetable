@@ -13,6 +13,12 @@
         [x-cloak] { display: none !important; }
         .hx-indicator { display: none; }
         .htmx-request .hx-indicator { display: inline-block; }
+        html, body { overflow-x: hidden; }
+        
+        @media (max-width: 640px) {
+            .max-w-7xl { max-width: 100%; padding: 0 0.5rem; }
+            .max-w-6xl { max-width: 100%; padding: 0 0.5rem; }
+        }
     </style>
 </head>
 <body class="h-full bg-gray-50" x-data="{ slideOpen: false, modalOpen: false, sidebarOpen: false }"

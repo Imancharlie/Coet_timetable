@@ -42,6 +42,7 @@ _NAV_SECTIONS = {
     "course": "courses",
     "import": "imports",
     "export": "exports",
+    "timetable": "timetable",
     "activity": "activity",
 }
 

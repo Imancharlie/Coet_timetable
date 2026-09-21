@@ -180,6 +180,11 @@ class ImportResult:
     duplicates: list = field(default_factory=list)
     unrecognized_cells: list = field(default_factory=list)
     programmes_created: list = field(default_factory=list)
+    lecture_sessions_processed: int = 0
+    lecture_groups_linked: int = 0
+    lecture_groups_existing: int = 0
+    lecture_skipped_courses: list = field(default_factory=list)
+    venue_resolutions: list = field(default_factory=list)
 
     @property
     def total(self):
@@ -200,6 +205,12 @@ class ImportResult:
                 f"Programmes created automatically: "
                 f"{', '.join(self.programmes_created[:20])}"
             )
+        if self.lecture_sessions_processed:
+            lines.append(
+                f"Lecture groups assigned: {self.lecture_sessions_processed} "
+                f"session(s), {self.lecture_groups_linked} link(s) added, "
+                f"{self.lecture_groups_existing} already linked"
+            )
         if self.matched_courses:
             lines.append(
                 f"Reconciled courses: {', '.join(self.matched_courses[:20])}"
@@ -211,6 +222,13 @@ class ImportResult:
         if self.missing_venues:
             lines.append(
                 f"Venues created with capacity 0: {', '.join(self.missing_venues)}"
+            )
+        if self.venue_resolutions:
+            exact = sum(1 for r in self.venue_resolutions if r["action"] == "exact")
+            matched = sum(1 for r in self.venue_resolutions if r["action"] == "matched")
+            created = sum(1 for r in self.venue_resolutions if r["action"] == "created")
+            lines.append(
+                f"Venue resolutions: {exact} exact, {matched} smart-matched, {created} created"
             )
         if self.missing_references:
             lines.append(
@@ -478,6 +496,51 @@ def import_venues_from_excel(path: str | Path) -> ImportResult:
     return result
 
 
+def _resolve_venue(venue_raw: str, dry_run: bool = False) -> tuple[Venue, str, int]:
+    """Smart venue resolution for master timetable imports.
+    
+    Returns (venue, action, capacity) where action is:
+    - "exact": exact name match found
+    - "matched": smart match via base_key with name/capacity update
+    - "created": no match found, new venue created with capacity 0
+    """
+    venue_raw = venue_raw.strip()
+    if not venue_raw:
+        return None, "skipped", 0
+    
+    # Try exact match first
+    venue = Venue.objects.filter(name=venue_raw).first()
+    if venue:
+        return venue, "exact", venue.capacity or 0
+    
+    # Try smart match via base_key
+    raw_key = base_key(venue_raw)
+    if raw_key:
+        # Find all venues with matching base_key
+        existing_venues = Venue.objects.all()
+        for v in existing_venues:
+            if base_key(v.name) == raw_key:
+                # Smart match found - determine better name and capacity
+                better_name = venue_raw if len(venue_raw) > len(v.name) else v.name
+                better_capacity = v.capacity if v.capacity > 0 else 0
+                
+                if not dry_run:
+                    # Update the venue with better name and capacity
+                    v.name = better_name
+                    v.capacity = better_capacity
+                    v.save()
+                
+                return v, "matched", better_capacity
+    
+    # No match found - create new venue with capacity 0
+    if not dry_run:
+        venue, _ = Venue.objects.get_or_create(name=venue_raw, defaults={"capacity": 0})
+        return venue, "created", 0
+    
+    # Dry run - return None but indicate it would be created
+    return None, "created", 0
+
+
 def import_semesters_from_excel(path: str | Path) -> ImportResult:
     df = pd.read_excel(path, dtype=str).fillna("")
     result = ImportResult()
@@ -642,7 +705,11 @@ def _reconcile_master(df, semester_id) -> ImportResult:
         return result
 
     if semester_id is None:
-        semester_id = 1
+        result.errors.append(
+            "No semester specified — choose the academic semester this "
+            "timetable belongs to"
+        )
+        return result
     semester = Semester.objects.filter(pk=semester_id).first()
     if semester is None:
         result.errors.append(
@@ -722,40 +789,73 @@ def reconcile_master_timetable(
     return _reconcile_master(df, semester_id)
 
 
+def assign_lecture_groups(semester=None):
+    """Attach Student Groups to LECTURE sessions via ProgrammeCourse -> programme.
+
+    Every group of every programme that studies the course is attached
+    (regardless of subgroup), so a lecture holds the full cohort. Idempotent:
+    re-running only adds missing links. When ``semester`` is given, only that
+    semester's lecture sessions are processed.
+    Returns a 4-tuple: (processed, created_links, already_linked, skipped).
+    """
+    sessions = Session.objects.filter(activity_type="LECTURE")
+    if semester is not None:
+        sessions = sessions.filter(semester=semester)
+    processed = 0
+    created = 0
+    existing = 0
+    skipped = set()
+    for session in sessions:
+        prog_ids = list(
+            ProgrammeCourse.objects.filter(
+                course_code=session.course_code
+            ).values_list("programme_id", flat=True)
+        )
+        if not prog_ids:
+            skipped.add(session.course_code)
+            continue
+        for group in StudentGroup.objects.filter(programme_id__in=prog_ids):
+            _, was_created = SessionGroup.objects.get_or_create(
+                session=session, group=group
+            )
+            if was_created:
+                created += 1
+            else:
+                existing += 1
+        processed += 1
+    return processed, created, existing, sorted(skipped)
+
+
 def import_master_timetable_from_excel(
     path: str | Path, semester_id: int | None = None, dry_run: bool = False
 ) -> ImportResult:
     """Import the master timetable idempotently (get_or_create on a natural key).
 
-    When no semester is supplied and none exists yet, the current academic
-    year's semester 1 is created automatically. Missing reference data is
-    reported, never guessed at. Rows with unresolvable 'ALL' expansions are
-    imported with no group links and listed under conflicts. With dry_run=True
-    nothing is written.
+    The target semester must be supplied explicitly (``semester_id``) — it is
+    never guessed at. LECTURE sessions also get every group of every programme
+    that studies the course attached automatically (same as the "Assign
+    Lecture Groups" action), so full lecture cohorts are linked right after
+    import. Missing reference data is reported, never guessed at. Rows with
+    unresolvable 'ALL' expansions are imported with no group links and listed
+    under conflicts. With dry_run=True nothing is written.
     """
     df = pd.read_excel(path, dtype=str).fillna("")
 
-    auto_sem = None
-    if semester_id is None and not dry_run:
-        semester = Semester.objects.filter(pk=1).first()
-        if semester is None:
-            semester = _default_reference_semester()
-            auto_sem = semester
-        semester_id = semester.pk
-
     result = _reconcile_master(df, semester_id)
-    if auto_sem:
-        result.detected_semester = str(auto_sem)
 
     missing = _missing_columns(df, MASTER_REQUIRED, MASTER_COLUMN_ALIASES)
     if missing:
         # Missing columns already reported by the reconcile pass.
         return result
 
-    side = semester_id if semester_id is not None else 1
-    semester = Semester.objects.filter(pk=side).first()
+    if semester_id is None:
+        return result
+
+    semester = Semester.objects.filter(pk=semester_id).first()
     if semester is None:
         return result
+
+    result.detected_semester = str(semester)
 
     for rec in _read_master_rows(df):
         course_code = rec["course_code"]
@@ -773,11 +873,13 @@ def import_master_timetable_from_excel(
         if not venue_raw:
             venue = None
         else:
-            venue = Venue.objects.filter(name=venue_raw).first()
-            if not dry_run and venue is None:
-                venue, _ = Venue.objects.get_or_create(
-                    name=venue_raw, defaults={"capacity": 0}
-                )
+            venue, action, capacity = _resolve_venue(venue_raw, dry_run=dry_run)
+            result.venue_resolutions.append({
+                "raw": venue_raw,
+                "matched": venue.name if venue else "None",
+                "action": action,
+                "capacity": capacity,
+            })
 
         basis = {
             "semester": semester,
@@ -825,6 +927,13 @@ def import_master_timetable_from_excel(
                 if group_obj is None:
                     continue
                 SessionGroup.objects.get_or_create(session=session, group=group_obj)
+
+    if not dry_run:
+        proc, linked, existing, skipped = assign_lecture_groups(semester)
+        result.lecture_sessions_processed = proc
+        result.lecture_groups_linked = linked
+        result.lecture_groups_existing = existing
+        result.lecture_skipped_courses = skipped
 
     return result
 

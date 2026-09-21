@@ -1,0 +1,300 @@
+{% extends "base.html" %}
+{% load core_tags %}
+
+{% block title %}{{ page_title }}{% endblock %}
+
+{% block content %}
+<style>
+    .tt-scroll { -webkit-overflow-scrolling: touch; scrollbar-width: thin; }
+    .tt-table { border-collapse: separate; border-spacing: 0; width: 100%; table-layout: fixed; }
+    .tt-table th, .tt-table td { border-bottom: 1px solid #e6eaf0; border-right: 1px solid #e6eaf0; padding: 0; }
+    .tt-table thead th {
+        position: sticky; top: 0; z-index: 30; background: #f4f7fb;
+        box-shadow: 0 4px 10px -8px rgba(2, 6, 23, 0.35);
+    }
+    .tt-table th.tt-corner { left: 0; top: 0; z-index: 40; min-width: 6.5rem; padding: 0.65rem 0.7rem; }
+    .tt-table th.tt-day-col {
+        min-width: 10rem; padding: 0.65rem 0.5rem; white-space: nowrap;
+        font-size: 0.75rem; font-weight: 700; color: #1e3a5f; text-align: center;
+        text-transform: uppercase; letter-spacing: 0.04em;
+    }
+    .tt-table td.tt-time {
+        position: sticky; left: 0; z-index: 15; background: #f8fafc;
+        min-width: 6.5rem; padding: 0.55rem 0.75rem; vertical-align: middle;
+        height: 6rem;
+        font-size: 0.6875rem; font-weight: 600; color: #334155; text-align: right;
+        white-space: nowrap; box-shadow: 5px 0 12px -10px rgba(2, 6, 23, 0.4);
+    }
+    .tt-table tr:hover td.tt-time { background: #eef2f8; }
+    .tt-table td.tt-empty { height: 6rem; background: #ffffff; }
+    .tt-table tr:hover td.tt-empty { background: #fbfdff; }
+    .tt-table td.tt-block {
+        padding: 0.2rem; vertical-align: top; background: #ffffff;
+        display: flex; flex-direction: column; gap: 0.25rem;
+    }
+
+    .tt-card {
+        display: flex; flex-direction: column; justify-content: center; gap: 0.2rem;
+        margin: 0; padding: 0.45rem 0.6rem; border-radius: 0.45rem; border-left: 3px solid;
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+        flex: 1; min-height: 5.4rem;
+    }
+    .tt-course { font-size: 0.8125rem; font-weight: 700; line-height: 1.25; letter-spacing: 0.01em; }
+    .tt-type { display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap; font-size: 0.6875rem; line-height: 1.3; }
+    .tt-type::before { content: ""; width: 0.4rem; height: 0.4rem; border-radius: 9999px; background: currentColor; flex-shrink: 0; }
+    .tt-groups { font-weight: 600; padding-left: 0.15rem; }
+    .tt-venue { font-size: 0.6875rem; color: #6b7280; line-height: 1.3; }
+    .tt-note { font-size: 0.625rem; color: #b45309; line-height: 1.3; }
+
+    /* Shading: Lecture faded grey, Workshop faded green, TD faded pink */
+    .tt-kind-lecture { border-left-color: #9ca3af; background: #f3f4f6; }
+    .tt-kind-lecture .tt-course { color: #374151; }
+    .tt-kind-lecture .tt-type { color: #6b7280; }
+    .tt-kind-workshop { border-left-color: #34d399; background: #dcfce7; }
+    .tt-kind-workshop .tt-course { color: #047857; }
+    .tt-kind-workshop .tt-type { color: #059669; }
+    .tt-kind-td { border-left-color: #f472b6; background: #fce7f3; }
+    .tt-kind-td .tt-course { color: #be185d; }
+    .tt-kind-td .tt-type { color: #db2777; }
+    .tt-kind-tutorial { border-left-color: #60a5fa; background: #dbeafe; }
+    .tt-kind-tutorial .tt-course { color: #1d4ed8; }
+    .tt-kind-tutorial .tt-type { color: #3b82f6; }
+    .tt-kind-seminar { border-left-color: #a78bfa; background: #ede9fe; }
+    .tt-kind-seminar .tt-course { color: #6d28d9; }
+    .tt-kind-seminar .tt-type { color: #8b5cf6; }
+    .tt-kind-practical { border-left-color: #fbbf24; background: #fef3c7; }
+    .tt-kind-practical .tt-course { color: #b45309; }
+    .tt-kind-practical .tt-type { color: #d97706; }
+
+    .tt-legend .tt-kind-dot { display: inline-block; width: 0.55rem; height: 0.55rem; border-radius: 9999px; }
+
+    @media print {
+        @page { size: A4 portrait; margin: 10mm; }
+        body { background: #ffffff; }
+        aside, header, footer, .no-print, #toast-container { display: none !important; }
+        .tt-scroll { overflow: visible !important; }
+        .tt-table thead th, .tt-table td.tt-time, .tt-table th.tt-corner { position: static !important; box-shadow: none !important; }
+        .tt-table th.tt-day-col, .tt-table td.tt-time, .tt-table th.tt-corner { min-width: 0 !important; }
+        .tt-card { break-inside: avoid; }
+    }
+
+    @media (max-width: 768px) {
+        .tt-table th.tt-corner { min-width: 5rem; padding: 0.5rem; font-size: 0.65rem; }
+        .tt-table th.tt-day-col { min-width: 6rem; padding: 0.5rem 0.3rem; font-size: 0.65rem; }
+        .tt-table td.tt-time { min-width: 5rem; padding: 0.4rem 0.5rem; font-size: 0.6rem; height: 5rem; }
+        .tt-table td.tt-empty { height: 5rem; }
+        .tt-card { padding: 0.35rem 0.5rem; min-height: 4.5rem; }
+        .tt-course { font-size: 0.7rem; }
+        .tt-type { font-size: 0.6rem; }
+        .tt-venue { font-size: 0.6rem; }
+        .tt-note { font-size: 0.55rem; }
+        .max-w-6xl { max-width: 100%; padding: 0 0.5rem; }
+        .tt-scroll { border-radius: 0.5rem; }
+    }
+
+    @media (max-width: 480px) {
+        .tt-table th.tt-corner { min-width: 4rem; padding: 0.4rem; font-size: 0.6rem; }
+        .tt-table th.tt-day-col { min-width: 5rem; padding: 0.4rem 0.2rem; font-size: 0.6rem; }
+        .tt-table td.tt-time { min-width: 4rem; padding: 0.3rem 0.4rem; font-size: 0.55rem; height: 4.5rem; }
+        .tt-table td.tt-empty { height: 4.5rem; }
+        .tt-card { padding: 0.3rem 0.4rem; min-height: 4rem; border-left-width: 2px; }
+        .tt-course { font-size: 0.65rem; }
+        .tt-type { font-size: 0.55rem; }
+        .tt-venue { font-size: 0.55rem; }
+        .tt-note { font-size: 0.5rem; }
+        .no-print form { flex-direction: column; align-items: stretch; }
+        .no-print form > div { width: 100%; }
+        .no-print form .ml-auto { margin-left: 0; margin-top: 0.5rem; justify-content: stretch; }
+        .no-print form .ml-auto button, .no-print form .ml-auto a { flex: 1; }
+    }
+</style>
+
+<div class="max-w-6xl mx-auto flex flex-col gap-4">
+    <!-- Selector toolbar -->
+    <form method="get" action="." class="no-print bg-white rounded-xl shadow-sm border border-gray-200 p-4 flex flex-wrap items-end gap-3">
+        <div class="min-w-0">
+            <label for="programme" class="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Programme</label>
+            <select id="programme" name="programme"
+                    class="max-w-full sm:max-w-[15rem] min-w-0 truncate border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                <option value="all" {% if show_all %}selected{% endif %}>All Programs</option>
+                {% for p in programmes %}
+                <option value="{{ p.pk }}" {% if active_programme and p.pk == active_programme.pk %}selected{% endif %}>{{ p.code }} — {{ p.name }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div id="group-selector-wrapper" class="min-w-0" {% if not active_programme %}style="display:none"{% endif %}>
+            <label for="group" class="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Group</label>
+            <select id="group" name="group"
+                    class="max-w-full sm:max-w-[12rem] min-w-0 truncate border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                <option value="">All Groups</option>
+                {% for g in groups_for_programme %}
+                <option value="{{ g.pk }}" {% if active_group and g.pk == active_group.pk %}selected{% endif %}>{{ g.code }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="min-w-0">
+            <label for="semester" class="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Semester</label>
+            <select id="semester" name="semester"
+                    class="max-w-full sm:max-w-[12rem] min-w-0 truncate border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                {% for s in semesters %}
+                <option value="{{ s.pk }}" {% if active_semester and s.pk == active_semester.pk %}selected{% endif %}>{{ s }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="min-w-0">
+            <label for="year" class="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Year of Study</label>
+            <select id="year" name="year"
+                    class="max-w-full sm:max-w-[10rem] min-w-0 truncate border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                {% for y in year_options %}
+                {% if y == 1 %}<option value="{{ y }}" {% if year == y %}selected{% endif %}>1st Year</option>
+                {% elif y == 2 %}<option value="{{ y }}" {% if year == y %}selected{% endif %}>2nd Year</option>
+                {% elif y == 3 %}<option value="{{ y }}" {% if year == y %}selected{% endif %}>3rd Year</option>
+                {% else %}<option value="{{ y }}" {% if year == y %}selected{% endif %}>{{ y }}th Year</option>
+                {% endif %}
+                {% endfor %}
+            </select>
+        </div>
+        <button type="submit" class="px-4 py-2 bg-slate-800 text-white text-sm font-medium rounded-lg hover:bg-slate-900 transition">Show Timetable</button>
+        <a href="?" class="px-4 py-2 text-sm font-medium text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 transition">Reset</a>
+        <div class="ml-auto flex items-center gap-2">
+            <button type="button" onclick="window.print()"
+                    class="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"/></svg>
+                Print
+            </button>
+            {% if active_programme and active_semester %}
+            <a href="{% url 'programme-timetable-export' active_programme.pk %}?semester={{ active_semester.pk }}&year={{ year }}"
+               class="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-green-700 bg-green-50 hover:bg-green-100 rounded-lg transition">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                Export PDF
+            </a>
+            {% endif %}
+        </div>
+    </form>
+
+    {% if not active_programme %}
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-16 text-center text-gray-400">
+        <p class="text-sm">No programmes registered yet.</p>
+        <p class="text-xs mt-1">Add a programme and import a master timetable to see it here.</p>
+    </div>
+    {% elif not active_semester %}
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-16 text-center text-gray-400">
+        <p class="text-sm">No semester available. Create a semester first.</p>
+    </div>
+    {% else %}
+
+    <!-- Timetable header -->
+    <div class="bg-slate-900 rounded-xl px-6 py-5 text-white shadow-sm">
+        <div class="flex flex-wrap items-end justify-between gap-4">
+            <div>
+                {% if show_all %}
+                <p class="text-lg font-bold tracking-tight">ALL PROGRAMMES</p>
+                {% elif active_group %}
+                <p class="text-lg font-bold tracking-tight">{{ active_group.programme.name|upper }}</p>
+                <p class="text-sm font-medium text-slate-300 mt-0.5">GROUP {{ active_group.code }} &middot; {{ year_ordinal|upper }} YEAR &middot; {{ active_semester.academic_year }}</p>
+                {% else %}
+                <p class="text-lg font-bold tracking-tight">{{ active_programme.name|upper }}</p>
+                <p class="text-sm font-medium text-slate-300 mt-0.5">{{ year_ordinal|upper }} YEAR &middot; {{ active_semester.academic_year }}</p>
+                {% endif %}
+                <p class="text-sm font-semibold text-emerald-400 mt-0.5">SEMESTER {{ active_semester.semester }}</p>
+            </div>
+            <div class="text-right text-xs text-slate-400">
+                <p>{{ entry_count }} scheduled session{{ entry_count|pluralize }}</p>
+                {% if show_all %}
+                <p class="mt-0.5">{{ programmes|length }} programme{{ programmes|length|pluralize }}</p>
+                {% elif active_group %}
+                <p class="mt-0.5">{{ active_group.programme.code }} &middot; Group {{ active_group.code }}</p>
+                {% else %}
+                <p class="mt-0.5">{{ active_programme.code }} &middot; {{ active_programme.student_groups.count }} group{{ active_programme.student_groups.count|pluralize }}</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <!-- Type legend -->
+    <div class="no-print bg-white rounded-xl shadow-sm border border-gray-200 px-4 py-2.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-600">
+        <span class="text-xs font-medium text-gray-500 uppercase tracking-wide mr-1">Type</span>
+        <span class="flex items-center gap-1.5"><span class="tt-kind-dot bg-gray-300"></span>Lecture</span>
+        <span class="flex items-center gap-1.5"><span class="tt-kind-dot bg-blue-400"></span>Tutorial</span>
+        <span class="flex items-center gap-1.5"><span class="tt-kind-dot bg-purple-400"></span>Seminar</span>
+        <span class="flex items-center gap-1.5"><span class="tt-kind-dot bg-amber-400"></span>Practical</span>
+        <span class="flex items-center gap-1.5"><span class="tt-kind-dot bg-emerald-400"></span>Workshop</span>
+        <span class="flex items-center gap-1.5"><span class="tt-kind-dot bg-pink-400"></span>Technical Drawing</span>
+    </div>
+
+    <!-- Grid: DAYS in the first row, TIME slots in the first column -->
+    {% if grid.slots %}
+    <div class="tt-scroll overflow-x-auto bg-white rounded-xl shadow-sm border border-gray-200">
+        <table class="tt-table">
+            <thead>
+                <tr>
+                    <th class="tt-corner">TIME</th>
+                    {% for day in grid.days %}
+                    <th class="tt-day-col">{{ day.label }}</th>
+                    {% endfor %}
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in grid.rows %}
+                <tr>
+                    <td class="tt-time">{{ row.slot.start }}–{{ row.slot.end }}</td>
+                    {% for cell in row.cols %}
+                        {% if cell %}
+                            {% if cell.empty %}
+                            <td class="tt-empty"></td>
+                            {% else %}
+                            <td class="tt-block" rowspan="{{ cell.rowspan }}">
+                                {% for e in cell.entries %}
+                                <div class="tt-card tt-kind-{{ e.kind }}">
+                                    <div class="tt-course">{{ e.course_code }}</div>
+                                    <div class="tt-type">
+                                        {{ e.type_label }}{% if e.groups %}<span class="tt-groups">{{ e.groups }}</span>{% endif %}
+                                    </div>
+                                    <div class="tt-venue">{{ e.venue|default:"—" }}</div>
+                                    {% if e.note %}<div class="tt-note">{{ e.note }}</div>{% endif %}
+                                </div>
+                                {% endfor %}
+                            </td>
+                            {% endif %}
+                        {% endif %}
+                    {% endfor %}
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-16 text-center text-gray-400">
+        <p class="text-sm">No sessions scheduled for {{ active_programme.code }} in {{ active_semester }} yet.</p>
+        <p class="text-xs mt-1">Import a master timetable (or assign groups to sessions) and refresh this page.</p>
+    </div>
+    {% endif %}
+    {% endif %}
+</div>
+
+<script>
+const programmeSelect = document.getElementById('programme');
+const groupWrapper = document.getElementById('group-selector-wrapper');
+const groupSelect = document.getElementById('group');
+
+programmeSelect.addEventListener('change', function() {
+    if (this.value === 'all') {
+        groupWrapper.style.display = 'none';
+        groupSelect.value = '';
+    } else {
+        groupWrapper.style.display = 'block';
+        fetch(`/timetable/groups/?programme=${this.value}`)
+            .then(response => response.json())
+            .then(data => {
+                groupSelect.innerHTML = '<option value="">All Groups</option>';
+                data.groups.forEach(g => {
+                    const option = document.createElement('option');
+                    option.value = g.id;
+                    option.textContent = g.code;
+                    groupSelect.appendChild(option);
+                });
+            });
+    }
+});
+</script>
+{% endblock %}

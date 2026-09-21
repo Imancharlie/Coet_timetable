@@ -45,6 +45,11 @@
         </a>
 
         <div class="pt-3 pb-1 px-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Timetable</div>
+        <a href="{% url 'timetable' %}"
+           class="flex items-center gap-3 px-3 py-2.5 rounded-lg transition {{ nav|active_cls:'timetable' }}">
+            <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 5a2 2 0 012-2h12a2 2 0 012 2v14a2 2 0 01-2 2H6a2 2 0 01-2-2V5z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 3v4m8-4v4M4 11h16M8 15h.01M12 15h.01M16 15h.01"/></svg>
+            Timetable View
+        </a>
         <a href="{% url 'session-list' %}"
            class="flex items-center gap-3 px-3 py-2.5 rounded-lg transition {{ nav|active_cls:'sessions' }}">
             <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"/></svg>
