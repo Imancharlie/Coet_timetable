@@ -18,7 +18,7 @@ from core.models import (
     Venue,
     WorkshopAllocation,
 )
-from core.venue_quality import base_key
+from core.venue_quality import base_key, detect_name_conflicts
 from core.workshop_parser import (
     detect_format,
     parse_workbook,
@@ -185,10 +185,24 @@ class ImportResult:
     lecture_groups_existing: int = 0
     lecture_skipped_courses: list = field(default_factory=list)
     venue_resolutions: list = field(default_factory=list)
+    venue_conflicts: list = field(default_factory=list)
+    venue_capacity_issues: list = field(default_factory=list)
 
     @property
     def total(self):
         return self.created + self.updated + self.skipped
+
+    @property
+    def venue_exact_count(self):
+        return sum(1 for resolution in self.venue_resolutions if resolution["action"] == "exact")
+
+    @property
+    def venue_matched_count(self):
+        return sum(1 for resolution in self.venue_resolutions if resolution["action"] == "matched")
+
+    @property
+    def venue_created_count(self):
+        return sum(1 for resolution in self.venue_resolutions if resolution["action"] == "created")
 
     def summary(self) -> str:
         lines = [
@@ -238,6 +252,18 @@ class ImportResult:
             lines.append(f"'ALL' group expansions: {len(self.all_rows)}")
         if self.conflicts:
             lines.append(f"Conflicts: {len(self.conflicts)}")
+        if self.venue_conflicts:
+            lines.append(
+                f"Venue name conflicts: {len(self.venue_conflicts)} "
+                f"(spacing/casing duplicates — resolve them interactively in "
+                f"the web import result panel)"
+            )
+        if self.venue_capacity_issues:
+            lines.append(
+                f"Venues created with capacity 0 (missing capacity in source): "
+                f"{', '.join(self.venue_capacity_issues)} — set a capacity "
+                f"before finalising"
+            )
         if self.unknown_keys:
             lines.append(f"Unknown KEY positions: {len(self.unknown_keys)}")
         if self.invalid_positions:
@@ -255,6 +281,44 @@ class ImportResult:
             if len(self.errors) > 20:
                 lines.append(f"  ... and {len(self.errors) - 20} more")
         return "\n".join(lines)
+
+    def snapshot(self) -> dict:
+        """A JSON-serialisable copy of everything worth reviewing later.
+
+        Used to persist import history: errors (with their row/field wording),
+        missing/invalid entities, conflicts, automatic fixes (venue matches,
+        programmes created, lecture-group assignment) and source details.
+        Never includes the file itself.
+        """
+        return {
+            "created": self.created,
+            "updated": self.updated,
+            "skipped": self.skipped,
+            "error_count": len(self.errors),
+            "errors": list(self.errors),
+            "matched_courses": list(self.matched_courses),
+            "missing_courses": list(self.missing_courses),
+            "missing_groups": list(self.missing_groups),
+            "missing_venues": list(self.missing_venues),
+            "missing_references": list(self.missing_references),
+            "conflicts": list(self.conflicts),
+            "duplicates": list(self.duplicates),
+            "ambiguous": list(self.ambiguous),
+            "unknown_keys": list(self.unknown_keys),
+            "invalid_positions": list(self.invalid_positions),
+            "unrecognized_cells": list(self.unrecognized_cells),
+            "all_rows": list(self.all_rows),
+            "programmes_created": list(self.programmes_created),
+            "venue_resolutions": list(self.venue_resolutions),
+            "venue_conflicts": list(self.venue_conflicts),
+            "venue_capacity_issues": list(self.venue_capacity_issues),
+            "lecture_sessions_processed": self.lecture_sessions_processed,
+            "lecture_groups_linked": self.lecture_groups_linked,
+            "lecture_groups_existing": self.lecture_groups_existing,
+            "lecture_skipped_courses": list(self.lecture_skipped_courses),
+            "format": self.format,
+            "detected_semester": self.detected_semester,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -456,35 +520,27 @@ def import_venues_from_excel(path: str | Path) -> ImportResult:
         )
         return result
 
-    existing_keys = {
-        base_key(n): n for n in Venue.objects.values_list("name", flat=True)
-    }
-    seen = {}
     for _, row in df.iterrows():
         name = str(row[name_col]).strip()
         if not name:
             result.errors.append(f"Row: empty venue name, skipped")
             result.skipped += 1
             continue
-        try:
-            cap = int(float(str(row[cap_col]).strip()))
-        except (ValueError, TypeError):
-            result.errors.append(f"Invalid capacity for venue '{name}'")
-            result.skipped += 1
-            continue
-        key = base_key(name)
-        clash = None
-        if key in existing_keys and existing_keys[key] != name:
-            clash = existing_keys[key]
-        elif key in seen and seen[key] != name:
-            clash = seen[key]
-        if clash is not None:
-            result.conflicts.append(
-                f"Venue '{name}' matches existing venue '{clash}' "
-                f"(normalised as '{key}') - same venue written with different "
-                f"casing/spacing; it will be highlighted for recycling."
-            )
-        seen[key] = name
+        raw_cap = str(row[cap_col]).strip()
+        if not raw_cap:
+            # A name with no capacity is still imported so spacing/casing
+            # duplicates involving it can be detected and fixed interactively.
+            # The missing capacity is flagged separately and stays visible in
+            # the validation panel until the record is finalised with one.
+            cap = 0
+            result.venue_capacity_issues.append(name)
+        else:
+            try:
+                cap = int(float(raw_cap))
+            except (ValueError, TypeError):
+                result.errors.append(f"Invalid capacity for venue '{name}'")
+                result.skipped += 1
+                continue
         _, created = Venue.objects.update_or_create(
             name=name, defaults={"capacity": cap}
         )
@@ -492,6 +548,14 @@ def import_venues_from_excel(path: str | Path) -> ImportResult:
             result.created += 1
         else:
             result.updated += 1
+
+    # Spacing / casing duplicates are reported as structured conflicts so the
+    # import result panel can offer an interactive, user-confirmed fix for each
+    # one (choose the official name → merge). Detection runs against the
+    # post-import venue table so clashes with pre-existing rows surface too.
+    result.venue_conflicts = detect_name_conflicts(
+        Venue.objects.all().values_list("name", flat=True)
+    )
 
     return result
 

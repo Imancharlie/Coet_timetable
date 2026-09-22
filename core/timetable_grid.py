@@ -27,6 +27,46 @@ FILL_COLORS = {
 }
 _FILL_PRIORITY = ["td", "workshop", "lecture", "tutorial", "seminar", "practical"]
 
+def cell_text(entries, show_groups=False):
+    """Render one cell's entries as a compact multi-line label.
+
+    Every entry's label appears once. Genuinely distinct simultaneous entries
+    are never silently merged: a week range, a venue that differs from the
+    workshop name, and (in the all-groups view, ``show_groups``) the owning
+    group code are appended so the reader can tell entries apart. Exact
+    duplicate text is shown only once.
+    """
+    def render(e):
+        bits = [e["label"]]
+        note = e.get("note")
+        if note:
+            bits.append(str(note))
+        if e.get("kind") == "workshop":
+            venue = e.get("venue")
+            if venue and venue != e.get("name"):
+                bits.append(str(venue))
+            if show_groups and e.get("groups"):
+                bits.append(str(e["groups"]))
+        return " · ".join(bits)
+
+    seen = set()
+    lines = []
+    for same in _by_label(entries).values():
+        for e in same:
+            text = render(e)
+            if text in seen:
+                continue
+            seen.add(text)
+            lines.append(text)
+    return "\n\n".join(lines)
+
+
+def _by_label(entries):
+    by_label = {}
+    for e in entries:
+        by_label.setdefault(e["label"], []).append(e)
+    return by_label
+
 
 def _slot(hour):
     return {
@@ -113,7 +153,7 @@ def fill_color(entries):
     return "#ffffff"
 
 
-def time_day_grid_to_table(grid):
+def time_day_grid_to_table(grid, show_groups=False):
     """Flatten a grid for reportlab's Table.
 
     Column 0 is the TIME column; columns 1..n are weekdays. Returns
@@ -133,7 +173,7 @@ def time_day_grid_to_table(grid):
             if cell is None or cell.get("empty"):
                 line.append("")
             else:
-                line.append("\n\n".join(e["label"] for e in cell["entries"]))
+                line.append(cell_text(cell["entries"], show_groups=show_groups))
         data.append(line)
 
     spans = []

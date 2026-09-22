@@ -80,6 +80,22 @@ class VenueForm(forms.ModelForm):
         }
 
 
+class VenueRecycleForm(forms.ModelForm):
+    """Name-only validation scope for resolving a casing/spacing duplicate.
+
+    Capacity is never required here: fixing a venue-name formatting problem is
+    an independent action that must not block on (or validate) the capacity
+    field. Only creating/finalising a venue record requires a capacity.
+    """
+
+    class Meta:
+        model = Venue
+        fields = ["name"]
+        widgets = {
+            "name": forms.TextInput(attrs={"class": INPUT_CLS, "placeholder": "e.g. NB102"}),
+        }
+
+
 class SessionForm(forms.ModelForm):
     class Meta:
         model = Session

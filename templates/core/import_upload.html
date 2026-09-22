@@ -27,6 +27,7 @@
                   hx-post="{% url 'import-upload' import_type %}"
                   hx-target="#upload-result"
                   hx-swap="innerHTML"
+                  hx-disabled-elt="this"
                   x-data="{ uploading: false, noSemester: {{ no_semester|yesno:"true,false" }} }"
                   @submit="uploading = true"
                   id="upload-form">
@@ -84,7 +85,16 @@
                     </a>
                 </div>
             </form>
-            <div id="upload-result">
+            <div id="upload-result" hx-settle="220">
+                <div class="htmx-indicator">
+                    <div class="mt-6 rounded-xl border border-blue-200 bg-blue-50 p-5 flex items-center gap-4" role="status" aria-live="polite">
+                        <svg class="animate-spin w-6 h-6 text-blue-600" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                        <div>
+                            <p class="font-semibold text-blue-800">Importing…</p>
+                            <p class="text-xs text-blue-600">Reading the workbook and reconciling reference data. This can take a moment.</p>
+                        </div>
+                    </div>
+                </div>
                 {% if result %}{% include "core/import_result.html" %}{% endif %}
             </div>
         </div>

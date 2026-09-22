@@ -22,9 +22,62 @@
                    class="block w-full text-center px-4 py-2.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition">
                     Upload {{ info.title }}
                 </a>
+                {% with latest_imports|get_item:key as latest %}
+                {% if latest %}
+                <p class="text-xs text-gray-500 mt-3">
+                    Last import
+                    <a href="{% url 'import-history-detail' latest.pk %}" class="text-blue-600 hover:text-blue-800 font-medium">
+                        {{ latest.created_at|date:"d M Y H:i" }}
+                    </a>
+                    <span class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold
+                        {% if latest.status == "FAILED" %}bg-red-100 text-red-700
+                        {% elif latest.status == "PARTIAL" %}bg-amber-100 text-amber-700
+                        {% else %}bg-emerald-100 text-emerald-700{% endif %}">
+                        {{ latest.status }}
+                    </span>
+                </p>
+                {% else %}
+                <p class="text-xs text-gray-400 mt-3">No imports yet for this type.</p>
+                {% endif %}
+                {% endwith %}
             </div>
         </div>
         {% endfor %}
+    </div>
+
+    <div class="mt-8 bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+        <div class="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
+            <div>
+                <h3 class="font-semibold text-gray-800">Previous Import Details</h3>
+                <p class="text-xs text-gray-500 mt-0.5">Every import is saved with its full summary — date, file, type, rows, errors and automatic fixes. Review any of them any time.</p>
+            </div>
+            <a href="{% url 'import-history' %}" class="text-sm font-medium text-blue-600 hover:text-blue-800 whitespace-nowrap">
+                View all{% if import_history_count %} ({{ import_history_count }}){% endif %} →
+            </a>
+        </div>
+        {% if recent_imports %}
+        <div class="divide-y divide-gray-100">
+            {% for rec in recent_imports %}
+            <a href="{% url 'import-history-detail' rec.pk %}" class="flex items-center gap-4 px-5 py-3 hover:bg-gray-50 transition">
+                <span class="shrink-0 w-2 h-2 rounded-full {% if rec.status == 'FAILED' %}bg-red-500{% elif rec.status == 'PARTIAL' %}bg-amber-500{% else %}bg-emerald-500{% endif %}"></span>
+                <span class="min-w-0 flex-1">
+                    <span class="block text-sm font-medium text-gray-800 truncate">{{ rec.import_title }}</span>
+                    <span class="block text-xs text-gray-500">
+                        {{ rec.filename|default:"(in-memory upload)" }} · {{ rec.created_at|date:"d M Y H:i" }}
+                    </span>
+                </span>
+                <span class="shrink-0 text-xs text-gray-500">
+                    {{ rec.rows_processed }} row{{ rec.rows_processed|pluralize }} · {{ rec.created }} created {{ rec.updated }} updated
+                </span>
+                <span class="shrink-0 text-xs font-medium {% if rec.error_count %}text-red-600{% else %}text-emerald-600{% endif %}">
+                    {{ rec.error_count }} error{{ rec.error_count|pluralize }}
+                </span>
+            </a>
+            {% endfor %}
+        </div>
+        {% else %}
+        <p class="px-5 py-6 text-sm text-gray-400">No imports have been recorded yet. Upload a file above and its full summary will appear here.</p>
+        {% endif %}
     </div>
 
     <div class="mt-8 bg-blue-50 border border-blue-200 rounded-xl p-5">

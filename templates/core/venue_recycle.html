@@ -79,16 +79,21 @@
                                 </p>
                             </div>
                             <div class="flex items-center gap-2 shrink-0">
+                                {% with imp=venue_impacts|get_item:venue.pk %}
+                                {% if imp %}
+                                <span class="text-xs text-gray-500 max-w-[220px] text-right">{{ imp.summary }}</span>
+                                {% endif %}
                                 <form method="post" action="{{ recycle_url }}">
                                     {% csrf_token %}
                                     <input type="hidden" name="action" value="delete">
                                     <input type="hidden" name="pk" value="{{ venue.pk }}">
                                     <button type="submit"
-                                            onclick="return confirm('Remove {{ venue.name|escapejs }}? References are re-pointed to the kept record before deletion.')"
+                                            onclick="return confirm('Remove {{ venue.name|escapejs }}? {{ imp.summary|default:'' }}')"
                                             class="px-3 py-1.5 text-xs font-medium text-rose-700 border border-rose-300 rounded-lg hover:bg-rose-50 transition">
                                         Remove
                                     </button>
                                 </form>
+                                {% endwith %}
                             </div>
                         </div>
                         <form method="post" action="{{ recycle_url }}" class="mt-3 flex flex-col sm:flex-row sm:items-center gap-2">

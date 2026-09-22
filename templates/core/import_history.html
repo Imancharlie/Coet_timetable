@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% load core_tags %}
+
+{% block content %}
+<div class="max-w-7xl mx-auto">
+    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+        <div>
+            <h1 class="text-2xl font-bold text-gray-800">{{ page_title }}</h1>
+            <p class="text-sm text-gray-500 mt-1">{{ total }} import{{ total|pluralize }} recorded — every result, error and automatic fix is kept here.</p>
+        </div>
+        <div class="flex gap-2 shrink-0">
+            <a href="{{ back_url }}" class="px-4 py-2 text-sm font-medium text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 transition">Back to Imports</a>
+        </div>
+    </div>
+
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4 mb-4">
+        <div class="flex flex-wrap items-center gap-2">
+            <span class="text-xs font-semibold text-gray-500 uppercase tracking-wider mr-1">Filter by import type:</span>
+            <a href="{% url 'import-history' %}"
+               class="px-3 py-1.5 text-xs font-medium rounded-lg transition {% if not active_type %}bg-blue-600 text-white{% else %}bg-gray-100 text-gray-600 hover:bg-gray-200{% endif %}">
+                All imports
+            </a>
+            {% for key, info in import_types.items %}
+            <a href="{% url 'import-history-type' key %}"
+               class="px-3 py-1.5 text-xs font-medium rounded-lg transition {% if active_type == key %}bg-blue-600 text-white{% else %}bg-gray-100 text-gray-600 hover:bg-gray-200{% endif %}">
+                {{ info.title }}
+            </a>
+            {% endfor %}
+        </div>
+        {% if active_type %}
+        {% with import_types|get_item:active_type as active_info %}
+        <p class="text-xs text-gray-500 mt-3">{{ active_info.title }} only. <a href="{% url 'import-history' %}" class="text-blue-600 hover:text-blue-800">Show all imports →</a></p>
+        {% endwith %}
+        {% endif %}
+    </div>
+
+    {% if items %}
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+        <div class="overflow-x-auto">
+            <table class="w-full text-left">
+                <thead class="bg-gray-50 border-b border-gray-200 text-xs uppercase tracking-wider text-gray-500">
+                    <tr>
+                        <th class="px-4 py-3 font-semibold">Date &amp; Time</th>
+                        <th class="px-4 py-3 font-semibold">Import Type</th>
+                        <th class="px-4 py-3 font-semibold">File</th>
+                        <th class="px-4 py-3 font-semibold">Imported by</th>
+                        <th class="px-4 py-3 font-semibold text-center">Rows</th>
+                        <th class="px-4 py-3 font-semibold text-center">Created</th>
+                        <th class="px-4 py-3 font-semibold text-center">Updated</th>
+                        <th class="px-4 py-3 font-semibold text-center">Skipped</th>
+                        <th class="px-4 py-3 font-semibold text-center">Errors</th>
+                        <th class="px-4 py-3 font-semibold">Status</th>
+                        <th class="px-4 py-3 font-semibold"></th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-100">
+                    {% for rec in items %}
+                    <tr class="hover:bg-gray-50 transition">
+                        <td class="px-4 py-3 text-sm text-gray-700 whitespace-nowrap">{{ rec.created_at|date:"d M Y, H:i" }}</td>
+                        <td class="px-4 py-3 text-sm text-gray-700">{{ rec.import_title }}</td>
+                        <td class="px-4 py-3 text-sm text-gray-500 max-w-[12rem] truncate">{{ rec.filename|default:"(in-memory upload)" }}</td>
+                        <td class="px-4 py-3 text-sm text-gray-500">{{ rec.user.username|default:"—" }}</td>
+                        <td class="px-4 py-3 text-sm text-gray-700 text-center">{{ rec.rows_processed }}</td>
+                        <td class="px-4 py-3 text-sm text-emerald-600 text-center">{{ rec.created }}</td>
+                        <td class="px-4 py-3 text-sm text-blue-600 text-center">{{ rec.updated }}</td>
+                        <td class="px-4 py-3 text-sm text-gray-400 text-center">{{ rec.skipped }}</td>
+                        <td class="px-4 py-3 text-sm text-center {% if rec.error_count %}text-red-600 font-medium{% else %}text-gray-400{% endif %}">{{ rec.error_count }}</td>
+                        <td class="px-4 py-3">
+                            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold
+                                {% if rec.status == "FAILED" %}bg-red-100 text-red-700
+                                {% elif rec.status == "PARTIAL" %}bg-amber-100 text-amber-700
+                                {% else %}bg-emerald-100 text-emerald-700{% endif %}">
+                                {{ rec.get_status_display }}
+                            </span>
+                        </td>
+                        <td class="px-4 py-3 text-right">
+                            <a href="{% url 'import-history-detail' rec.pk %}" class="text-blue-600 hover:text-blue-800 text-sm font-medium">View →</a>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% if pages > 1 %}
+        <div class="px-4 py-3 border-t border-gray-200 flex items-center justify-between">
+            <span class="text-xs text-gray-500">Page {{ page }} of {{ pages }}</span>
+            <div class="flex gap-1">
+                {% if page > 1 %}
+                <a href="?page={{ page|add:"-1" }}" class="px-3 py-1 text-xs font-medium bg-gray-100 text-gray-600 rounded-md hover:bg-gray-200">Prev</a>
+                {% endif %}
+                {% if page < pages %}
+                <a href="?page={{ page|add:"1" }}" class="px-3 py-1 text-xs font-medium bg-gray-100 text-gray-600 rounded-md hover:bg-gray-200">Next</a>
+                {% endif %}
+            </div>
+        </div>
+        {% endif %}
+    </div>
+    {% else %}
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200">
+        <div class="px-5 py-16 text-center text-gray-400">
+            <svg class="w-10 h-10 mx-auto mb-3 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+            <p class="text-sm">No import history yet{% if active_type %} for this type{% endif %}</p>
+            <p class="text-xs mt-1">Every import's full summary will be recorded here automatically.</p>
+            <a href="{% url 'import-hub' %}" class="inline-block mt-4 px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700">Upload your first file</a>
+        </div>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

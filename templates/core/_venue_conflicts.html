@@ -1,0 +1,149 @@
+{% load core_tags %}
+<!-- Interactive venue-name conflict fixer panel. Rendered by the venue import
+     result and re-rendered (outerHTML) after each user-confirmed fix so the
+     counts and the Active/Resolved lists stay in sync. -->
+<div id="venue-conflicts-panel" x-data="{ pick: null }" class="bg-white rounded-xl shadow-sm border
+     {% if open_conflicts %}border-amber-200{% else %}border-emerald-200{% endif %} overflow-hidden">
+    <div class="px-4 py-3 border-b
+         {% if open_conflicts %}border-amber-100 bg-amber-50{% else %}border-emerald-100 bg-emerald-50{% endif %}">
+        <div class="flex items-center justify-between gap-2 flex-wrap">
+            <h4 class="text-sm font-semibold
+                {% if open_conflicts %}text-amber-800{% else %}text-emerald-800{% endif %}">
+                Venue name conflicts
+            </h4>
+            {% if open_conflicts %}
+            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-800">
+                {{ open_conflicts|length }} remaining
+            </span>
+            {% else %}
+            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800">
+                All resolved
+            </span>
+            {% endif %}
+        </div>
+        <p class="text-xs text-gray-500 mt-1">
+            These venue names refer to the same room but were entered with different
+            casing or spacing. Pick the official name for each conflict and it is
+            merged into the database immediately.
+        </p>
+    </div>
+
+    {% if flash_success %}
+    <div class="border-b border-emerald-100 px-4 py-2 bg-emerald-50 space-y-1">
+        {% for msg in flash_success %}
+        <p class="text-sm text-emerald-800">✔ {{ msg }}</p>
+        {% endfor %}
+    </div>
+    {% endif %}
+    {% if flash_errors %}
+    <div class="border-b border-red-100 px-4 py-2 bg-red-50 space-y-1">
+        {% for msg in flash_errors %}
+        <p class="text-sm text-red-800">✕ {{ msg }}</p>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    {% if open_conflicts %}
+    <ul class="divide-y divide-amber-100 max-h-96 overflow-y-auto">
+        {% for issue in open_conflicts %}
+        <li class="px-4 py-3">
+            <div class="flex items-start justify-between gap-3 flex-wrap">
+                <div class="min-w-0">
+                    <div class="flex flex-wrap items-center gap-1.5 mb-1">
+                        {% for reason in issue.reasons %}
+                        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium
+                            {% if reason == "Casing" %}bg-purple-50 text-purple-700 border border-purple-200
+                            {% else %}bg-blue-50 text-blue-700 border border-blue-200{% endif %}">{{ reason }}</span>
+                        {% endfor %}
+                    </div>
+                    {% if issue.reasons|length > 1 %}
+                    <p class="text-sm font-semibold text-amber-800">Spacing and casing difference:</p>
+                    {% else %}
+                    <p class="text-sm font-semibold text-amber-800">{{ issue.reasons.0 }} difference:</p>
+                    {% endif %}
+                    <p class="text-sm text-amber-700 mt-0.5">
+                        “{{ issue.names.0 }}” vs “{{ issue.names.1 }}”
+                    </p>
+                </div>
+                <button type="button"
+                        @click="pick = (pick === '{{ issue.id }}' ? null : '{{ issue.id }}')"
+                        class="shrink-0 inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-amber-600 hover:bg-amber-700 transition">
+                    <span x-text="pick === '{{ issue.id }}' ? 'Cancel' : 'Fix'"></span>
+                </button>
+            </div>
+            <div x-show="pick === '{{ issue.id }}'" x-cloak
+                 x-transition:enter="transition ease-out duration-150"
+                 x-transition:enter-start="opacity-0 -translate-y-1"
+                 x-transition:enter-end="opacity-100 translate-y-0"
+                 class="mt-3 bg-amber-50 border border-amber-200 rounded-lg p-3">
+                <p class="text-sm font-medium text-amber-900 mb-2">
+                    Which name should be the official venue name? Everything is merged into it.
+                </p>
+                <form method="post" action="{% url 'venue-fix-conflict' %}"
+                      hx-post="{% url 'venue-fix-conflict' %}"
+                      hx-target="#venue-conflicts-panel"
+                      hx-swap="outerHTML"
+                      hx-disabled-elt="this">
+                    {% csrf_token %}
+                    <input type="hidden" name="token" value="{{ token }}">
+                    <input type="hidden" name="key" value="{{ issue.key }}">
+                    <input type="hidden" name="issue_id" value="{{ issue.id }}">
+                    <div class="space-y-2 mb-3">
+                        {% for name in issue.names %}
+                        <label class="flex items-center gap-2.5 px-3 py-2 rounded-lg border cursor-pointer bg-white/60 border-gray-200">
+                            <input type="radio" name="official" value="{{ name }}" required class="peer sr-only">
+                            <span class="w-4 h-4 rounded-full border-2 border-gray-300 peer-checked:border-amber-500 peer-checked:bg-amber-500 transition shrink-0"></span>
+                            <span class="text-sm font-medium text-gray-800">{{ name }}</span>
+                        </label>
+                        {% endfor %}
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <button type="submit"
+                                class="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium text-white bg-emerald-600 hover:bg-emerald-700 transition">
+                            Accept &amp; Merge
+                        </button>
+                        <button type="button" @click="pick = null"
+                                class="px-3 py-2 rounded-lg text-sm font-medium text-gray-600 hover:bg-gray-100 transition">
+                            Cancel
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </li>
+        {% endfor %}
+    </ul>
+    {% elif resolved_conflicts %}
+    <div class="px-4 py-6 text-center text-sm text-emerald-700">
+        ✔ All venue name conflicts have been resolved and merged.
+    </div>
+    {% else %}
+    <div class="px-4 py-6 text-center text-sm text-gray-500">
+        No venue name conflicts detected.
+    </div>
+    {% endif %}
+
+    {% if resolved_conflicts %}
+    <div class="px-4 py-3 bg-emerald-50 border-t border-emerald-100">
+        <h5 class="text-xs font-semibold text-emerald-700 uppercase tracking-wide mb-2">Fixed issues</h5>
+        <ul class="space-y-1.5">
+            {% for fix in resolved_conflicts %}
+            <li class="flex items-start gap-2 text-sm text-emerald-800">
+                <span class="mt-0.5 inline-flex items-center justify-center w-4 h-4 rounded-full bg-emerald-600 text-white shrink-0">
+                    <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/></svg>
+                </span>
+                <div>
+                    <span class="font-medium">Accepted: {{ fix.accepted }}</span>
+                    <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-emerald-100 text-emerald-700 ml-1">Fixed</span>
+                    {% if fix.names|length > 1 %}
+                    <span class="text-xs text-emerald-600 block">
+                        from “{{ fix.names.0 }}” and “{{ fix.names.1 }}”
+                        ({{ fix.reasons|join:", " }} difference)
+                    </span>
+                    {% endif %}
+                </div>
+            </li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+</div>

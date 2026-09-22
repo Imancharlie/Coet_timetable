@@ -7,8 +7,13 @@ vs "DO1 kijitonyama").  The functions here normalise a venue name into a
 comparable key and classify the kinds on inconsistency found so the UI can
 highlight problem rows and let a user recycle (edit/fix/delete) them, keeping
 the database in sync.
+
+It also provides the pairwise detection used by the interactive venue-import
+conflict fixer (spacing / casing duplicates) plus the merge primitives used to
+fold an accepted venue name back into the database.
 """
 import re
+import uuid
 
 _BASE_CODE_RE = re.compile(r"^([A-Z]{1,6}\d{1,6})")
 _BREAKS_CODE_RE = re.compile(r"^[A-Za-z]+\s+\d+")
@@ -110,3 +115,123 @@ def analyse_venues():
             "duplicate_of": duplicates,
         }
     return issues_map, duplicate_groups, bool(issues_map)
+
+
+def _format_key(name: str) -> str:
+    """Strict formatting key: lowercase, no whitespace at all.
+
+    'PB 06', 'pb06' and 'PB06' all key to 'pb06', while 'DO1 luhanga hall
+    kijitonyama' and 'DO1 kijitonyama' stay distinct (they are genuine name
+    duplicates, not pure formatting variants).
+    """
+    return "".join(str(name).lower().split())
+
+
+def conflict_reasons(a: str, b: str) -> list:
+    """Classify why two venue names are formatting duplicates.
+
+    Returns a (possibly empty) list drawn from the labels "Spacing" and
+    "Casing" describing the difference between the two names:
+    - "Casing": identical once letter case is ignored ("PB 06" vs "pb 06").
+    - "Spacing": identical once whitespace is removed ("PB 06" vs "PB06").
+    - both: the names differ in both ways ("pb 06" vs "PB06").
+    An empty list means the pair is not a pure formatting duplicate.
+    """
+    a = str(a).strip()
+    b = str(b).strip()
+    if a == b or _format_key(a) != _format_key(b):
+        return []
+    reasons = []
+    if a.lower() == b.lower():
+        reasons.append("Casing")
+    if " ".join(a.split()) != " ".join(b.split()) and "".join(a.split()) == "".join(
+        b.split()
+    ):
+        reasons.append("Spacing")
+    if not reasons:
+        reasons = ["Spacing", "Casing"]
+    return reasons
+
+
+def detect_name_conflicts(names) -> list:
+    """Return pairwise spacing/casing conflicts among a set of venue names.
+
+    Every group of names that is identical after removing whitespace and
+    ignoring case yields one entry per distinct pair. Each entry has:
+    {"id", "key", "names": [a, b], "reasons": ["Spacing"|"Casing", ...]}.
+    The id is stable for the lifetime of the process so interactive fixes can
+    reference a specific issue.
+    """
+    groups = {}
+    for name in names:
+        text = str(name).strip()
+        if text:
+            groups.setdefault(_format_key(text), set()).add(text)
+
+    conflicts = []
+    for key, name_set in groups.items():
+        ordered = sorted(name_set, key=lambda n: (n.lower(), n))
+        for i in range(len(ordered)):
+            for j in range(i + 1, len(ordered)):
+                a, b = ordered[i], ordered[j]
+                reasons = conflict_reasons(a, b)
+                if not reasons:
+                    continue
+                conflicts.append(
+                    {
+                        "id": uuid.uuid4().hex[:10],
+                        "key": base_key(a),
+                        "names": [a, b],
+                        "reasons": reasons,
+                    }
+                )
+    return conflicts
+
+
+def merge_venues(source, target):
+    """Fold one venue into another and keep every reference in sync.
+
+    Sessions point at the kept venue, workshop/TD allocation strings are
+    overwritten with the kept name, capacity is absorbed and the source row is
+    deleted. Returns the kept venue.
+    """
+    from .models import (
+        Session,
+        TechnicalDrawingAllocation,
+        Venue,
+        WorkshopAllocation,
+    )
+
+    target.refresh_from_db()
+    Session.objects.filter(venue=source).update(venue=target)
+    WorkshopAllocation.objects.filter(venue=source.name).update(venue=target.name)
+    TechnicalDrawingAllocation.objects.filter(venue=source.name).update(
+        venue=target.name
+    )
+    if (target.capacity or 0) <= 0 and (source.capacity or 0) > 0:
+        target.capacity = source.capacity
+        target.save(update_fields=["capacity"])
+    source.delete()
+    return target
+
+
+def resolve_venue_name_conflict(key: str, official: str):
+    """Merge every venue normalising to ``key`` into the venue ``official``.
+
+    The user-chosen official name becomes the surviving venue (created with
+    capacity 0 if it does not exist yet) and every other venue whose
+    ``base_key`` matches is folded into it. Returns ``(target, merged_names)``.
+    """
+    from .models import Venue
+
+    target = Venue.objects.filter(name=official).first()
+    if target is None:
+        target = Venue.objects.create(name=official, capacity=0)
+    merged = []
+    for venue in Venue.objects.all():
+        if venue.pk == target.pk:
+            continue
+        if base_key(venue.name) == key:
+            merged.append(venue.name)
+            merge_venues(venue, target)
+    return target, merged

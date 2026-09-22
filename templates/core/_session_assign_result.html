@@ -1,18 +1,40 @@
 {% if total_sessions == 0 %}
-<div class="bg-blue-50 border border-blue-200 rounded-lg p-4 text-sm text-blue-800">
+<div x-data="assignResult" x-show="!dismissed" role="alert"
+     class="relative bg-blue-50 border border-blue-200 rounded-lg p-4 pr-12 text-sm text-blue-800">
+    <button type="button" @click="dismiss()" title="Dismiss notification" aria-label="Dismiss notification"
+            class="absolute top-2 right-2 inline-flex items-center justify-center w-8 h-8 rounded-lg text-blue-500 hover:text-blue-800 hover:bg-blue-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+    </button>
     <div class="font-semibold mb-1">No lecture sessions found</div>
     <div>Add lecture sessions to the master timetable first, then assign groups.</div>
 </div>
-{% else %}
-<div class="bg-emerald-50 border border-emerald-200 rounded-lg p-4 text-sm text-emerald-800">
+{% elif skipped_courses %}
+<div x-data="assignResult" x-show="!dismissed" role="alert"
+     class="relative bg-emerald-50 border border-emerald-200 rounded-lg p-4 pr-12 text-sm text-emerald-800">
+    <button type="button" @click="dismiss()" title="Dismiss notification" aria-label="Dismiss notification"
+            class="absolute top-2 right-2 inline-flex items-center justify-center w-8 h-8 rounded-lg text-emerald-500 hover:text-emerald-800 hover:bg-emerald-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+    </button>
     <div class="font-semibold mb-1">Lecture group assignment complete</div>
     <ul class="space-y-0.5">
         <li>Lecture sessions processed: {{ processed }} of {{ total_sessions }}</li>
         <li>Group links created: {{ created_links }}</li>
         <li>Already linked: {{ already_linked }}</li>
-        {% if skipped_courses %}
         <li class="text-amber-700 mt-1">No programme mapping found for: {{ skipped_courses|join:", " }} — groups not assigned.</li>
-        {% endif %}
+    </ul>
+</div>
+{% else %}
+<div x-data="assignResult" x-show="!dismissed" data-auto-dismiss="7000" role="status"
+     class="relative bg-emerald-50 border border-emerald-200 rounded-lg p-4 pr-12 text-sm text-emerald-800">
+    <button type="button" @click="dismiss()" title="Dismiss notification" aria-label="Dismiss notification"
+            class="absolute top-2 right-2 inline-flex items-center justify-center w-8 h-8 rounded-lg text-emerald-500 hover:text-emerald-800 hover:bg-emerald-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+    </button>
+    <div class="font-semibold mb-1">Lecture group assignment complete</div>
+    <ul class="space-y-0.5">
+        <li>Lecture sessions processed: {{ processed }} of {{ total_sessions }}</li>
+        <li>Group links created: {{ created_links }}</li>
+        <li>Already linked: {{ already_linked }}</li>
     </ul>
 </div>
 {% endif %}

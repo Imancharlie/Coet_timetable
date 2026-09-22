@@ -35,11 +35,20 @@
     </div>
 
     <!-- Events -->
-    <div id="data-table-wrap"
-         hx-get="{{ list_url }}{{ query }}"
-         hx-trigger="refresh from:window"
-         hx-swap="innerHTML">
-        {% include "core/_activity_log.html" %}
+    <div class="relative">
+        <div id="data-table-wrap"
+             hx-get="{{ list_url }}{{ query }}"
+             hx-trigger="refresh from:window"
+             hx-swap="innerHTML"
+             hx-settle="220"
+             hx-indicator="#loading-indicator">
+            {% include "core/_activity_log.html" %}
+        </div>
+        <div id="loading-indicator"
+             class="htmx-indicator absolute inset-0 z-10 rounded-xl bg-white/60 flex flex-col items-center justify-center gap-2">
+            <svg class="animate-spin w-6 h-6 text-blue-600" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+            <span class="text-sm text-gray-500">Loading data...</span>
+        </div>
     </div>
 </div>
 {% endblock %}

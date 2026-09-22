@@ -5,12 +5,21 @@
 <div class="max-w-7xl mx-auto">
     <!-- Toolbar -->
     <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
-        <div class="text-sm text-gray-500">{{ total }} record{{ total|pluralize }}</div>
-        <button onclick="openModal('{{ create_url }}', '{{ "Create " }}{{ page_title }}')"
-                class="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
-            Add New
-        </button>
+        <div class="text-sm text-gray-500" id="record-total">{{ total }} record{{ total|pluralize }}</div>
+        <div class="flex flex-wrap items-center gap-2">
+            {% if clear_all_url %}
+            <button onclick="openModal('{{ clear_all_url }}{{ query }}', 'Clear all {{ page_title }}')"
+                    class="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-red-700 border border-red-300 bg-red-50 rounded-lg hover:bg-red-100 transition">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                Clear All
+            </button>
+            {% endif %}
+            <button onclick="openModal('{{ create_url }}', '{{ "Create " }}{{ page_title }}')"
+                    class="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+                Add New
+            </button>
+        </div>
     </div>
 
     {% block list_actions %}{% endblock %}
@@ -60,12 +69,20 @@
     </div>
 
     <!-- Table + Mobile cards container -->
-    <div id="data-table-wrap"
-         hx-get="{{ list_url }}{{ query }}"
-         hx-trigger="refresh from:window"
-         hx-swap="innerHTML"
-         hx-indicator="#loading-indicator">
-        {% include "core/_table_and_cards.html" %}
+    <div class="relative">
+        <div id="data-table-wrap"
+             hx-get="{{ list_url }}{{ query }}"
+             hx-trigger="refresh from:window"
+             hx-swap="innerHTML"
+             hx-settle="220"
+             hx-indicator="#loading-indicator">
+            {% include "core/_table_and_cards.html" %}
+        </div>
+        <div id="loading-indicator"
+             class="htmx-indicator absolute inset-0 z-10 rounded-xl bg-white/60 flex flex-col items-center justify-center gap-2">
+            <svg class="animate-spin w-6 h-6 text-blue-600" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+            <span class="text-sm text-gray-500">Loading data...</span>
+        </div>
     </div>
 </div>
 

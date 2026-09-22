@@ -6,12 +6,14 @@ column, matching the on-screen timetable in ``core/timetable.html``. Sessions
 that span multiple hourly slots merge their cells on that day. Each cell is
 shaded by activity type — Lecture faded grey, Workshop faded green, Technical
 Drawing faded pink. External activities (workshops / technical drawing) that
-only carry a Morning/Afternoon period are placed in the full morning
-(08:00-12:55) or afternoon (13:00-17:55) range.
+only carry a Morning/Afternoon period are placed in the morning (09:00-12:55)
+or afternoon (15:00-18:55) range.
 """
 
 import datetime
+from xml.sax.saxutils import escape
 
+from django.db.models import Q
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.pagesizes import A4
@@ -63,25 +65,35 @@ def _session_entry(session, groups_text=""):
         "label": "\n".join(lines),
         "kind": session.activity_type.lower(),
         "course_code": session.course_code,
+        "name": session.course_code,
         "type_label": session.get_activity_type_display(),
         "venue": venue,
         "groups": groups_text,
+        "note": "",
     }
 
 
+def _workshop_display_name(rec):
+    """The meaningful workshop/category name to show in a cell.
+
+    Prefers the explicit workshop field, then the course code (both hold the
+    workshop category for matrix imports), then the venue as a last resort.
+    """
+    return rec.workshop or rec.course_code or rec.venue
+
+
 def _workshop_entry(rec):
-    label = f"{rec.course_code} WORKSHOP"
-    if rec.workshop:
-        label += f" · {rec.workshop}"
-    lines = [label]
-    bits = [rec.group_code]
-    if rec.venue:
-        bits.append(rec.venue)
-    lines.append(" ".join(bits))
+    """Workshop cell: show only the meaningful workshop/category name.
+
+    The group code, activity type, course code and venue are omitted from the
+    cell; when two simultaneous entries share a name the grid builder appends
+    the genuinely distinguishing details (week range, venue) rather than
+    repeating every field for every entry.
+    """
     note = ""
     if rec.week_start and rec.week_end:
         note = f"Wk {rec.week_start}-{rec.week_end}"
-        lines.append(note)
+    name = _workshop_display_name(rec)
     return {
         "key": ("workshop", rec.pk),
         "day": rec.day,
@@ -90,9 +102,10 @@ def _workshop_entry(rec):
             if rec.start_time is not None
             else _period_hours(rec.time_period)
         ),
-        "label": "\n".join(lines),
+        "label": name,
         "kind": "workshop",
         "course_code": rec.course_code,
+        "name": name,
         "type_label": "Workshop",
         "venue": rec.venue,
         "groups": rec.group_code,
@@ -112,10 +125,63 @@ def _td_entry(rec):
         ]),
         "kind": "td",
         "course_code": rec.course_code,
+        "name": rec.course_code,
         "type_label": "Technical Drawing",
         "venue": rec.venue,
         "groups": rec.group_code,
+        "note": "",
     }
+
+
+def _workshop_sort_time(rec):
+    """Clock-time a workshop occupies, for a deterministic day ordering."""
+    if rec.start_time is not None:
+        return rec.start_time
+    if rec.time_period == TimePeriod.MORNING:
+        return datetime.time(9)
+    if rec.time_period == TimePeriod.AFTERNOON:
+        return datetime.time(15)
+    return datetime.time(0)
+
+
+def _workshop_entries(qs):
+    """Turn a WorkshopAllocation queryset into clean display entries.
+
+    Applies the timetable rules that a student group has exactly one workshop
+    per day: when the source carries two *different* workshops for the same
+    group on the same day (a data inconsistency), only the first is kept so the
+    grid never shows two workshops for one group on one day. Week-run splits of
+    the same workshop (e.g. Wk 1-6 and Wk 8-13) are all preserved — they are
+    one workshop with distinct valid sessions. The chosen records are ordered
+    deterministically by day/time so cells render stably.
+    """
+    by_group_day = {}
+    for rec in qs:
+        by_group_day.setdefault((rec.group_code, rec.day), []).append(rec)
+
+    kept = []
+    for records in by_group_day.values():
+        by_identity = {}
+        for rec in records:
+            by_identity.setdefault(_workshop_display_name(rec), []).append(rec)
+        chosen = by_identity
+        if len(by_identity) > 1:
+            best = min(
+                by_identity,
+                key=lambda name: (
+                    _workshop_sort_time(by_identity[name][0]),
+                    by_identity[name][0].pk,
+                ),
+            )
+            chosen = {best: by_identity[best]}
+        for records_of_identity in chosen.values():
+            kept.extend(
+                sorted(
+                    records_of_identity,
+                    key=lambda r: (_workshop_sort_time(r), r.pk),
+                )
+            )
+    return [_workshop_entry(rec) for rec in kept]
 
 
 def _covered_hours(start, end):
@@ -129,22 +195,40 @@ def _covered_hours(start, end):
 
 
 def _period_hours(time_period):
+    """Hourly slots a morning/afternoon workshop covers.
+
+    A morning workshop is one four-hour session 09:00-12:55 and an afternoon
+    workshop one four-hour session 15:00-18:55, matching the university rules.
+    """
     if time_period == TimePeriod.MORNING:
-        return set(range(8, 13))
+        return set(range(9, 13))
     if time_period == TimePeriod.AFTERNOON:
-        return set(range(13, 18))
+        return set(range(15, 19))
     return set()
 
 
-def collect_entries(programme, semester, group=None):
+def _cell_markup(text):
+    """Escape a cell's text for a reportlab Paragraph, keeping real line breaks.
+
+    reportlab's Paragraph treats literal newlines as spaces, so the ``\n``
+    separators used by entry labels are converted to explicit ``<br/>`` tags.
+    XML-special characters (``&``, ``<``, ``>``) are escaped first so venue or
+    course names cannot be misread as markup.
+    """
+    return escape(text).replace("\n", "<br/>")
+
+
+def collect_entries(programme, semester, group=None, year=None):
     """Gather timetable entries for one programme's groups in a semester.
 
     When ``group`` is given only that single student group's timetable is
     collected (sessions a group actually attends plus its workshops/TDs),
-    which backs the per-group export.
+    which backs the per-group export. ``year`` optionally filters workshop
+    allocations to a year of study (records without a year apply to every
+    year).
     """
     if group is not None:
-        return collect_group_entries(group, semester)
+        return collect_group_entries(group, semester, year=year)
 
     groups = list(StudentGroup.objects.filter(programme=programme))
     group_codes = {g.code for g in groups}
@@ -173,8 +257,11 @@ def collect_entries(programme, semester, group=None):
     workshops = WorkshopAllocation.objects.filter(
         semester=semester, group_code__in=group_codes
     )
-    for rec in workshops:
-        entries.append(_workshop_entry(rec))
+    if year:
+        workshops = workshops.filter(
+            Q(year_of_study__isnull=True) | Q(year_of_study=year)
+        )
+    entries.extend(_workshop_entries(workshops))
 
     tds = TechnicalDrawingAllocation.objects.filter(
         semester=semester, group_code__in=group_codes
@@ -185,7 +272,7 @@ def collect_entries(programme, semester, group=None):
     return entries
 
 
-def collect_group_entries(group, semester):
+def collect_group_entries(group, semester, year=None):
     """Gather timetable entries for ONE student group in a semester.
 
     Sessions are those the group actually attends (via ``SessionGroup``);
@@ -204,8 +291,11 @@ def collect_group_entries(group, semester):
     workshops = WorkshopAllocation.objects.filter(
         semester=semester, group_code=group.code
     )
-    for rec in workshops:
-        entries.append(_workshop_entry(rec))
+    if year:
+        workshops = workshops.filter(
+            Q(year_of_study__isnull=True) | Q(year_of_study=year)
+        )
+    entries.extend(_workshop_entries(workshops))
 
     tds = TechnicalDrawingAllocation.objects.filter(
         semester=semester, group_code=group.code
@@ -216,7 +306,7 @@ def collect_group_entries(group, semester):
     return entries
 
 
-def build_grid(entries):
+def build_grid(entries, show_groups=False):
     """Return table data (list of rows), SPAN commands and fill colours.
 
     Classic layout: column 0 is TIME, columns 1..n are the weekdays, row 0 is
@@ -224,27 +314,33 @@ def build_grid(entries):
     matches the on-screen timetable. SPAN commands merge multi-slot session
     blocks vertically; fills carries one BACKGROUND command per block,
     colour-coded by activity type (Lecture grey, Workshop green, TD pink).
+    ``show_groups`` appends owning group codes to workshop cells (the
+    all-groups export).
     """
     grid = build_time_day_grid(entries)
-    return time_day_grid_to_table(grid)
+    return time_day_grid_to_table(grid, show_groups=show_groups)
 
 
 def render_programme_timetable(programme, semester, year_of_study=1, out=None):
     """Render the programme timetable PDF to `out` (file-like or a path)."""
-    entries = collect_entries(programme, semester)
+    entries = collect_entries(programme, semester, year=year_of_study)
+    show_groups = StudentGroup.objects.filter(programme=programme).count() > 1
     return _render_grid(
         entries,
         title=f"{programme.name.upper()}",
         subtitle=f"{_ordinal(year_of_study)} YEAR · {semester.academic_year}",
         semester=semester,
         doc_title=f"{programme.name} Timetable",
+        show_groups=show_groups,
         out=out,
     )
 
 
 def render_group_timetable(group, semester, year_of_study=1, out=None):
     """Render ONE student group's timetable PDF to `out` (file-like/path)."""
-    entries = collect_entries(group.programme, semester, group=group)
+    entries = collect_entries(
+        group.programme, semester, group=group, year=year_of_study
+    )
     return _render_grid(
         entries,
         title=f"{group.programme.name.upper()}",
@@ -254,13 +350,14 @@ def render_group_timetable(group, semester, year_of_study=1, out=None):
         ),
         semester=semester,
         doc_title=f"{group.programme.code} {group.code} Timetable",
+        show_groups=False,
         out=out,
     )
 
 
-def _render_grid(entries, title, subtitle, semester, doc_title, out):
+def _render_grid(entries, title, subtitle, semester, doc_title, out, show_groups=False):
     """Render the weekly grid PDF to `out` (file-like or a path)."""
-    data, spans, fills = build_grid(entries)
+    data, spans, fills = build_grid(entries, show_groups=show_groups)
 
     doc = SimpleDocTemplate(
         out,
@@ -323,7 +420,10 @@ def _render_grid(entries, title, subtitle, semester, doc_title, out):
             [
                 Paragraph(row[0], time_style) if row[0] else "",
             ]
-            + [Paragraph(cell, cell_style) if cell else "" for cell in row[1:]]
+            + [
+                Paragraph(_cell_markup(cell), cell_style) if cell else ""
+                for cell in row[1:]
+            ]
         )
 
     n_rows = len(data) - 1

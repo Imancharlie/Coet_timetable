@@ -19,7 +19,7 @@ All from repo root (`E:\COET_TIMETABLE\Coet_timetable`). Use `.venv\Scripts\pyth
   manage.py import_td_allocation --file sample_data/td_allocation.xlsx --semester 1
   ```
   `create_sample_data.py` regenerates those Excel files and prints the full command sequence. Import commands `exit(1)` on any row error. Master-timetable imports require `--semester` (the PK of the target `Semester` — it is never auto-created) and support a `--dry-run` flag (reconcilies/validates but writes nothing; also prints `DRY RUN — no records were written.`).
-- Test suite: `.venv\Scripts\python.exe manage.py test` runs 100 tests in `core/tests.py` (import reconciliation/idempotency, adaptive alias/reshape imports, CSRF-enforced CRUD responses for htmx and plain posts, sidebar active-nav, upload view). Uses an isolated test DB — `db.sqlite3` is never touched. Keep uses of `make_xlsx` (module function) rather than a per-instance `_xlsx`.
+- Test suite: `.venv\Scripts\python.exe manage.py test` runs 100 tests in `core/tests.py` (import reconciliation/idempotency, adaptive alias/reshape imports, CSRF-enforced CRUD responses for htmx and plain posts, sidebar active-nav, upload view, PDF/timetable exports). Uses an isolated test DB — `db.sqlite3` is never touched. Keep uses of `make_xlsx` (module function) rather than a per-instance `_xlsx`.
 
 ## Conventions when adding features
 
@@ -29,6 +29,12 @@ All from repo root (`E:\COET_TIMETABLE\Coet_timetable`). Use `.venv\Scripts\pyth
 - Every mutating view (create/edit/delete for the 8 CRUD resources, session group add/remove/clear, lecture-group assignment, import uploads) records an `ActivityLog` entry via the `_log(action, message, resource="", target="")` helper in `core/views.py` (uses `LogAction` choices). Keep logging in any new mutating view. The sidebar's Activity Log section renders the latest entries via the `{% activity_logs N as logs %}` tag and `log_badge_cls` filter in `templates/partials/sidebar.html`; each entry links to the dashboard with `?log=<pk>`, and `dashboard()` reads `request.GET["log"]` to display it in a dismissible panel whose Cancel button links back to the bare dashboard (no `?log=`).
 - Frontend is htmx (2.0.4) + Alpine.js + Tailwind, all loaded from CDNs (requires internet, no bundler). Form templates post with `hx-target="#modal-content"`. After innerHTML swaps, `base.html` runs `Alpine.initTree` on the swapped element (via `htmx:afterSwap`) — page-level Alpine state lives on `<body x-data>` so it must be hoisted there, not on a swappable child. Sidebar active state comes from the `nav_section`/`active_cls` tags in `core_tags.py` (derived from `request.resolver_match.url_name`); per-view `NAV` context keys no longer exist.
 - Style form widgets with the existing `INPUT_CLS` / `SELECT_CLS` constants in `core/forms.py`. Session create/edit uses the inline `SessionGroupFormSet`.
+
+## Timetable view & PDF exports
+
+- On-screen timetable (`/timetable/`, view `timetable_view`) and the PDF exports share one grid builder: `core/timetable_grid.build_time_day_grid` (TIME rows / DAY columns, merged multi-slot cells) fed by `core/timetable_pdf.collect_entries` (sessions + workshops + TDs for a programme, or `collect_group_entries` for a single group). DAYS-only filter on `Day` choices; fills via `fill_color`; PDF rendering is `render_programme_timetable`/`render_group_timetable` (reportlab `SimpleDocTemplate` — the on-screen/template shading matches the PDF colours).
+- Export URLs: `export/` (export picker page), `export/programmes/<pk>/timetable.pdf/` (name `programme-timetable-export`), `export/groups/<pk>/timetable.pdf/` (name `group-timetable-export`); also `programmes/<pk>/timetable.pdf/` (`programme-timetable-pdf`), `timetable/` (`timetable`), `timetable/groups/` (`timetable-groups`).
+- PDF exports accept `?semester=<pk>` & `?year=<n>`; without `semester` they fall back to the latest semester that actually has data (`_latest_semester_with_data` in `core/views.py`).
 
 ## Data model / importers
 
@@ -41,5 +47,5 @@ All from repo root (`E:\COET_TIMETABLE\Coet_timetable`). Use `.venv\Scripts\pyth
 
 - `manage.py check` reports `staticfiles.W004` because `static/` doesn't exist but is in `STATICFILES_DIRS`. Harmless — all styling comes from CDNs.
 - `settings.py` holds local-only, uncommitted LAN IPs in `ALLOWED_HOSTS` (172.16.185.226, 192.168.100.6) — don't strip them.
-- README is stale: PDF report generation (reportlab/weasyprint) is claimed but no report code exists — those packages are installed but unused.
+- README is partly stale: reportlab (timetable PDFs in `core/timetable_pdf.py`) IS used now, but weasyprint is installed and unused.
 - `core/templatetags/core_tags.py` defines `get_attr` and `time_short` filters, plus the `nav_section`/`active_cls` sidebar tags used by `templates/partials/sidebar.html`.

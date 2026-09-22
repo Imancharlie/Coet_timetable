@@ -1,4 +1,6 @@
 import io
+import json
+import uuid
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -6,14 +8,17 @@ from django.db.models import Q, Count
 from django.http import HttpResponse, HttpResponseBadRequest, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.utils import timezone
 
 from .timetable_grid import build_time_day_grid
 from .timetable_pdf import (
     collect_entries,
+    collect_group_entries,
     render_group_timetable,
     render_programme_timetable,
 )
 
+from .deletion_impact import deletion_impact
 from .forms import (
     FileUploadForm,
     ProgrammeCourseForm,
@@ -24,6 +29,7 @@ from .forms import (
     StudentGroupForm,
     TechnicalDrawingAllocationForm,
     VenueForm,
+    VenueRecycleForm,
     WorkshopAllocationForm,
 )
 from .importers import (
@@ -40,6 +46,8 @@ from .importers import (
 from .models import (
     ActivityLog,
     Day,
+    ImportHistory,
+    ImportStatus,
     LogAction,
     Programme,
     ProgrammeCourse,
@@ -54,7 +62,10 @@ from .models import (
 from .venue_quality import (
     analyse_venues,
     base_key,
+    detect_name_conflicts,
     issues_for,
+    merge_venues,
+    resolve_venue_name_conflict,
     suggested_name,
 )
 
@@ -83,6 +94,122 @@ def _write_response(request, trigger, redirect_name, *args):
         r["HX-Trigger"] = trigger
         return r
     return redirect(redirect_name, *args)
+
+
+def _delete_context(request, item, back_url, delete_url):
+    """Shared context for the confirm-delete page, including the impact preview."""
+    return {
+        "item": item,
+        "title": f"Delete {item}?",
+        "back_url": back_url,
+        "delete_url": delete_url,
+        "impact": deletion_impact(item),
+    }
+
+
+CLEAR_ALL_PHRASE = "DELETE ALL"
+
+
+def _clear_all_context(
+    request,
+    list_url,
+    clear_url,
+    page_title,
+    primary_label,
+    primary_count,
+    related,
+    detached,
+    kept_note="",
+):
+    """Shared context for the clear-all confirmation modal."""
+    return {
+        "clear_url": clear_url,
+        "back_url": list_url,
+        "page_title": page_title,
+        "primary_label": primary_label,
+        "primary_count": primary_count,
+        "related": related,
+        "detached": detached,
+        "detached_total": sum(group["count"] for group in detached),
+        "kept_note": kept_note,
+        "filters_active": bool(request.GET),
+        "has_records": bool(
+            primary_count
+            or any(group["count"] for group in related)
+            or any(group["count"] for group in detached)
+        ),
+    }
+
+
+def _clear_all(
+    request,
+    *,
+    model,
+    list_url,
+    clear_url,
+    page_title,
+    primary_label,
+    log_resource,
+    redirect_name,
+    related_count=(),
+    detached_count=(),
+    kept_note="",
+):
+    """Confirm + execute clearing every record of one resource type.
+
+    ``related_count`` / ``detached_count`` are sequences of
+    ``(queryset, label)`` pairs. ``related_count`` rows cascade away with the
+    primary records (e.g. SessionGroup links for Session); ``detached_count``
+    rows are kept with their reference cleared (e.g. Sessions when clearing
+    Venues via the SET_NULL FK). Deleting happens through the ORM so Django
+    honours the model CASCADE/SET_NULL rules; unrelated reference data is
+    never touched.
+    """
+    ctx = _clear_all_context(
+        request,
+        list_url,
+        clear_url,
+        page_title,
+        primary_label,
+        model.objects.count(),
+        [{"label": label, "count": qs.count()} for qs, label in related_count],
+        [{"label": label, "count": qs.count()} for qs, label in detached_count],
+        kept_note,
+    )
+    if request.method != "POST":
+        return render(request, "core/clear_all.html", ctx)
+
+    if request.POST.get("phrase", "").strip().upper() != CLEAR_ALL_PHRASE:
+        ctx["error"] = (
+            f"Type {CLEAR_ALL_PHRASE} to confirm — nothing was deleted."
+        )
+        return render(request, "core/clear_all.html", ctx)
+
+    primary = model.objects.count()
+    related = [(qs.count(), label) for qs, label in related_count]
+    detached = [(qs.count(), label) for qs, label in detached_count]
+    try:
+        model.objects.all().delete()
+    except Exception as exc:  # pragma: no cover - defensive
+        ctx["error"] = (
+            f"Clearing failed: {exc}. The deletion was rolled back — "
+            "no records have been removed."
+        )
+        return render(request, "core/clear_all.html", ctx)
+    if primary or any(count for count, _ in related) or any(
+        count for count, _ in detached
+    ):
+        parts = [f"{primary} {log_resource} record(s)"]
+        parts += [f"{count} {label}" for count, label in related if count]
+        det_parts = [f"{count} {label}" for count, label in detached if count]
+        message = f"Cleared all {primary_label}: "
+        if parts:
+            message += ", ".join(parts) + " removed"
+        if det_parts:
+            message += "; " if parts else ""
+            message += ", ".join(det_parts) + " kept with reference cleared"
+        _log(LogAction.CLEAR, message, log_resource)
+    return _write_response(request, "close-modal,refresh-table", redirect_name)
 
 
 def _search(qs, q, fields):
@@ -205,6 +332,7 @@ def programme_list(request):
         "page_title": "Programmes",
         "list_url": "/programmes/",
         "create_url": "/programmes/create/",
+        "clear_all_url": "/programmes/clear-all/",
         "edit_name": "programme-edit",
         "delete_name": "programme-delete",
         "detail_name": "programme-detail",
@@ -287,7 +415,30 @@ def programme_delete(request, pk):
     return render(
         request,
         "core/delete.html",
-        {"item": item, "title": f"Delete {item}?", "back_url": "/programmes/", "delete_url": f"/programmes/{pk}/delete/"},
+        _delete_context(request, item, "/programmes/", f"/programmes/{pk}/delete/"),
+    )
+
+
+def programme_clear_all(request):
+    """Clear every Programme (cascading its courses and student groups)."""
+    return _clear_all(
+        request,
+        model=Programme,
+        list_url="/programmes/",
+        clear_url="/programmes/clear-all/",
+        page_title="Programmes",
+        primary_label="Programmes",
+        log_resource="Programme",
+        redirect_name="programme-list",
+        related_count=(
+            (StudentGroup.objects.all(), "Student groups"),
+            (ProgrammeCourse.objects.all(), "Programme courses"),
+            (SessionGroup.objects.all(), "Session-group links"),
+        ),
+        kept_note=(
+            "Linked student groups and programme courses are deleted with their "
+            "programmes. Sessions and semesters are kept."
+        ),
     )
 
 
@@ -448,12 +599,12 @@ def timetable_view(request):
     grid = {"slots": [], "days": [], "rows": []}
     if active_semester:
         if active_group:
-            entries = collect_group_entries(active_group, active_semester)
+            entries = collect_group_entries(active_group, active_semester, year=year)
         elif active_programme:
-            entries = collect_entries(active_programme, active_semester)
+            entries = collect_entries(active_programme, active_semester, year=year)
         elif programmes:
             for prog in programmes:
-                entries.extend(collect_entries(prog, active_semester))
+                entries.extend(collect_entries(prog, active_semester, year=year))
         grid = build_time_day_grid(entries)
 
     ordinal = {1: "1st", 2: "2nd", 3: "3rd", 4: "4th"}
@@ -462,6 +613,7 @@ def timetable_view(request):
     if active_programme:
         groups_for_programme = list(StudentGroup.objects.filter(programme=active_programme))
     
+    show_all = programme_id == "all"
     ctx = {
         "page_title": "Timetable",
         "programmes": programmes,
@@ -475,7 +627,8 @@ def timetable_view(request):
         "year_ordinal": ordinal.get(year, f"{year}th"),
         "grid": grid,
         "entry_count": len(entries),
-        "show_all": programme_id == "all",
+        "show_all": show_all,
+        "show_groups": (active_programme is not None and active_group is None) or show_all,
     }
     return render(request, "core/timetable.html", ctx)
 
@@ -535,6 +688,7 @@ def studentgroup_list(request):
         "page_title": "Student Groups",
         "list_url": "/groups/",
         "create_url": "/groups/create/",
+        "clear_all_url": "/groups/clear-all/",
         "edit_name": "group-edit",
         "delete_name": "group-delete",
         "detail_name": "group-detail",
@@ -631,7 +785,23 @@ def studentgroup_delete(request, pk):
     return render(
         request,
         "core/delete.html",
-        {"item": item, "title": f"Delete {item}?", "back_url": "/groups/", "delete_url": f"/groups/{pk}/delete/"},
+        _delete_context(request, item, "/groups/", f"/groups/{pk}/delete/"),
+    )
+
+
+def group_clear_all(request):
+    """Clear every StudentGroup, removing its SessionGroup links."""
+    return _clear_all(
+        request,
+        model=StudentGroup,
+        list_url="/groups/",
+        clear_url="/groups/clear-all/",
+        page_title="Student Groups",
+        primary_label="Student Groups",
+        log_resource="Student Group",
+        redirect_name="group-list",
+        related_count=((SessionGroup.objects.all(), "Session-group links"),),
+        kept_note="Sessions, programmes, courses, semesters and venues are kept.",
     )
 
 
@@ -677,6 +847,7 @@ def venue_list(request):
         "page_title": "Venues",
         "list_url": "/venues/",
         "create_url": "/venues/create/",
+        "clear_all_url": "/venues/clear-all/",
         "edit_name": "venue-edit",
         "delete_name": "venue-delete",
         "detail_name": "venue-detail",
@@ -767,28 +938,39 @@ def venue_delete(request, pk):
     return render(
         request,
         "core/delete.html",
-        {"item": item, "title": f"Delete {item}?", "back_url": "/venues/", "delete_url": f"/venues/{pk}/delete/"},
+        _delete_context(request, item, "/venues/", f"/venues/{pk}/delete/"),
+    )
+
+
+def venue_clear_all(request):
+    """Clear every Venue, clearing its Session references (sessions are kept)."""
+    return _clear_all(
+        request,
+        model=Venue,
+        list_url="/venues/",
+        clear_url="/venues/clear-all/",
+        page_title="Venues",
+        primary_label="Venues",
+        log_resource="Venue",
+        redirect_name="venue-list",
+        detached_count=((Session.objects.filter(venue__isnull=False), "sessions"),),
+        kept_note=(
+            "Sessions are kept and will simply have their venue reference "
+            "cleared. Semesters, programmes, courses and student groups are kept."
+        ),
     )
 
 
 def _merge_venues(source, target):
     """Fold one venue into another and keep every reference in sync."""
-    target.refresh_from_db()
-    Session.objects.filter(venue=source).update(venue=target)
-    cleaned = target.name
-    WorkshopAllocation.objects.filter(venue=source.name).update(venue=cleaned)
-    TechnicalDrawingAllocation.objects.filter(venue=source.name).update(venue=cleaned)
-    if (target.capacity or 0) <= 0 and (source.capacity or 0) > 0:
-        target.capacity = source.capacity
-        target.save(update_fields=["capacity"])
     label = source.name
+    target = merge_venues(source, target)
     _log(
         LogAction.UPDATE,
         f"Merged Venue {label} into {target.name}",
         "Venue",
         target.name,
     )
-    source.delete()
 
 
 def _partner_for(venue):
@@ -803,6 +985,39 @@ def _partner_for(venue):
     if not allies:
         return None
     return max(allies, key=lambda v: (v.capacity or 0, len(v.name), -v.pk))
+
+
+def _venue_impact(venue):
+    """Preview for removing a venue on the recycle workbench.
+
+    Pulling a duplicate venue away re-points every reference to the kept
+    partner (merge) before deleting the row; a lone venue with no partner is
+    plain-deleted and its Session FKs fall back to blank. Returns counts and a
+    short human summary for each row in the recycle list.
+    """
+    sessions = Session.objects.filter(venue=venue).count()
+    workshops = WorkshopAllocation.objects.filter(venue=venue.name).count()
+    tds = TechnicalDrawingAllocation.objects.filter(venue=venue.name).count()
+    partner = _partner_for(venue)
+    total = sessions + workshops + tds
+    if partner:
+        summary = (
+            f"No records lost — {total} reference(s) re-pointed to "
+            f"'{partner.name}' before this row is removed."
+        )
+    else:
+        summary = (
+            f"No partner to merge into; {sessions} session(s) keep existing "
+            f"but their venue is cleared."
+        )
+    return {
+        "sessions": sessions,
+        "workshops": workshops,
+        "td": tds,
+        "total": total,
+        "partner": partner.name if partner else "",
+        "summary": summary,
+    }
 
 
 def venue_recycle(request):
@@ -842,7 +1057,15 @@ def venue_recycle(request):
                 payload = {"name": new_name}
                 if raw_capacity:
                     payload["capacity"] = raw_capacity
-                form = VenueForm(payload, instance=venue)
+                # Resolving a casing/spacing duplicate is an independent action:
+                # it only validates the name and never touches capacity unless a
+                # new value was actually supplied, so existing capacities are
+                # preserved and missing capacity never blocks the fix.
+                form = (
+                    VenueForm(payload, instance=venue)
+                    if raw_capacity
+                    else VenueRecycleForm(payload, instance=venue)
+                )
                 if form.is_valid():
                     form.save()
                     _log(
@@ -881,6 +1104,10 @@ def venue_recycle(request):
         for v in Venue.objects.all()
         if v.pk in issues_map and v.pk not in dup_pks
     ]
+    venue_impacts = {
+        v.pk: _venue_impact(v)
+        for v in Venue.objects.filter(pk__in=set(issues_map) | set(dup_pks))
+    }
     ctx = {
         "issues_map": issues_map,
         "dup_groups": dup_groups,
@@ -893,8 +1120,92 @@ def venue_recycle(request):
         "list_url": "/venues/",
         "recycle_url": "/venues/recycle/",
         "create_url": "/venues/create/",
+        "venue_impacts": venue_impacts,
     }
     return render(request, "core/venue_recycle.html", ctx)
+
+
+def venue_fix_conflict(request):
+    """Resolve one interactive venue-name conflict from an import result.
+
+    POSTs carry the import collision token, the normalised venue key, the
+    issue id and the user-chosen official name. Every venue collapsing to that
+    key is merged into the accepted name, an ActivityLog entry records the
+    choice (original value, selected official value, action, time) and the
+    conflicts panel is re-rendered so the remaining count updates in place.
+    """
+    token = request.POST.get("token", "").strip()
+    issue_id = request.POST.get("issue_id", "").strip()
+    key = request.POST.get("key", "").strip()
+    official = request.POST.get("official", "").strip()
+    flash_success = []
+    flash_errors = []
+    store_key = f"venue_conflicts:{token}" if token else ""
+    store = request.session.get(store_key, {"open": [], "resolved": []}) if store_key else {"open": [], "resolved": []}
+
+    issue = None
+    if request.method == "POST":
+        if not key or not official:
+            flash_errors.append("Missing venue choice — nothing changed.")
+        else:
+            issue = next(
+                (i for i in store.get("open", []) if i.get("id") == issue_id),
+                None,
+            )
+            offered = set(issue["names"]) if issue else set()
+            if issue and official not in offered:
+                flash_errors.append(
+                    f"'{official}' was not one of the offered names for this issue."
+                )
+            else:
+                _, merged = resolve_venue_name_conflict(key, official)
+                merged_text = ", ".join(merged)
+                flash_success.append(
+                    f"Accepted '{official}' as the official name"
+                    + (f" — merged '{merged_text}'." if merged else ".")
+                )
+                _log(
+                    LogAction.UPDATE,
+                    f"Venue import conflict fixed: original '{merged_text or official}'"
+                    f" → official '{official}' accepted",
+                    "Venue",
+                    official,
+                )
+                store["open"] = [
+                    i
+                    for i in store.get("open", [])
+                    if i.get("id") != issue_id
+                ]
+                store["resolved"].append(
+                    {
+                        "id": issue_id,
+                        "key": key,
+                        "names": list(offered) or [official],
+                        "reasons": issue.get("reasons", ["Casing", "Spacing"])
+                        if issue
+                        else [],
+                        "accepted": official,
+                        "fixed_at": timezone.now().isoformat(),
+                    }
+                )
+
+    if store_key:
+        current_names = set(Venue.objects.values_list("name", flat=True))
+        store["open"] = [
+            i
+            for i in store.get("open", [])
+            if set(i["names"]).issubset(current_names)
+        ]
+        request.session[store_key] = store
+
+    ctx = {
+        "open_conflicts": store.get("open", []),
+        "resolved_conflicts": store.get("resolved", []),
+        "token": token,
+        "flash_success": flash_success,
+        "flash_errors": flash_errors,
+    }
+    return render(request, "core/_venue_conflicts.html", ctx)
 
 
 # ──────────────────────────────────────────────
@@ -1019,7 +1330,7 @@ def semester_delete(request, pk):
     return render(
         request,
         "core/delete.html",
-        {"item": item, "title": f"Delete {item}?", "back_url": "/semesters/", "delete_url": f"/semesters/{pk}/delete/"},
+        _delete_context(request, item, "/semesters/", f"/semesters/{pk}/delete/"),
     )
 
 
@@ -1124,6 +1435,7 @@ def session_list(request):
         "page_title": "Master Timetable",
         "list_url": "/sessions/",
         "create_url": "/sessions/create/",
+        "clear_all_url": "/sessions/clear-all/",
         "edit_name": "session-edit",
         "delete_name": "session-delete",
         "detail_name": "session-detail",
@@ -1198,6 +1510,7 @@ def session_assign_lecture_groups(request):
     if request.method != "POST":
         return redirect("session-list")
     sessions = Session.objects.filter(activity_type="LECTURE")
+    total_sessions = sessions.count()
     processed, created_links, already_linked, skipped_courses = (
         assign_lecture_groups()
     )
@@ -1208,13 +1521,19 @@ def session_assign_lecture_groups(request):
         "Session",
     )
     ctx = {
-        "total_sessions": sessions.count(),
+        "total_sessions": total_sessions,
         "processed": processed,
         "created_links": created_links,
         "already_linked": already_linked,
         "skipped_courses": skipped_courses,
     }
     if _htmx(request):
+        # Result-only response. The success/warning summary lives in the green
+        # results panel below the button (processed, created, already-linked,
+        # skipped mappings) which the user dismisses manually or lets
+        # auto-dismiss. No toast is dispatched here — that would duplicate the
+        # panel. Genuine request failures are surfaced by the global
+        # htmx:responseError / htmx:sendError handlers instead.
         return render(request, "core/_session_assign_result.html", ctx)
     return redirect("session-list")
 
@@ -1323,7 +1642,23 @@ def session_delete(request, pk):
     return render(
         request,
         "core/delete.html",
-        {"item": item, "title": f"Delete {item}?", "back_url": "/sessions/", "delete_url": f"/sessions/{pk}/delete/"},
+        _delete_context(request, item, "/sessions/", f"/sessions/{pk}/delete/"),
+    )
+
+
+def session_clear_all(request):
+    """Clear every Session (cascading its SessionGroup links) from the database."""
+    return _clear_all(
+        request,
+        model=Session,
+        list_url="/sessions/",
+        clear_url="/sessions/clear-all/",
+        page_title="Master Timetable",
+        primary_label="Sessions",
+        log_resource="Session",
+        redirect_name="session-list",
+        related_count=((SessionGroup.objects.all(), "Session-group links"),),
+        kept_note="Semesters, programmes, courses, student groups and venues are kept.",
     )
 
 
@@ -1468,6 +1803,7 @@ def workshop_list(request):
         "page_title": "Workshop Allocations",
         "list_url": "/workshops/",
         "create_url": "/workshops/create/",
+        "clear_all_url": "/workshops/clear-all/",
         "edit_name": "workshop-edit",
         "delete_name": "workshop-delete",
         "detail_name": "workshop-detail",
@@ -1571,7 +1907,24 @@ def workshop_delete(request, pk):
     return render(
         request,
         "core/delete.html",
-        {"item": item, "title": f"Delete {item}?", "back_url": "/workshops/", "delete_url": f"/workshops/{pk}/delete/"},
+        _delete_context(request, item, "/workshops/", f"/workshops/{pk}/delete/"),
+    )
+
+
+def workshop_clear_all(request):
+    """Clear every WorkshopAllocation record from the database."""
+    return _clear_all(
+        request,
+        model=WorkshopAllocation,
+        list_url="/workshops/",
+        clear_url="/workshops/clear-all/",
+        page_title="Workshop Allocations",
+        primary_label="Workshop Allocations",
+        log_resource="Workshop Allocation",
+        redirect_name="workshop-list",
+        kept_note=(
+            "Sessions, semesters, programmes, courses, student groups and venues are kept."
+        ),
     )
 
 
@@ -1647,6 +2000,7 @@ def td_list(request):
         "page_title": "Technical Drawing Allocations",
         "list_url": "/td/",
         "create_url": "/td/create/",
+        "clear_all_url": "/td/clear-all/",
         "edit_name": "td-edit",
         "delete_name": "td-delete",
         "detail_name": "td-detail",
@@ -1741,7 +2095,24 @@ def td_delete(request, pk):
     return render(
         request,
         "core/delete.html",
-        {"item": item, "title": f"Delete {item}?", "back_url": "/td/", "delete_url": f"/td/{pk}/delete/"},
+        _delete_context(request, item, "/td/", f"/td/{pk}/delete/"),
+    )
+
+
+def td_clear_all(request):
+    """Clear every TechnicalDrawingAllocation record from the database."""
+    return _clear_all(
+        request,
+        model=TechnicalDrawingAllocation,
+        list_url="/td/",
+        clear_url="/td/clear-all/",
+        page_title="Technical Drawing Allocations",
+        primary_label="Technical Drawing Allocations",
+        log_resource="TD Allocation",
+        redirect_name="td-list",
+        kept_note=(
+            "Sessions, semesters, programmes, courses, student groups and venues are kept."
+        ),
     )
 
 
@@ -1804,6 +2175,7 @@ def course_list(request):
         "page_title": "Programme Courses",
         "list_url": "/courses/",
         "create_url": "/courses/create/",
+        "clear_all_url": "/courses/clear-all/",
         "edit_name": "course-edit",
         "delete_name": "course-delete",
         "detail_name": "course-detail",
@@ -1905,13 +2277,96 @@ def course_delete(request, pk):
     return render(
         request,
         "core/delete.html",
-        {"item": item, "title": f"Delete {item}?", "back_url": "/courses/", "delete_url": f"/courses/{pk}/delete/"},
+        _delete_context(request, item, "/courses/", f"/courses/{pk}/delete/"),
+    )
+
+
+def course_clear_all(request):
+    """Clear every ProgrammeCourse mapping; programmes and other data are kept."""
+    return _clear_all(
+        request,
+        model=ProgrammeCourse,
+        list_url="/courses/",
+        clear_url="/courses/clear-all/",
+        page_title="Programme Courses",
+        primary_label="Programme Courses",
+        log_resource="Programme Course",
+        redirect_name="course-list",
+        kept_note="Programme, student group, session, semester and venue records are kept.",
     )
 
 
 # ──────────────────────────────────────────────
 # Import Views
 # ──────────────────────────────────────────────
+
+def _import_status(result) -> ImportStatus:
+    """Classify an ImportResult as SUCCESS / PARTIAL / FAILED.
+
+    FAILED means nothing was written and errors blocked the import; PARTIAL
+    means some rows were written while others errored; SUCCESS is clean.
+    """
+    if result.errors:
+        if (result.created + result.updated) > 0:
+            return ImportStatus.PARTIAL
+        return ImportStatus.FAILED
+    return ImportStatus.SUCCESS
+
+
+def _record_import(request, result, import_type, import_title, filename):
+    """Persist an ImportHistory record summarising a finished import.
+
+    Returns the saved record so the UI can link straight to its details.
+    Only the structured summary is stored (via ``ImportResult.snapshot``) —
+    never the uploaded file's contents.
+    """
+    status = _import_status(result)
+    history = ImportHistory.objects.create(
+        import_type=import_type,
+        import_title=import_title,
+        filename=filename,
+        user=request.user if request.user.is_authenticated else None,
+        status=status,
+        rows_processed=result.created + result.updated + result.skipped,
+        created=result.created,
+        updated=result.updated,
+        skipped=result.skipped,
+        error_count=len(result.errors),
+        details=json.dumps(result.snapshot(), ensure_ascii=True),
+    )
+    return history
+
+
+def _import_toast(result) -> tuple[str, str]:
+    """Important-event notification for an import (message, toast type).
+
+    Routine row/field validation messages are intentionally NOT notified here
+    — they are always visible in the results panel. Only the overall outcome
+    triggers a pop-up.
+    """
+    status = _import_status(result)
+    parts = [f"{result.created} created"]
+    if result.updated:
+        parts.append(f"{result.updated} updated")
+    if result.skipped:
+        parts.append(f"{result.skipped} skipped")
+    summary = ", ".join(parts)
+    if status == ImportStatus.FAILED:
+        return (
+            f"Import failed: {len(result.errors)} error(s) blocked "
+            "the import. Review the errors below.",
+            "error",
+        )
+    if status == ImportStatus.PARTIAL:
+        return (
+            f"Import completed with issues: {summary}, "
+            f"{len(result.errors)} row(s) with errors — review below.",
+            "error",
+        )
+    return (
+        f"Import complete: {summary}.",
+        "success",
+    )
 
 IMPORT_TYPES = {
     "programmes": {
@@ -1990,9 +2445,18 @@ IMPORT_TYPES = {
 
 
 def import_hub(request):
+    latest_by_type = {}
+    for key in IMPORT_TYPES:
+        latest_by_type[key] = (
+            ImportHistory.objects.filter(import_type=key).first()
+        )
     ctx = {
         "page_title": "Import Data",
         "import_types": IMPORT_TYPES,
+        "latest_imports": latest_by_type,
+        "recent_imports": ImportHistory.objects.all()[:8],
+        "import_history_count": ImportHistory.objects.count(),
+        "history_url": reverse("import-history"),
     }
     return render(request, "core/import_hub.html", ctx)
 
@@ -2005,6 +2469,8 @@ def import_upload(request, import_type):
     semesters = Semester.objects.all()
     no_semester = semester_choice == "required" and not semesters
     active_semester = ""
+    saved_import = None
+    import_status = None
     if request.method == "POST":
         form = FileUploadForm(request.POST, request.FILES)
         result: ImportResult = ImportResult()
@@ -2027,6 +2493,7 @@ def import_upload(request, import_type):
                     semester_id = sem.pk
         if form.is_valid() and not result.errors:
             uploaded = form.cleaned_data["file"]
+            filename = getattr(uploaded, "name", "")
             try:
                 if hasattr(uploaded, "temporary_file_path"):
                     source = uploaded.temporary_file_path()
@@ -2039,6 +2506,11 @@ def import_upload(request, import_type):
                     result = info["fn"](source)
             except Exception as exc:
                 result.errors.append(str(exc))
+            # A complete summary is always saved so users can review this
+            # import (and earlier imports) from the history pages.
+            saved_import = _record_import(
+                request, result, import_type, info["title"], filename
+            )
             msg = f"Imported {info['title']}: {result.created} created, {result.updated} updated"
             if result.skipped:
                 msg += f", {result.skipped} skipped"
@@ -2048,10 +2520,26 @@ def import_upload(request, import_type):
                 LogAction.IMPORT,
                 msg,
                 info["title"],
-                getattr(uploaded, "name", "")[:300],
+                filename[:300],
             )
         elif not form.is_valid():
             result.errors.append("No file attached or invalid upload.")
+        import_status = _import_status(result)
+        venue_conflict_token = ""
+        if import_type == "venues" and result.venue_conflicts:
+            venue_conflict_token = uuid.uuid4().hex[:10]
+            request.session[f"venue_conflicts:{venue_conflict_token}"] = {
+                "open": result.venue_conflicts,
+                "resolved": [],
+            }
+            # Keep at most 5 concurrent conflict panels per browser.
+            prefix = "venue_conflicts:"
+            tokens = [
+                k for k in request.session.keys() if k.startswith(prefix)
+            ]
+            for old in tokens[:-5]:
+                del request.session[old]
+            request.session.modified = True
         ctx = {
             "result": result,
             "import_type": import_type,
@@ -2063,10 +2551,20 @@ def import_upload(request, import_type):
             "semesters": semesters,
             "active_semester": active_semester,
             "no_semester": no_semester,
+            "import_status": import_status,
+            "saved_import": saved_import,
+            "venue_conflict_token": venue_conflict_token,
+            "resolved_venue_conflicts": [],
             "page_title": f"Import {info['title']}",
         }
         if _htmx(request):
-            return render(request, "core/import_result.html", ctx)
+            response = render(request, "core/import_result.html", ctx)
+            if saved_import is not None:
+                toast_message, toast_type = _import_toast(result)
+                response["HX-Trigger"] = json.dumps(
+                    {"import-toast": {"message": toast_message, "type": toast_type}}
+                )
+            return response
         return render(request, "core/import_upload.html", ctx)
     form = FileUploadForm()
     return render(
@@ -2085,3 +2583,62 @@ def import_upload(request, import_type):
             "page_title": f"Import {info['title']}",
         },
     )
+
+
+def import_history(request, import_type=None):
+    """Overall import history, optionally narrowed to one import type."""
+    valid_type = import_type in IMPORT_TYPES
+    if import_type is not None and not valid_type:
+        return HttpResponseBadRequest("Unknown import type")
+    qs = ImportHistory.objects.all()
+    if valid_type:
+        qs = qs.filter(import_type=import_type)
+    items, page, pages, total = _paginate(request, qs)
+    ctx = {
+        "page_title": "Import History",
+        "items": items,
+        "import_types": IMPORT_TYPES,
+        "active_type": import_type if valid_type else "",
+        "type_options": [(key, info["title"]) for key, info in IMPORT_TYPES.items()],
+        "page": page,
+        "pages": pages,
+        "total": total,
+        "back_url": reverse("import-hub"),
+    }
+    return render(request, "core/import_history.html", ctx)
+
+
+def import_history_detail(request, pk):
+    """Full details of one saved import, including every recorded row/field
+    error, missing entity and automatic fix."""
+    record = get_object_or_404(ImportHistory, pk=pk)
+    try:
+        details = json.loads(record.details or "{}")
+    except (ValueError, TypeError):
+        details = {}
+    details.setdefault("error_count", record.error_count)
+    details.setdefault(
+        "venue_exact_count",
+        sum(1 for r in details.get("venue_resolutions", []) if r.get("action") == "exact"),
+    )
+    details.setdefault(
+        "venue_matched_count",
+        sum(1 for r in details.get("venue_resolutions", []) if r.get("action") == "matched"),
+    )
+    details.setdefault(
+        "venue_created_count",
+        sum(1 for r in details.get("venue_resolutions", []) if r.get("action") == "created"),
+    )
+    ctx = {
+        "page_title": "Import Details",
+        "record": record,
+        "d": details,
+        "back_url": reverse("import-history"),
+        "type_history_url": reverse(
+            "import-history-type", args=[record.import_type]
+        )
+        if record.import_type in IMPORT_TYPES
+        else reverse("import-history"),
+        "hub_url": reverse("import-hub"),
+    }
+    return render(request, "core/import_history_detail.html", ctx)

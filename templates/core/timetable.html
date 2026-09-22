@@ -163,11 +163,19 @@
                 Print
             </button>
             {% if active_programme and active_semester %}
+            {% if active_group %}
+            <a href="{% url 'group-timetable-export' active_group.pk %}?semester={{ active_semester.pk }}&year={{ year }}"
+               class="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-green-700 bg-green-50 hover:bg-green-100 rounded-lg transition">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                Export PDF
+            </a>
+            {% else %}
             <a href="{% url 'programme-timetable-export' active_programme.pk %}?semester={{ active_semester.pk }}&year={{ year }}"
                class="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-green-700 bg-green-50 hover:bg-green-100 rounded-lg transition">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
                 Export PDF
             </a>
+            {% endif %}
             {% endif %}
         </div>
     </form>
@@ -246,11 +254,16 @@
                             <td class="tt-block" rowspan="{{ cell.rowspan }}">
                                 {% for e in cell.entries %}
                                 <div class="tt-card tt-kind-{{ e.kind }}">
-                                    <div class="tt-course">{{ e.course_code }}</div>
+                                    <div class="tt-course">{{ e.name }}</div>
+                                    {% if e.kind == "workshop" %}
+                                        {% if show_groups %}<div class="tt-groups">{{ e.groups }}</div>{% endif %}
+                                        {% if e.venue and e.venue != e.name %}<div class="tt-venue">{{ e.venue }}</div>{% endif %}
+                                    {% else %}
                                     <div class="tt-type">
                                         {{ e.type_label }}{% if e.groups %}<span class="tt-groups">{{ e.groups }}</span>{% endif %}
                                     </div>
                                     <div class="tt-venue">{{ e.venue|default:"—" }}</div>
+                                    {% endif %}
                                     {% if e.note %}<div class="tt-note">{{ e.note }}</div>{% endif %}
                                 </div>
                                 {% endfor %}

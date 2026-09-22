@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.db import models
 
 
@@ -195,6 +196,7 @@ class LogAction(models.TextChoices):
     IMPORT = "IMPORT", "Imported"
     ASSIGN = "ASSIGN", "Assigned"
     REMOVE = "REMOVE", "Removed"
+    CLEAR = "CLEAR", "Cleared"
 
 
 class ActivityLog(models.Model):
@@ -213,3 +215,48 @@ class ActivityLog(models.Model):
 
     def __str__(self):
         return self.message
+
+
+class ImportStatus(models.TextChoices):
+    SUCCESS = "SUCCESS", "Success"
+    PARTIAL = "PARTIAL", "Completed with issues"
+    FAILED = "FAILED", "Failed"
+
+
+class ImportHistory(models.Model):
+    """Persistent summary of every file import, reviewable after the fact.
+
+    Counts and the structured ``details`` JSON are kept so users can inspect
+    exactly what changed, what errored and what to fix in the source document
+    without ever storing the imported file's contents.
+    """
+
+    import_type = models.CharField(max_length=50)
+    import_title = models.CharField(max_length=100)
+    filename = models.CharField(max_length=300, blank=True)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="import_history",
+    )
+    status = models.CharField(
+        max_length=20, choices=ImportStatus.choices, default=ImportStatus.SUCCESS
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    rows_processed = models.IntegerField(default=0)
+    created = models.IntegerField(default=0)
+    updated = models.IntegerField(default=0)
+    skipped = models.IntegerField(default=0)
+    error_count = models.IntegerField(default=0)
+    details = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Import history"
+        verbose_name_plural = "Import history"
+        indexes = [models.Index(fields=["import_type", "-created_at"])]
+
+    def __str__(self):
+        return f"{self.import_title} ({self.created_at:%Y-%m-%d %H:%M})"
