@@ -1,10 +1,11 @@
-﻿import os
+import os
 import json
 import tempfile
 from datetime import time
 from pathlib import Path
 
 import pandas as pd
+from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import Client, TestCase
 from openpyxl import Workbook
@@ -20,6 +21,7 @@ from core.importers import (
 )
 from core.models import (
     ActivityLog,
+    ActivityType,
     ImportHistory,
     LogAction,
     Programme,
@@ -33,8 +35,20 @@ from core.models import (
     Venue,
     WorkshopAllocation,
 )
-from core.timetable_grid import build_time_day_grid, time_day_grid_to_table
-from core.timetable_pdf import build_grid, collect_entries, render_group_timetable
+from core.timetable_grid import (
+    build_day_time_grid,
+    build_time_day_grid,
+    time_day_grid_to_table,
+)
+from core.timetable_pdf import (
+    build_grid,
+    collect_entries,
+    collect_group_entries,
+    collect_master_entries,
+    collect_workshop_rotations,
+    render_group_timetable,
+    render_programme_timetable,
+)
 from core.venue_quality import (
     analyse_venues,
     base_key,
@@ -45,6 +59,18 @@ from core.venue_quality import (
     suggested_name,
 )
 from core.workshop_parser import parse_workbook
+from core.workshop_times import (
+    allocation_programme_codes,
+    course_programme_codes,
+    legacy_workshop_allocations,
+    legacy_workshop_sessions,
+    session_programme_codes,
+    validate_workshop_record,
+    validate_workshop_session,
+    workshop_hours,
+    workshop_times_for,
+    workshop_time_issue,
+)
 
 XLSX_CONTENT_TYPE = (
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -349,7 +375,7 @@ class WorkshopTdImportTests(ImporterTestCase):
     def test_workshop_import_is_idempotent(self):
         self._seed()
         path = make_xlsx(
-            [["TG201", "C1", "MONDAY", "08:00", "10:00", "TW101"]],
+            [["TG201", "C1", "MONDAY", "09:00", "13:00", "TW101"]],
             ["course_code", "group_code", "day", "start_time", "end_time", "venue"],
         )
         first = import_workshop_allocation_from_excel(path, semester_id=self.sem1.pk)
@@ -400,6 +426,24 @@ class WorkshopTdImportTests(ImporterTestCase):
         self.assertTrue(result.errors)
         self.assertIn("Invalid workshop format", result.errors[0])
         self.assertEqual(WorkshopAllocation.objects.count(), 0)
+
+    def test_workshop_heading_accepted_as_venue_legacy(self):
+        self._seed()
+        path = make_xlsx(
+            [["E1", "MONDAY", "09:00", "13:00", "Electrical"]],
+            ["group_code", "day", "start_time", "end_time", "workshop"],
+        )
+        first = import_workshop_allocation_from_excel(path, semester_id=self.sem1.pk)
+        self.assertEqual(first.errors, [])
+        self.assertEqual(first.created, 1)
+        wa = WorkshopAllocation.objects.get()
+        self.assertEqual(wa.course_code, "Electrical")
+        self.assertEqual(wa.venue, "Electrical")
+
+        second = import_workshop_allocation_from_excel(path, semester_id=self.sem1.pk)
+        self.assertEqual(second.created, 0)
+        self.assertEqual(second.updated, 1)
+        self.assertEqual(WorkshopAllocation.objects.count(), 1)
 
     def test_td_import_is_idempotent(self):
         self._seed()
@@ -583,14 +627,14 @@ class AdaptiveImportTests(ImporterTestCase):
         self._seed()
         result = import_workshop_allocation_from_excel(
             make_xlsx(
-                [["TG201", "C1", "MONDAY", "08:00-10:00", "TW101"]],
+                [["TG201", "C1", "MONDAY", "09:00-13:00", "TW101"]],
                 ["course_code", "group_code", "day", "time", "venue"],
             )
         )
         self.assertEqual(result.created, 1)
         wa = WorkshopAllocation.objects.get(course_code="TG201", group_code="C1")
-        self.assertEqual(wa.start_time, time(8, 0))
-        self.assertEqual(wa.end_time, time(10, 0))
+        self.assertEqual(wa.start_time, time(9, 0))
+        self.assertEqual(wa.end_time, time(13, 0))
 
     def test_td_pivoted_layout_requires_course_code(self):
         self._seed()
@@ -770,8 +814,8 @@ class CrudResponseTests(TestCase):
                     "course_code": "TG201",
                     "group_code": "C1",
                     "day": "MONDAY",
-                    "start_time": "08:00",
-                    "end_time": "10:00",
+                    "start_time": "09:00",
+                    "end_time": "13:00",
                     "venue": "TW101",
                 },
                 WorkshopAllocation,
@@ -813,6 +857,121 @@ class SidebarTests(TestCase):
     def test_dashboard_link_active_on_root(self):
         resp = self.client.get("/")
         self.assertEqual(self._active_count(resp), 1)
+
+
+class SidebarCollapseTests(TestCase):
+    """Collapsible/expandable sidebar: toggle button, icon-only mode with
+    tooltips, mobile drawer behaviour, a11y/keyboard use, active-state
+    preservation, preference persistence and responsive content resizing."""
+
+    def _html(self, path="/"):
+        resp = self.client.get(path)
+        self.assertEqual(resp.status_code, 200)
+        return resp.content.decode()
+
+    def test_collapse_button_at_top_with_controls(self):
+        html = self._html()
+        ctrl = html.find('aria-controls="app-sidebar"')
+        self.assertGreater(ctrl, -1)
+        self.assertLess(ctrl, html.find("<nav"))
+        self.assertIn('id="app-sidebar"', html)
+        btn = html[max(0, ctrl - 200):ctrl + 150]
+        self.assertIn('type="button"', btn)
+        self.assertIn('@click="toggle()"', btn)
+
+    def test_animated_width_switch(self):
+        html = self._html()
+        self.assertIn("transition-[width,transform] duration-300", html)
+        self.assertIn("collapsed ? 'lg:w-20' : 'lg:w-64'", html)
+        self.assertIn(
+            "collapsed ? 'lg:max-w-0 lg:opacity-0' : 'lg:max-w-44 lg:opacity-100'",
+            html,
+        )
+        self.assertIn("transition-all duration-300", html)
+
+    def test_icon_only_tooltips(self):
+        html = self._html()
+        for text in (
+            "Dashboard",
+            "Export Timetable",
+            "Venues",
+            "Workshop Allocation",
+        ):
+            self.assertIn("showTooltip($el, '%s')" % text, html)
+        self.assertIn('role="tooltip"', html)
+        self.assertIn("pointer-events-none", html)
+        self.assertIn('x-show="collapsed && tooltip"', html)
+        self.assertIn('x-text="tooltip"', html)
+
+    def test_tooltips_hide_when_expanded(self):
+        html = self._html()
+        self.assertIn("window.innerWidth >= 1024", html)
+        self.assertIn("showTooltip: function", html)
+        self.assertIn("hideTooltip: function", html)
+
+    def test_navigation_keeps_icons_and_hrefs(self):
+        html = self._html()
+        for href, aria in (
+            ("/", "Dashboard"),
+            ("/export/", "Export Timetable"),
+            ("/venues/", "Venues"),
+            ("/workshops/", "Workshop Allocation"),
+        ):
+            idx = html.find('aria-label="%s"' % aria)
+            self.assertGreater(idx, -1)
+            link = html[html.rfind("<a", 0, idx):html.find("</a>", idx)]
+            self.assertIn('href="%s"' % href, link)
+            self.assertIn("showTooltip($el, '%s')" % aria, link)
+        self.assertGreater(html.count("<svg"), 15)
+
+    def test_active_state_preserved_in_both_modes(self):
+        html = self._html("/programmes/")
+        start = html.find('href="/programmes/"')
+        prog_link = html[start:html.find("</a>", start)]
+        self.assertIn("bg-slate-800 text-white", prog_link)
+        self.assertIn("lg:justify-center lg:gap-0", prog_link)
+        self.assertIn("<svg", prog_link)
+        self.assertIn('lg:max-w-0', html)
+        self.assertEqual(html.count("bg-slate-800 text-white"), 1)
+        dash_html = self._html("/")
+        self.assertEqual(dash_html.count("bg-slate-800 text-white"), 1)
+
+    def test_mobile_drawer_behaviour(self):
+        html = self._html()
+        self.assertIn("fixed lg:sticky", html)
+        self.assertIn("translate-x-0", html)
+        self.assertIn("-translate-x-full", html)
+        self.assertIn("lg:hidden", html)
+        self.assertIn('x-show="sidebarOpen"', html)
+        self.assertIn('@click="sidebarOpen = false"', html)
+        self.assertIn("hidden lg:inline-flex", html)
+
+    def test_keyboard_and_accessibility(self):
+        html = self._html()
+        self.assertIn(":aria-expanded=", html)
+        self.assertIn("Collapse sidebar", html)
+        self.assertIn("Expand sidebar", html)
+        self.assertIn("aria-controls=", html)
+        self.assertIn("focus-visible:ring", html)
+        self.assertIn(':aria-label="collapsed ? \'Expand sidebar\' : \'Collapse sidebar\'"', html)
+        self.assertIn("@focus=\"showTooltip($el, 'Dashboard')\"", html)
+        self.assertIn("@blur=\"hideTooltip()\"", html)
+        self.assertIn("focus:outline-none", html)
+
+    def test_responsive_content_resizing(self):
+        html = self._html()
+        self.assertIn('class="flex-1 flex flex-col min-w-0"', html)
+        self.assertIn("shrink-0", html)
+        self.assertIn("ease-in-out", html)
+        self.assertIn("duration-300", html)
+
+    def test_preference_persists_across_refreshes(self):
+        html = self._html()
+        self.assertIn("coet.sidebar.collapsed", html)
+        self.assertIn("sessionStorage", html)
+        self.assertIn("localStorage", html)
+        self.assertIn("Alpine.data('sidebar',", html)
+        self.assertIn('x-data="sidebar"', html)
 
 
 class ImportUploadViewTests(TestCase):
@@ -2299,7 +2458,7 @@ class TimetableGridTests(TestCase):
 
     def test_grid_slots_and_weekday_columns(self):
         grid = build_time_day_grid(collect_entries(self.prog, self.sem))
-        self.assertEqual(grid["slots"][0]["label"], "07:00-07:55")
+        self.assertEqual(grid["slots"][0]["label"], "07:00-08:00")
         labels = [d["day"] for d in grid["days"]]
         self.assertEqual(labels, ["MONDAY", "WEDNESDAY"])
         self.assertNotIn("SATURDAY", labels)
@@ -2328,7 +2487,7 @@ class TimetableGridTests(TestCase):
         self.assertEqual(data[0][0], "TIME")
         self.assertEqual(data[0][1], "MONDAY")
         self.assertEqual(data[0][2], "WEDNESDAY")
-        self.assertEqual(data[1][0], "07:00-07:55")
+        self.assertEqual(data[1][0], "07:00-08:00")
         self.assertIn(((2, 1), (2, 3)), spans)
         self.assertIn(((2, 1), (2, 3), "#d1d5db"), fills)
 
@@ -2418,8 +2577,8 @@ class WorkshopCellDisplayTests(TestCase):
         data, _, _ = build_grid(
             collect_entries(self.prog_ee, self.sem, group=self.ee_c2)
         )
-        mon = self._flattened_cell(data, "MONDAY", "09:00-09:55")
-        tue = self._flattened_cell(data, "TUESDAY", "09:00-09:55")
+        mon = self._flattened_cell(data, "MONDAY", "09:00-10:00")
+        tue = self._flattened_cell(data, "TUESDAY", "09:00-10:00")
         self.assertEqual(mon, "Building")
         self.assertEqual(tue, "Electronics")
         for cell in (mon, tue):
@@ -2434,7 +2593,7 @@ class WorkshopCellDisplayTests(TestCase):
         self.assertEqual([e["label"] for e in entries], ["Welding"])
         data, _, _ = build_grid(entries)
         self.assertEqual(
-            self._flattened_cell(data, "MONDAY", "09:00-09:55"), "Welding"
+            self._flattened_cell(data, "MONDAY", "09:00-10:00"), "Welding"
         )
 
     def test_distinct_workshops_on_different_days_all_kept(self):
@@ -2447,13 +2606,13 @@ class WorkshopCellDisplayTests(TestCase):
         )
         data, _, _ = build_grid(entries)
         self.assertEqual(
-            self._flattened_cell(data, "MONDAY", "09:00-09:55"), "Carpentry"
+            self._flattened_cell(data, "MONDAY", "09:00-10:00"), "Carpentry"
         )
         self.assertEqual(
-            self._flattened_cell(data, "TUESDAY", "09:00-09:55"), "Plumbing"
+            self._flattened_cell(data, "TUESDAY", "09:00-10:00"), "Plumbing"
         )
         self.assertEqual(
-            self._flattened_cell(data, "WEDNESDAY", "09:00-09:55"), "Welding"
+            self._flattened_cell(data, "WEDNESDAY", "09:00-10:00"), "Welding"
         )
 
     def test_same_workshop_week_runs_are_distinguished(self):
@@ -2482,7 +2641,7 @@ class WorkshopCellDisplayTests(TestCase):
         data, _, _ = build_grid(
             collect_entries(self.prog_ee, self.sem, group=self.ee_c2)
         )
-        cell = self._flattened_cell(data, "TUESDAY", "09:00-09:55")
+        cell = self._flattened_cell(data, "TUESDAY", "09:00-10:00")
         self.assertIn("Building \u00b7 Wk 1-6", cell)
         self.assertIn("Building \u00b7 Wk 8-13", cell)
 
@@ -2499,7 +2658,7 @@ class WorkshopCellDisplayTests(TestCase):
         entries = collect_entries(self.prog_ee, self.sem, group=self.ee_c2)
         self.assertEqual(entries[0]["hours"], {9, 10, 11, 12})
         grid = build_time_day_grid(entries)
-        self.assertEqual(grid["slots"][0]["label"], "09:00-09:55")
+        self.assertEqual(grid["slots"][0]["label"], "09:00-10:00")
         cell = grid["rows"][0]["cols"][0]
         self.assertEqual(cell["rowspan"], 4)
 
@@ -2516,10 +2675,10 @@ class WorkshopCellDisplayTests(TestCase):
         entries = collect_entries(self.prog_ee, self.sem, group=self.ee_c2)
         self.assertEqual(entries[0]["hours"], {15, 16, 17, 18})
         grid = build_time_day_grid(entries)
-        self.assertEqual(grid["slots"][0]["label"], "15:00-15:55")
+        self.assertEqual(grid["slots"][0]["label"], "15:00-16:00")
         self.assertEqual(grid["rows"][0]["cols"][0]["rowspan"], 4)
 
-    def test_group_has_only_one_workshop_per_day(self):
+    def test_same_day_different_time_workshops_are_separate_sessions(self):
         self._flat_workshop("Building")  # group C2, MONDAY morning
         WorkshopAllocation.objects.create(
             semester=self.sem,
@@ -2531,9 +2690,8 @@ class WorkshopCellDisplayTests(TestCase):
             venue="Carpentry",
         )
         entries = collect_entries(self.prog_ee, self.sem, group=self.ee_c2)
-        labels = [e["label"] for e in entries]
-        self.assertEqual(labels, ["Building"])
-        self.assertNotIn("Carpentry", labels)
+        labels = sorted(e["label"] for e in entries)
+        self.assertEqual(labels, ["Building", "Carpentry"])
         # A shared name across week runs is still one workshop per day.
         WorkshopAllocation.objects.create(
             semester=self.sem,
@@ -2561,7 +2719,7 @@ class WorkshopCellDisplayTests(TestCase):
         thu = [e for e in entries if e["day"] == "THURSDAY"]
         self.assertEqual(sorted(e["label"] for e in thu), ["Building", "Building"])
         self.assertEqual(sorted(e["note"] for e in thu), ["Wk 1-6", "Wk 8-13"])
-        labels = [e["label"] for e in entries]  # Monday flat + two Thursday runs
+        labels = [e["label"] for e in entries]  # Monday two + two Thursday runs
         self.assertEqual(labels.count("Building"), 3)
 
     def test_all_groups_cells_attribute_group_codes(self):
@@ -2570,13 +2728,13 @@ class WorkshopCellDisplayTests(TestCase):
         data, _, _ = build_grid(
             collect_entries(self.prog_ee, self.sem), show_groups=True
         )
-        cell = self._flattened_cell(data, "TUESDAY", "09:00-09:55")
+        cell = self._flattened_cell(data, "TUESDAY", "09:00-10:00")
         self.assertEqual(cell, "Building \u00b7 C1\n\nBuilding \u00b7 C2")
         # In a single-group export neither group code is repeated.
         data, _, _ = build_grid(
             collect_entries(self.prog_ee, self.sem, group=self.ee_c1)
         )
-        cell = self._flattened_cell(data, "TUESDAY", "09:00-09:55")
+        cell = self._flattened_cell(data, "TUESDAY", "09:00-10:00")
         self.assertEqual(cell, "Building")
 
     def test_all_groups_never_merge_unrelated_group_sessions(self):
@@ -2626,8 +2784,8 @@ class WorkshopCellDisplayTests(TestCase):
         )
         self.assertEqual(resp.status_code, 200)
         html = resp.content.decode()
-        self.assertIn('tt-groups">C1<', html)
-        self.assertIn('tt-groups">C2<', html)
+        self.assertIn("Assigned groups: C1", html)
+        self.assertIn("Assigned groups: C2", html)
 
     def test_workshop_names_simplified_across_programmes(self):
         WorkshopAllocation.objects.create(
@@ -2694,8 +2852,9 @@ class WorkshopCellDisplayTests(TestCase):
         )
         self.assertEqual(resp.status_code, 200)
         html = resp.content.decode()
-        self.assertIn("tt-course", html)
-        self.assertEqual(html.count("Building"), 1)
+        self.assertEqual(html.count("Course: Building"), 1)
+        self.assertIn("Venue: Building", html)
+        self.assertIn("Assigned groups: C2", html)
         self.assertNotIn("Building Building", html)
 
     def test_group_pdf_renders_with_simplified_workshop_cell(self):
@@ -2705,6 +2864,208 @@ class WorkshopCellDisplayTests(TestCase):
 
         buf = BytesIO()
         render_group_timetable(self.ee_c2, self.sem, 1, out=buf)
+        pdf = buf.getvalue()
+        self.assertTrue(pdf.startswith(b"%PDF-"))
+        self.assertGreater(len(pdf), 1000)
+
+
+class WorkshopRotationTests(TestCase):
+    """Rotating workshops merge into one cell plus a Workshop Rotation Key.
+
+    A slot (group + day + time period) holding two or more different workshop
+    identities is a weekly rotation: the shared cell lists all names and the
+    key maps each contiguous week block to a workshop. Different-time sessions
+    on the same day stay separate. Programme affinity (workshop name in the
+    programme name) orders the names without hard-coding.
+    """
+
+    def setUp(self):
+        self.sem = Semester.objects.create(academic_year="2026/2027", semester=1)
+        self.prog_ee = Programme.objects.create(
+            code="EE", name="BSc. in Electrical Engineering"
+        )
+        self.prog_cpe = Programme.objects.create(
+            code="CPE", name="BSc. in Chemical and Processing Engineering"
+        )
+        self.ee_c1 = StudentGroup.objects.create(programme=self.prog_ee, code="C1")
+        self.ee_c2 = StudentGroup.objects.create(programme=self.prog_ee, code="C2")
+        self.cpe_b1 = StudentGroup.objects.create(programme=self.prog_cpe, code="B1")
+
+    def _workshop(self, name, group, day="THURSDAY", period="MORNING", course=None):
+        return WorkshopAllocation.objects.create(
+            semester=self.sem,
+            course_code=course or name,
+            workshop=name,
+            group_code=group,
+            day=day,
+            time_period=period,
+            venue="",
+        )
+
+    def test_rotating_workshops_merge_into_one_entry(self):
+        self._workshop("Carpentry", "C1")
+        self._workshop("Electrical", "C1")
+        entries = collect_entries(self.prog_ee, self.sem, group=self.ee_c1)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["label"], "Electrical / Carpentry")
+        self.assertEqual(entries[0]["note"], "Wk 1-7 / Wk 8-14")
+
+    def test_rotation_key_row_describes_the_slot(self):
+        self._workshop("Carpentry", "C1")
+        self._workshop("Electrical", "C1")
+        rows = collect_workshop_rotations(self.prog_ee, self.sem, group=self.ee_c1)
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["programme"], self.prog_ee.name)
+        self.assertEqual(row["group"], "C1")
+        self.assertEqual(row["day"], "THURSDAY")
+        self.assertEqual(
+            row["blocks"], [(1, 7, "Electrical"), (8, 14, "Carpentry")]
+        )
+
+    def test_non_rotating_workshop_has_no_rotation_row(self):
+        self._workshop("Building", "C2")
+        entries = collect_entries(self.prog_ee, self.sem, group=self.ee_c2)
+        self.assertEqual(entries[0]["label"], "Building")
+        self.assertEqual(
+            collect_workshop_rotations(self.prog_ee, self.sem, group=self.ee_c2),
+            [],
+        )
+
+    def test_three_way_rotation_merges_all_names(self):
+        self._workshop("Welding", "C1")
+        self._workshop("Electrical", "C1")
+        self._workshop("M/Tools", "C1")
+        entries = collect_entries(self.prog_ee, self.sem, group=self.ee_c1)
+        self.assertEqual(
+            entries[0]["label"], "Electrical / M/Tools / Welding"
+        )
+        row = collect_workshop_rotations(self.prog_ee, self.sem)[0]
+        self.assertEqual(
+            row["blocks"],
+            [
+                (1, 7, "Electrical"),
+                (8, 14, "M/Tools"),
+                (15, 21, "Welding"),
+            ],
+        )
+
+    def test_rotations_are_isolated_per_programme(self):
+        self._workshop("Carpentry", "C1")
+        self._workshop("Electrical", "C1")
+        self._workshop("Electronics", "B1")
+        self._workshop("CPE", "B1")
+        self.assertEqual(len(collect_workshop_rotations(self.prog_ee, self.sem)), 1)
+        cpe_rows = collect_workshop_rotations(self.prog_cpe, self.sem)
+        self.assertEqual(len(cpe_rows), 1)
+        self.assertEqual(cpe_rows[0]["group"], "B1")
+        self.assertEqual(
+            cpe_rows[0]["blocks"], [(1, 7, "CPE"), (8, 14, "Electronics")]
+        )
+
+    def test_rotation_mapping_is_group_specific(self):
+        self._workshop("Carpentry", "C1")
+        self._workshop("Electrical", "C1")
+        self._workshop("Building", "C2")
+        self._workshop("Electronics", "C2")
+        ee_rows = collect_workshop_rotations(self.prog_ee, self.sem)
+        c1_row = [r for r in ee_rows if r["group"] == "C1"]
+        c2_row = [r for r in ee_rows if r["group"] == "C2"]
+        self.assertEqual(len(c1_row), 1)
+        self.assertEqual(len(c2_row), 1)
+        self.assertEqual(c1_row[0]["blocks"][0][2], "Electrical")
+        self.assertEqual(c2_row[0]["blocks"][0][2], "Building")
+
+    def test_shared_course_code_appears_in_the_key(self):
+        WorkshopAllocation.objects.create(
+            semester=self.sem,
+            course_code="WK-101",
+            workshop="Carpentry",
+            group_code="C1",
+            day="THURSDAY",
+            time_period="MORNING",
+            venue="",
+        )
+        WorkshopAllocation.objects.create(
+            semester=self.sem,
+            course_code="WK-101",
+            workshop="Electrical",
+            group_code="C1",
+            day="THURSDAY",
+            time_period="MORNING",
+            venue="",
+        )
+        row = collect_workshop_rotations(self.prog_ee, self.sem, group=self.ee_c1)[0]
+        self.assertEqual(row["course"], "WK-101")
+
+    def test_explicit_week_blocks_are_honoured(self):
+        WorkshopAllocation.objects.create(
+            semester=self.sem,
+            course_code="Building",
+            workshop="Building",
+            group_code="C2",
+            day="MONDAY",
+            time_period="MORNING",
+            venue="",
+            week_start=1,
+            week_end=7,
+        )
+        WorkshopAllocation.objects.create(
+            semester=self.sem,
+            course_code="Welding",
+            workshop="Welding",
+            group_code="C2",
+            day="MONDAY",
+            time_period="MORNING",
+            venue="",
+            week_start=17,
+            week_end=18,
+        )
+        row = collect_workshop_rotations(self.prog_ee, self.sem, group=self.ee_c2)[0]
+        self.assertEqual(
+            row["blocks"], [(1, 7, "Building"), (17, 18, "Welding")]
+        )
+
+    def test_empty_programme_has_no_rotation_rows(self):
+        self.assertEqual(collect_workshop_rotations(self.prog_cpe, self.sem), [])
+
+    def test_full_day_pdf_grid_starts_at_seven(self):
+        self._workshop("Carpentry", "C1")
+        self._workshop("Electrical", "C1")
+        data, _, _ = build_grid(collect_entries(self.prog_ee, self.sem))
+        self.assertEqual(data[0][0], "TIME")
+        self.assertEqual(data[1][0], "07:00-08:00")
+        self.assertEqual(data[-1][0], "19:00-20:00")
+        self.assertEqual(len(data) - 1, 13)
+
+    def test_late_evening_session_still_renders_on_full_grid(self):
+        WorkshopAllocation.objects.create(
+            semester=self.sem,
+            course_code="Building",
+            workshop="Building",
+            group_code="C2",
+            day="MONDAY",
+            start_time="18:00",
+            end_time="21:00",
+            venue="",
+        )
+        data, _, _ = build_grid(collect_entries(self.prog_ee, self.sem))
+        header = data[0]
+        di = header.index("MONDAY")
+        times = [row[0] for row in data[1:]]
+        self.assertIn("07:00-08:00", times)
+        self.assertIn("19:00-20:00", times)
+        self.assertIn("20:00-21:00", times)
+        mon = [row[di] for row in data[1:] if row[di]]
+        self.assertTrue(any("Building" in cell for cell in mon))
+
+    def test_pdf_contains_rotation_key_table(self):
+        from io import BytesIO
+
+        self._workshop("Carpentry", "C1")
+        self._workshop("Electrical", "C1")
+        buf = BytesIO()
+        render_programme_timetable(self.prog_ee, self.sem, 1, out=buf)
         pdf = buf.getvalue()
         self.assertTrue(pdf.startswith(b"%PDF-"))
         self.assertGreater(len(pdf), 1000)
@@ -2807,7 +3168,7 @@ class GroupTimetablePageTests(TestCase):
 
     def test_group_grid_merges_multi_slot_entries(self):
         c1_page = self._get(self.c1).content.decode()
-        self.assertIn('rowspan="2"', c1_page)
+        self.assertIn('colspan="2"', c1_page)
         self.assertIn("09:00", c1_page)
 
 
@@ -2832,8 +3193,38 @@ class TimetablePageTests(TestCase):
             venue=venue,
         )
         SessionGroup.objects.create(session=session, group=group)
+        # An ungrouped session (as in the real master timetable) — tutorials,
+        # seminars and practicals have no group links, so only the default
+        # whole-year view (master timetable as source of truth) shows them.
+        Session.objects.create(
+            semester=self.sem,
+            course_code="ST171",
+            activity_type="TUTORIAL",
+            day="TUESDAY",
+            start_time="10:00",
+            end_time="12:00",
+            venue=venue,
+        )
+        WorkshopAllocation.objects.create(
+            semester=self.sem,
+            course_code="EE151",
+            group_code="C1",
+            day="WEDNESDAY",
+            start_time="09:00",
+            end_time="12:00",
+            venue="WORKSHOP 1",
+        )
+        TechnicalDrawingAllocation.objects.create(
+            semester=self.sem,
+            course_code="EE153",
+            group_code="C1",
+            day="THURSDAY",
+            start_time="13:00",
+            end_time="17:00",
+            venue="TD LAB",
+        )
 
-    def test_page_renders_classic_grid(self):
+    def test_page_renders_day_time_grid(self):
         resp = self.client.get(
             "/timetable/",
             {"programme": self.prog_a.pk, "semester": self.sem.pk},
@@ -2842,15 +3233,30 @@ class TimetablePageTests(TestCase):
         self.assertEqual(resp.status_code, 200)
         html = resp.content.decode()
         self.assertIn("TIME", html)
+        # Days run down the first column, labelled with their full weekday name.
         self.assertIn("Monday", html)
-        self.assertIn("08:00", html)
-        self.assertIn("08:55", html)
+        self.assertIn("Friday", html)
+        self.assertNotIn("MONDAY</td>", html)
+        # Hours run across the top, ascending from 07:00, headers in the
+        # master-timetable format 07:00-07:55 etc.
+        self.assertIn(">07:00-07:55<", html)
+        self.assertIn(">08:00-08:55<", html)
+        self.assertIn(">09:00-09:55<", html)
+        self.assertNotIn(">07:00-08:00<", html)
         self.assertIn("MT171", html)
-        self.assertIn("Lecture", html)
         self.assertIn("YOMBO5", html)
         self.assertIn("tt-card", html)
         self.assertIn("tt-kind-lecture", html)
         self.assertIn("tt-time", html)
+        # Cards live in an inner flex wrapper — the <td> itself stays a plain
+        # table cell so colspans align under the right hourly column.
+        self.assertIn('class="tt-block-inner"', html)
+        self.assertTrue(html.count('class="tt-block"') == html.count('class="tt-block-inner"'))
+        # Entry box reads like the Excel grid cells.
+        self.assertIn("Lecture, 08:00-09:00, Mon", html)
+        self.assertIn("Course: MT171", html)
+        self.assertIn("Venue: YOMBO5", html)
+        self.assertIn("Assigned groups:", html)
 
     def test_page_falls_back_when_programme_unknown(self):
         resp = self.client.get(
@@ -2866,6 +3272,58 @@ class TimetablePageTests(TestCase):
         )
         self.assertEqual(resp.status_code, 200)
         self.assertIn("No sessions scheduled", resp.content.decode())
+
+    def test_default_view_shows_complete_first_year_timetable(self):
+        resp = self.client.get("/timetable/", HTTP_HOST="localhost")
+        self.assertEqual(resp.status_code, 200)
+        html = resp.content.decode()
+        self.assertIn("ALL PROGRAMMES", html)
+        self.assertIn(">TIME<", html)
+        self.assertNotIn("No programmes registered yet", html)
+        self.assertIn("MT171", html)
+        # The master timetable is the source of truth: ungrouped sessions
+        # (tutorials/seminars/practicals) appear too, with a blank groups line.
+        self.assertIn("Course: ST171", html)
+        self.assertRegex(html, r"Assigned groups:\s*</div>")
+
+    def test_all_programmes_option_shows_complete_first_year_timetable(self):
+        resp = self.client.get(
+            "/timetable/", {"programme": "all"}, HTTP_HOST="localhost"
+        )
+        self.assertEqual(resp.status_code, 200)
+        html = resp.content.decode()
+        self.assertIn("ALL PROGRAMMES", html)
+        self.assertIn(">TIME<", html)
+        self.assertNotIn("No programmes registered yet", html)
+        self.assertIn("MT171", html)
+        self.assertIn("ST171", html)
+
+    def test_programme_filter_hides_ungrouped_master_sessions(self):
+        resp = self.client.get(
+            "/timetable/",
+            {"programme": self.prog_a.pk, "semester": self.sem.pk},
+            HTTP_HOST="localhost",
+        )
+        self.assertEqual(resp.status_code, 200)
+        html = resp.content.decode()
+        self.assertIn("MT171", html)
+        self.assertIn("ELECTRICAL ENGINEERING", html)
+        # Ungrouped master-timetable sessions are not part of any single
+        # programme's timetable view.
+        self.assertNotIn("ST171", html)
+
+    def test_master_entries_include_every_session_in_the_semester(self):
+        entries = collect_master_entries(self.sem)
+        session_codes = {
+            e["name"] for e in entries if e["key"][0] == "session"
+        }
+        self.assertIn("MT171", session_codes)
+        self.assertIn("ST171", session_codes)
+        self.assertEqual(
+            len(session_codes), Session.objects.filter(semester=self.sem).count()
+        )
+        self.assertTrue(any(e["kind"] == "workshop" for e in entries))
+        self.assertTrue(any(e["kind"] == "td" for e in entries))
 
     def test_classic_pdf_export(self):
         resp = self.client.get(
@@ -2939,6 +3397,244 @@ class TimetablePageTests(TestCase):
         html = resp.content.decode()
         self.assertEqual(resp.status_code, 200)
         self.assertIn("No programmes or groups match", html)
+
+
+class DayTimeGridTests(TestCase):
+    """The default on-screen grid: DAYS as rows (full weekday labels), TIME as
+    columns, each day drawn as vertical lanes with merged session cells."""
+
+    def setUp(self):
+        self.sem = Semester.objects.create(academic_year="2026/2027", semester=1)
+        self.prog = Programme.objects.create(code="EE", name="BSc. in Electrical Engineering")
+        self.g = StudentGroup.objects.create(programme=self.prog, code="C1")
+        StudentGroup.objects.create(programme=self.prog, code="C2")
+        self.venue = Venue.objects.create(name="NB102", capacity=80)
+
+    @staticmethod
+    def _entry(**overrides):
+        base = {
+            "key": ("session", 1),
+            "day": "MONDAY",
+            "hours": {8, 9},
+            "label": "MT171",
+            "kind": "lecture",
+            "course_code": "MT171",
+            "name": "MT171",
+            "type_label": "Lecture",
+            "venue": "NB102",
+            "start": "08:00",
+            "end": "09:55",
+            "groups": "C1",
+            "note": "",
+        }
+        base.update(overrides)
+        return base
+
+    def _spanning_cells(self, grid):
+        return [
+            c
+            for r in grid["rows"]
+            for lane in r["lanes"]
+            for c in lane
+            if not c.get("empty")
+        ]
+
+    def test_orientation_full_day_labels_lane_span(self):
+        g = build_day_time_grid([self._entry()])
+        self.assertEqual(g["slots"][0]["start"], "07:00")
+        self.assertEqual(g["slots"][0]["label"], "07:00-07:55")
+        # All five weekdays are present, even with data on one day only.
+        self.assertEqual(
+            [r["label"] for r in g["rows"]],
+            ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
+        )
+        self.assertEqual(g["rows"][0]["day"], "MONDAY")
+        lanes = g["rows"][0]["lanes"]
+        self.assertEqual(len(lanes), 1)
+        self.assertEqual(lanes[0][0]["empty"], True)
+        self.assertEqual(len(lanes[0]), 2)
+        self.assertEqual(lanes[0][-1]["colspan"], 2)
+        self.assertEqual(lanes[0][-1]["entries"][0]["course_code"], "MT171")
+
+    def test_column_range_ends_at_latest_hour(self):
+        g = build_day_time_grid(
+            [
+                self._entry(
+                    key=("session", 1),
+                    day="FRIDAY",
+                    hours={13},
+                    label="IE101",
+                    course_code="IE101",
+                    name="IE101",
+                    start="13:00",
+                    end="14:00",
+                    groups="",
+                )
+            ]
+        )
+        headers = [s["start"] for s in g["slots"]]
+        self.assertEqual(headers, ["07:00", "08:00", "09:00", "10:00", "11:00", "12:00", "13:00"])
+        self.assertNotIn("14:00", headers)
+
+    def test_day_time_grid_merges_across_hours(self):
+        session = Session.objects.create(
+            semester=self.sem,
+            course_code="MT171",
+            activity_type="LECTURE",
+            day="MONDAY",
+            start_time="08:00",
+            end_time="09:55",
+            venue=self.venue,
+        )
+        SessionGroup.objects.create(session=session, group=self.g)
+        grid = build_day_time_grid(collect_entries(self.prog, self.sem))
+        self.assertEqual([c.get("colspan") for c in self._spanning_cells(grid)], [2])
+
+    def test_sessions_begin_under_their_start_hour_column(self):
+        g = build_day_time_grid(
+            [
+                self._entry(key=("session", 1), name="A", course_code="A",
+                            day="MONDAY", hours={8}, start="08:00", end="09:00"),
+                self._entry(key=("session", 2), name="B", course_code="B",
+                            day="MONDAY", hours={10}, start="10:00", end="11:00"),
+                self._entry(key=("session", 3), name="C", course_code="C",
+                            day="MONDAY", hours={14}, start="14:00", end="15:00"),
+            ]
+        )
+        lane = g["rows"][0]["lanes"][0]
+        # A sits right after the 07:00 empty column, then an empty column
+        # (09:00) before B at 10:00, then three empty columns (11:00-13:00)
+        # before C at 14:00. The column the block starts on is its start hour.
+        empties = [c["colspan"] for c in lane if c.get("empty")]
+        blocks = [c["entries"][0]["course_code"] for c in lane if not c.get("empty")]
+        self.assertEqual(empties, [1, 1, 3])
+        self.assertEqual(blocks, ["A", "B", "C"])
+
+    def test_partial_hour_session_spans_columns(self):
+        g = build_day_time_grid(
+            [
+                self._entry(
+                    key=("session", 1),
+                    day="MONDAY",
+                    hours={8, 9, 10},
+                    start="08:30",
+                    end="10:15",
+                )
+            ]
+        )
+        cells = [c for c in self._spanning_cells(g) if not c.get("empty")]
+        self.assertEqual(cells[0]["colspan"], 3)
+
+    def test_spanned_session_is_one_cell_not_per_hour(self):
+        g = build_day_time_grid(
+            [
+                self._entry(
+                    key=("session", 1),
+                    day="MONDAY",
+                    hours={9, 10, 11, 12},
+                    start="09:00",
+                    end="13:00",
+                )
+            ]
+        )
+        cells = [c for c in self._spanning_cells(g) if not c.get("empty")]
+        self.assertEqual(len(cells), 1)
+        self.assertEqual(cells[0]["colspan"], 4)
+        self.assertEqual(len(cells[0]["entries"]), 1)
+
+    def test_overlapping_sessions_use_separate_lanes(self):
+        g = build_day_time_grid(
+            [
+                self._entry(key=("session", 1), day="MONDAY", hours={9, 10, 11, 12}),
+                self._entry(key=("session", 2), day="MONDAY", hours={10, 11, 12, 13}),
+            ]
+        )
+        row = g["rows"][0]
+        self.assertEqual(len(row["lanes"]), 2)
+        for lane in row["lanes"]:
+            non_empty = [c for c in lane if not c.get("empty")]
+            self.assertEqual(len(non_empty), 1)
+            self.assertEqual(non_empty[0]["colspan"], 4)
+
+    def test_adjacent_sessions_share_a_lane(self):
+        g = build_day_time_grid(
+            [
+                self._entry(key=("session", 1), day="MONDAY", hours={8}, start="08:00", end="09:00"),
+                self._entry(key=("session", 2), day="MONDAY", hours={9}, start="09:00", end="10:00"),
+            ]
+        )
+        row = g["rows"][0]
+        self.assertEqual(len(row["lanes"]), 1)
+        cells = [c for c in row["lanes"][0] if not c.get("empty")]
+        self.assertEqual(len(cells), 2)
+
+    def test_empty_day_is_still_rendered_with_an_empty_lane(self):
+        g = build_day_time_grid(
+            [self._entry(key=("session", 1), day="TUESDAY", hours={9})]
+        )
+        monday = g["rows"][0]
+        self.assertEqual(monday["day"], "MONDAY")
+        self.assertEqual(len(monday["lanes"]), 1)
+        self.assertEqual(len(monday["lanes"][0]), 1)
+        self.assertEqual(monday["lanes"][0][0]["empty"], True)
+        self.assertEqual(monday["lanes"][0][0]["colspan"], len(g["slots"]))
+
+    def test_activity_card_renders_excel_style_text(self):
+        session = Session.objects.create(
+            semester=self.sem,
+            course_code="MT171",
+            activity_type="LECTURE",
+            day="MONDAY",
+            start_time="08:00",
+            end_time="09:00",
+            venue=self.venue,
+        )
+        SessionGroup.objects.create(session=session, group=self.g)
+        resp = self.client.get(
+            "/timetable/",
+            {"programme": self.prog.pk, "semester": self.sem.pk},
+            HTTP_HOST="localhost",
+        )
+        html = resp.content.decode()
+        # Box reads exactly like the Excel grid cells: header line, then
+        # Course:/Venue:/Assigned groups: rows.
+        self.assertIn("Lecture, 08:00-09:00, Mon", html)
+        self.assertIn("Course: MT171", html)
+        self.assertIn("Venue: NB102", html)
+        self.assertIn("Assigned groups: C1", html)
+        self.assertNotIn("Assigned groups: N/A", html)
+
+    def test_activity_card_groups_line_blank_without_groups(self):
+        Session.objects.create(
+            semester=self.sem,
+            course_code="MT171",
+            activity_type="LECTURE",
+            day="MONDAY",
+            start_time="08:00",
+            end_time="09:00",
+            venue=self.venue,
+        )
+        # Ungrouped sessions still appear (master timetable is the source of
+        # truth) and their "Assigned groups:" line is left blank.
+        resp = self.client.get("/timetable/", HTTP_HOST="localhost")
+        self.assertEqual(resp.status_code, 200)
+        html = resp.content.decode()
+        self.assertIn("Course: MT171", html)
+        self.assertRegex(html, r"Assigned groups:\s*</div>")
+
+    def test_activity_label_filter_maps_variants(self):
+        from django.template import Template, Context
+        from django.template import engines
+
+        engine = engines["django"]
+        tmpl = engine.from_string(
+            "{% load core_tags %}"
+            "{{ 'lecture'|activity_label }}|{{ 'Lectures'|activity_label }}"
+            "|{{ 'Tutorial'|activity_label }}|{{ 'PRACTICAL'|activity_label }}"
+            "|{{ ' Seminar '|activity_label }}|{{ 'Workshops'|activity_label }}"
+        )
+        out = tmpl.render({"request": None})
+        self.assertEqual(out, "Lecture|Lecture|Tutorial|Practical|Seminar|Workshop")
 
 
 class DeletionImpactTests(TestCase):
@@ -3677,3 +4373,528 @@ class ImportHistoryTests(TestCase):
         self.assertIn("Previous Import Details", html)
         self.assertIn("hub_progs.xlsx", html)
         self.assertIn("SUCCESS", html)
+
+
+class WorkshopStandardTimesTests(ImporterTestCase):
+    """The standard workshop session times are enforced everywhere.
+
+    Monday/Tuesday/Wednesday/Friday morning 09:00-13:00, afternoon
+    15:00-19:00; Thursday morning 10:00-14:00, afternoon 15:00-19:00.
+    Workshops on other days or at other times are rejected with a clear
+    message; non-workshop sessions are never affected. The same times apply
+    to every programme, regardless of the record's student group.
+    """
+
+    def _workshop(self, **overrides):
+        fields = dict(
+            semester=self.sem1,
+            course_code="TG201",
+            group_code="A1",
+            day="MONDAY",
+            start_time=time(9, 0),
+end_time=time(13, 0),
+            venue="TW101",
+        )
+        fields.update(overrides)
+        return WorkshopAllocation.objects.create(**fields)
+
+    # --------------------------------------------------------- rules module
+
+    def test_standard_times_table(self):
+        cases = [
+            ("MONDAY", TimePeriod.MORNING, time(9, 0), time(13, 0)),
+            ("MONDAY", TimePeriod.AFTERNOON, time(15, 0), time(19, 0)),
+            ("TUESDAY", TimePeriod.MORNING, time(9, 0), time(13, 0)),
+            ("TUESDAY", TimePeriod.AFTERNOON, time(15, 0), time(19, 0)),
+            ("WEDNESDAY", TimePeriod.MORNING, time(9, 0), time(13, 0)),
+            ("WEDNESDAY", TimePeriod.AFTERNOON, time(15, 0), time(19, 0)),
+            ("FRIDAY", TimePeriod.MORNING, time(9, 0), time(13, 0)),
+            ("FRIDAY", TimePeriod.AFTERNOON, time(15, 0), time(19, 0)),
+            ("THURSDAY", TimePeriod.MORNING, time(10, 0), time(14, 0)),
+            ("THURSDAY", TimePeriod.AFTERNOON, time(15, 0), time(19, 0)),
+        ]
+        for day, period, start, end in cases:
+            with self.subTest(day=day, period=period):
+                self.assertEqual(workshop_times_for(day, period), (start, end))
+
+    def test_weekend_has_no_workshop_sessions(self):
+        self.assertIsNone(workshop_times_for("SATURDAY", TimePeriod.MORNING))
+        self.assertIsNone(workshop_times_for("SUNDAY", TimePeriod.AFTERNOON))
+        self.assertIn("not scheduled", workshop_time_issue("SATURDAY", time(9, 0), time(13, 0)))
+
+    def test_thursday_morning_is_1000_to_1400_for_all_programmes(self):
+        for code in ("CE", "TE", "EE", "ME", "QS", "cpE", "UNKNOWN"):
+            with self.subTest(programme=code):
+                self.assertEqual(
+                    workshop_times_for("THURSDAY", TimePeriod.MORNING, code),
+                    (time(10, 0), time(14, 0)),
+                )
+                self.assertEqual(
+                    workshop_hours("THURSDAY", TimePeriod.MORNING, code),
+                    {10, 11, 12, 13},
+                )
+        # A mixed bag of programmes still uses the single Thursday morning
+        # session, and Thursday-only: Monday morning stays 09:00-13:00.
+        self.assertEqual(
+            workshop_times_for("THURSDAY", TimePeriod.MORNING, ("ME", "CE")),
+            (time(10, 0), time(14, 0)),
+        )
+        self.assertEqual(
+            workshop_times_for("MONDAY", TimePeriod.MORNING, "CE"),
+            (time(9, 0), time(13, 0)),
+        )
+        self.assertEqual(
+            workshop_times_for("MONDAY", TimePeriod.MORNING, "ME"),
+            (time(9, 0), time(13, 0)),
+        )
+
+    def test_workshop_hours_are_day_aware(self):
+        self.assertEqual(
+            workshop_hours("MONDAY", TimePeriod.MORNING), {9, 10, 11, 12}
+        )
+        self.assertEqual(
+            workshop_hours("THURSDAY", TimePeriod.MORNING), {10, 11, 12, 13}
+        )
+        self.assertEqual(
+            workshop_hours("THURSDAY", TimePeriod.MORNING, "CE"), {10, 11, 12, 13}
+        )
+        self.assertEqual(
+            workshop_hours("FRIDAY", TimePeriod.AFTERNOON), {15, 16, 17, 18}
+        )
+
+    def test_time_issue_accepts_standard_and_rejects_bad(self):
+        for day in ("MONDAY", "TUESDAY", "WEDNESDAY", "FRIDAY"):
+            self.assertEqual(workshop_time_issue(day, time(9, 0), time(13, 0)), "")
+            self.assertEqual(workshop_time_issue(day, time(15, 0), time(19, 0)), "")
+        self.assertEqual(workshop_time_issue("THURSDAY", time(10, 0), time(14, 0)), "")
+        self.assertEqual(workshop_time_issue("THURSDAY", time(15, 0), time(19, 0)), "")
+        self.assertIn("must run", workshop_time_issue("MONDAY", time(8, 0), time(10, 0)))
+        # Thursday morning is 10:00-14:00 for every programme.
+        self.assertIn(
+            "must run",
+            workshop_time_issue("THURSDAY", time(9, 0), time(13, 0), programme_code="CE"),
+        )
+        self.assertIn(
+            "must run",
+            workshop_time_issue("THURSDAY", time(10, 0), time(13, 0), programme_code="ME"),
+        )
+        self.assertIn(
+            "must run",
+            workshop_time_issue("THURSDAY", time(10, 0), time(13, 0), programme_code="CE"),
+        )
+        self.assertIn("must run", workshop_time_issue("THURSDAY", time(9, 0), time(13, 0)))
+        self.assertIn("required", workshop_time_issue("MONDAY", time(9, 0), None))
+
+    # ----------------------------------------------------------- model clean
+
+    def test_model_clean_rejects_non_standard_workshop(self):
+        self._seed()
+        rec = WorkshopAllocation(
+            semester=self.sem1, course_code="TG201", group_code="A1",
+            day="MONDAY", start_time=time(8, 0), end_time=time(10, 0), venue="W",
+        )
+        with self.assertRaises(ValidationError):
+            rec.full_clean()
+
+    def test_model_clean_rejects_weekend_workshop(self):
+        self._seed()
+        rec = WorkshopAllocation(
+            semester=self.sem1, course_code="TG201", group_code="A1",
+            day="SATURDAY", start_time=time(9, 0), end_time=time(13, 0), venue="W",
+        )
+        with self.assertRaises(ValidationError) as ctx:
+            rec.full_clean()
+        self.assertIn("not scheduled", str(ctx.exception))
+
+    def test_model_clean_accepts_matrix_period_only_record(self):
+        self._seed()
+        rec = WorkshopAllocation(
+            semester=self.sem1, course_code="TG201", group_code="A1",
+            day="THURSDAY", time_period=TimePeriod.MORNING, venue="",
+        )
+        rec.full_clean()  # must not raise
+
+    def test_model_clean_accepts_thursday_morning(self):
+        self._seed()
+        rec = WorkshopAllocation(
+            semester=self.sem1, course_code="TG201", group_code="A1",
+            day="THURSDAY", start_time=time(10, 0), end_time=time(14, 0), venue="W",
+        )
+        rec.full_clean()  # must not raise — Thursday morning is 10:00-14:00
+
+    def test_model_clean_rejects_thursday_0900(self):
+        self._seed()
+        rec = WorkshopAllocation(
+            semester=self.sem1, course_code="TG201", group_code="B1",
+            day="THURSDAY", start_time=time(9, 0), end_time=time(13, 0), venue="W",
+        )
+        with self.assertRaises(ValidationError) as ctx:
+            rec.full_clean()
+        self.assertIn("10:00-14:00", str(ctx.exception))
+
+    def test_model_clean_rejects_thursday_1000_1300(self):
+        self._seed()
+        rec = WorkshopAllocation(
+            semester=self.sem1, course_code="TG201", group_code="A1",
+            day="THURSDAY", start_time=time(10, 0), end_time=time(13, 0), venue="W",
+        )
+        with self.assertRaises(ValidationError) as ctx:
+            rec.full_clean()
+        self.assertIn("10:00-14:00", str(ctx.exception))
+
+    def test_session_clean_rejects_non_standard_workshop(self):
+        self._seed()
+        ses = Session(
+            semester=self.sem1, course_code="TG201", activity_type=ActivityType.WORKSHOP,
+            day="THURSDAY", start_time=time(8, 0), end_time=time(10, 0), venue=None,
+        )
+        with self.assertRaises(ValidationError):
+            ses.full_clean()
+
+    def test_session_clean_ignores_non_workshop(self):
+        self._seed()
+        ses = Session(
+            semester=self.sem1, course_code="MT161", activity_type=ActivityType.LECTURE,
+            day="MONDAY", start_time=time(8, 0), end_time=time(10, 0), venue=None,
+        )
+        ses.full_clean()  # must not raise
+
+    def test_orm_create_bypasses_validation(self):
+        self._seed()
+        self._workshop(day="MONDAY", start_time=time(8, 0), end_time=time(10, 0))
+        self.assertEqual(WorkshopAllocation.objects.count(), 1)
+
+    # ---------------------------------------------------- form inline errors
+
+    def test_workshop_create_shows_inline_time_error(self):
+        sem = Semester.objects.create(academic_year="2026/2027", semester=1)
+        resp = self.client.post("/workshops/create/", {
+            "semester": sem.pk,
+            "course_code": "TG201",
+            "group_code": "A1",
+            "day": "MONDAY",
+            "start_time": "08:00",
+            "end_time": "10:00",
+            "venue": "TW101",
+        })
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "must run")
+        self.assertEqual(WorkshopAllocation.objects.count(), 0)
+
+    def test_session_create_shows_inline_workshop_time_error(self):
+        sem = Semester.objects.create(academic_year="2026/2027", semester=1)
+        resp = self.client.post("/sessions/create/", {
+            "semester": sem.pk,
+            "course_code": "TG201",
+            "activity_type": "WORKSHOP",
+            "day": "THURSDAY",
+            "start_time": "08:00",
+            "end_time": "10:00",
+            "venue": "",
+            "session_groups-TOTAL_FORMS": "0",
+            "session_groups-INITIAL_FORMS": "0",
+            "session_groups-MIN_NUM_FORMS": "0",
+            "session_groups-MAX_NUM_FORMS": "1000",
+        })
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "must run")
+        self.assertEqual(Session.objects.count(), 0)
+
+    def test_lecture_session_create_unaffected(self):
+        sem = Semester.objects.create(academic_year="2026/2027", semester=1)
+        resp = self.client.post("/sessions/create/", {
+            "semester": sem.pk,
+            "course_code": "MT161",
+            "activity_type": "LECTURE",
+            "day": "MONDAY",
+            "start_time": "08:00",
+            "end_time": "10:00",
+            "venue": "",
+            "session_groups-TOTAL_FORMS": "0",
+            "session_groups-INITIAL_FORMS": "0",
+            "session_groups-MIN_NUM_FORMS": "0",
+            "session_groups-MAX_NUM_FORMS": "1000",
+        })
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(Session.objects.get(activity_type="LECTURE").start_time, time(8, 0))
+        self.assertEqual(Session.objects.get(activity_type="LECTURE").end_time, time(10, 0))
+
+    # ----------------------------------------------------------- imports
+
+    def test_flat_import_rejects_non_standard_times(self):
+        self._seed()
+        result = import_workshop_allocation_from_excel(
+            make_xlsx(
+                [["TG201", "C1", "MONDAY", "08:00", "10:00", "TW101"]],
+                ["course_code", "group_code", "day", "start_time", "end_time", "venue"],
+            ),
+            semester_id=self.sem1.pk,
+        )
+        self.assertTrue(result.errors)
+        self.assertIn("must run", result.errors[0])
+        self.assertEqual(result.skipped, 1)
+        self.assertEqual(WorkshopAllocation.objects.count(), 0)
+
+    def test_flat_import_rejects_saturday(self):
+        self._seed()
+        result = import_workshop_allocation_from_excel(
+            make_xlsx(
+                [["TG201", "C1", "SATURDAY", "09:00", "13:00", "TW101"]],
+                ["course_code", "group_code", "day", "start_time", "end_time", "venue"],
+            ),
+            semester_id=self.sem1.pk,
+        )
+        self.assertIn("not scheduled", result.errors[0])
+        self.assertEqual(WorkshopAllocation.objects.count(), 0)
+
+    def test_flat_import_accepts_thursday_morning(self):
+        self._seed()
+        result = import_workshop_allocation_from_excel(
+            make_xlsx(
+                [["TG201", "C1", "THURSDAY", "10:00", "14:00", "TW101"]],
+                ["course_code", "group_code", "day", "start_time", "end_time", "venue"],
+            ),
+            semester_id=self.sem1.pk,
+        )
+        self.assertEqual(result.errors, [])
+        self.assertEqual(result.created, 1)
+        rec = WorkshopAllocation.objects.get()
+        self.assertEqual(rec.start_time, time(10, 0))
+        self.assertEqual(rec.end_time, time(14, 0))
+
+    def test_flat_import_accepts_thursday_morning_for_any_group(self):
+        self._seed()
+        result = import_workshop_allocation_from_excel(
+            make_xlsx(
+                [["TG201", "A1", "THURSDAY", "10:00", "14:00", "TW101"]],
+                ["course_code", "group_code", "day", "start_time", "end_time", "venue"],
+            ),
+            semester_id=self.sem1.pk,
+        )
+        self.assertEqual(result.errors, [])
+        self.assertEqual(result.created, 1)
+        rec = WorkshopAllocation.objects.get()
+        self.assertEqual(rec.start_time, time(10, 0))
+        self.assertEqual(rec.end_time, time(14, 0))
+
+    def test_flat_import_rejects_thursday_0900(self):
+        self._seed()
+        result = import_workshop_allocation_from_excel(
+            make_xlsx(
+                [["TG201", "B1", "THURSDAY", "09:00", "13:00", "TW101"]],
+                ["course_code", "group_code", "day", "start_time", "end_time", "venue"],
+            ),
+            semester_id=self.sem1.pk,
+        )
+        self.assertTrue(result.errors)
+        self.assertIn("10:00-14:00", result.errors[0])
+        self.assertEqual(result.skipped, 1)
+        self.assertEqual(WorkshopAllocation.objects.count(), 0)
+
+    def test_flat_import_rejects_thursday_1000_1300(self):
+        self._seed()
+        result = import_workshop_allocation_from_excel(
+            make_xlsx(
+                [["TG201", "A1", "THURSDAY", "10:00", "13:00", "TW101"]],
+                ["course_code", "group_code", "day", "start_time", "end_time", "venue"],
+            ),
+            semester_id=self.sem1.pk,
+        )
+        self.assertTrue(result.errors)
+        self.assertIn("10:00-14:00", result.errors[0])
+        self.assertEqual(WorkshopAllocation.objects.count(), 0)
+
+    def test_master_import_rejects_non_standard_workshop(self):
+        self._seed()
+        path = make_xlsx(
+            [["TG201", "WORKSHOP", "MONDAY", "08:00", "10:00", "LH1", "A1"]],
+            MASTER_COLS,
+        )
+        result = import_master_timetable_from_excel(path, semester_id=self.sem1.pk)
+        self.assertTrue(result.errors)
+        self.assertFalse(
+            Session.objects.filter(activity_type=ActivityType.WORKSHOP).exists()
+        )
+
+    def test_master_import_accepts_default_thursday_morning(self):
+        self._seed()
+        path = make_xlsx(
+            [["TG201", "WORKSHOP", "THURSDAY", "10:00", "14:00", "LH1", "B1"]],
+            MASTER_COLS,
+        )
+        result = import_master_timetable_from_excel(path, semester_id=self.sem1.pk)
+        self.assertEqual(result.errors, [])
+        self.assertEqual(
+            Session.objects.filter(
+                activity_type=ActivityType.WORKSHOP,
+                start_time=time(10, 0),
+                end_time=time(14, 0),
+            ).count(),
+            1,
+        )
+
+    def test_master_import_accepts_thursday_morning_for_any_group(self):
+        self._seed()
+        path = make_xlsx(
+            [["TG201", "WORKSHOP", "THURSDAY", "10:00", "14:00", "LH1", "A1"]],
+            MASTER_COLS,
+        )
+        result = import_master_timetable_from_excel(path, semester_id=self.sem1.pk)
+        self.assertEqual(result.errors, [])
+        self.assertEqual(
+            Session.objects.filter(
+                activity_type=ActivityType.WORKSHOP,
+                start_time=time(10, 0),
+                end_time=time(14, 0),
+            ).count(),
+            1,
+        )
+
+    def test_master_import_rejects_thursday_0900(self):
+        self._seed()
+        path = make_xlsx(
+            [["TG201", "WORKSHOP", "THURSDAY", "09:00", "13:00", "LH1", "B1"]],
+            MASTER_COLS,
+        )
+        result = import_master_timetable_from_excel(path, semester_id=self.sem1.pk)
+        self.assertTrue(result.errors)
+        self.assertFalse(
+            Session.objects.filter(activity_type=ActivityType.WORKSHOP).exists()
+        )
+
+    # ---------------------------------------------------------- grid / PDF
+
+    def test_grid_thursday_morning_uses_10_to_14_slot(self):
+        self._seed()
+        WorkshopAllocation.objects.create(
+            semester=self.sem1, course_code="TG201", group_code="B1",
+            day="THURSDAY", time_period=TimePeriod.MORNING, venue="",
+        )
+        entries = collect_entries(self.prog_b, self.sem1, group=self.g3)
+        self.assertEqual(entries[0]["hours"], {10, 11, 12, 13})
+        grid = build_time_day_grid(entries)
+        self.assertEqual(grid["slots"][0]["label"], "10:00-11:00")
+        self.assertEqual(grid["rows"][0]["cols"][0]["rowspan"], 4)
+
+    def test_grid_thursday_morning_uses_10_to_14_slot_for_any_programme(self):
+        self._seed()
+        WorkshopAllocation.objects.create(
+            semester=self.sem1, course_code="TG201", group_code="A1",
+            day="THURSDAY", time_period=TimePeriod.MORNING, venue="",
+        )
+        entries = collect_entries(self.prog_a, self.sem1, group=self.g1)
+        self.assertEqual(entries[0]["hours"], {10, 11, 12, 13})
+        grid = build_time_day_grid(entries)
+        self.assertEqual(grid["slots"][0]["label"], "10:00-11:00")
+        self.assertEqual(grid["rows"][0]["cols"][0]["rowspan"], 4)
+
+    def test_grid_monday_morning_uses_09_to_1255_slot(self):
+        self._seed()
+        WorkshopAllocation.objects.create(
+            semester=self.sem1, course_code="TG201", group_code="A1",
+            day="MONDAY", time_period=TimePeriod.MORNING, venue="",
+        )
+        entries = collect_entries(self.prog_a, self.sem1, group=self.g1)
+        self.assertEqual(entries[0]["hours"], {9, 10, 11, 12})
+        grid = build_time_day_grid(entries)
+        self.assertEqual(grid["slots"][0]["label"], "09:00-10:00")
+
+    def test_pdf_renders_thursday_morning_workshop(self):
+        from io import BytesIO
+
+        self._seed()
+        WorkshopAllocation.objects.create(
+            semester=self.sem1, course_code="TG201", group_code="A1",
+            day="THURSDAY", time_period=TimePeriod.MORNING, venue="",
+        )
+        out = BytesIO()
+        render_programme_timetable(self.prog_a, self.sem1, out=out)
+        self.assertGreater(len(out.getvalue()), 1000)
+
+    # -------------------------------------------------------------- legacy
+
+    def test_legacy_workshop_allocations_detected(self):
+        self._seed()
+        self._workshop()
+        self._workshop(day="TUESDAY", start_time=time(8, 0), end_time=time(10, 0))
+        found = legacy_workshop_allocations()
+        self.assertEqual(len(found), 1)
+        rec, issue = found[0]
+        self.assertEqual(rec.day, "TUESDAY")
+        self.assertIn("must run", issue)
+
+    def test_legacy_workshop_allocations_flag_old_thursday_times(self):
+        self._seed()
+        # Neither CE (group A1) nor ME (group B1) may start Thursday at 09:00
+        # anymore — the morning session is 10:00-14:00 for every programme.
+        self._workshop(
+            day="THURSDAY", group_code="A1",
+            start_time=time(9, 0), end_time=time(13, 0),
+        )
+        self._workshop(
+            day="THURSDAY", group_code="B1",
+            start_time=time(9, 0), end_time=time(13, 0),
+        )
+        found = legacy_workshop_allocations()
+        self.assertEqual(len(found), 2)
+        self.assertEqual({rec.group_code for rec, _ in found}, {"A1", "B1"})
+
+    def test_programme_resolution_helpers(self):
+        self._seed()
+        rec = WorkshopAllocation(
+            semester=self.sem1, course_code="TG201", group_code="A1",
+            day="THURSDAY", time_period=TimePeriod.MORNING, venue="",
+        )
+        self.assertEqual(allocation_programme_codes(rec), ("CE",))
+        self.assertEqual(allocation_programme_codes(
+            WorkshopAllocation(
+                semester=self.sem1, course_code="TG201", group_code="UNKNOWN",
+                day="MONDAY", time_period=TimePeriod.MORNING, venue="",
+            )
+        ), ())
+        self.assertEqual(
+            course_programme_codes("TG201"), ("CE",)
+        )
+        ses = Session(
+            semester=self.sem1, course_code="TG201", activity_type=ActivityType.WORKSHOP,
+            day="THURSDAY", start_time=time(9, 0), end_time=time(13, 0), venue=None,
+        )
+        ses.save()
+        self.assertEqual(session_programme_codes(ses), ())
+        SessionGroup.objects.create(session=ses, group=self.g1)
+        self.assertEqual(session_programme_codes(ses), ("CE",))
+        ses2 = Session(
+            semester=self.sem1, course_code="TG201", activity_type=ActivityType.WORKSHOP,
+            day="THURSDAY", start_time=time(8, 0), end_time=time(10, 0), venue=None,
+        )
+        # An unsaved session's groups have not been assigned yet.
+        self.assertEqual(session_programme_codes(ses2), ())
+
+    def test_legacy_workshop_sessions_detected(self):
+        self._seed()
+        Session.objects.create(
+            semester=self.sem1, course_code="TG201", activity_type=ActivityType.WORKSHOP,
+            day="THURSDAY", start_time=time(8, 0), end_time=time(10, 0), venue=None,
+        )
+        found = legacy_workshop_sessions()
+        self.assertEqual(len(found), 1)
+        session, issue = found[0]
+        self.assertEqual(session.day, "THURSDAY")
+        self.assertIn("must run", issue)
+
+    def test_workshop_list_shows_legacy_banner(self):
+        self._seed()
+        self._workshop(day="TUESDAY", start_time=time(8, 0), end_time=time(10, 0))
+        resp = self.client.get("/workshops/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "standard workshop session times")
+
+    def test_session_list_shows_legacy_banner(self):
+        self._seed()
+        Session.objects.create(
+            semester=self.sem1, course_code="TG201", activity_type=ActivityType.WORKSHOP,
+            day="THURSDAY", start_time=time(8, 0), end_time=time(10, 0), venue=None,
+        )
+        resp = self.client.get("/sessions/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "standard workshop session times")

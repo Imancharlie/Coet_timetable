@@ -1,4 +1,5 @@
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import models
 
 
@@ -119,6 +120,26 @@ class Session(models.Model):
             f"({venue})"
         )
 
+    def clean(self):
+        """Workshop sessions run only at the standard workshop times.
+
+        Non-workshop sessions are never affected. Enforcement is lazy-imported
+        so loading ``core.workshop_times`` (which imports this module) can
+        never form an import cycle.
+        """
+        super().clean()
+        if self.activity_type != "WORKSHOP" or not self.day:
+            return
+        from core.workshop_times import validate_workshop_session
+
+        errors = validate_workshop_session(self)
+        if errors:
+            raise ValidationError({
+                field: msgs
+                for error in errors
+                for field, msgs in error.error_dict.items()
+            })
+
 
 class SessionGroup(models.Model):
     session = models.ForeignKey(
@@ -166,6 +187,28 @@ class WorkshopAllocation(models.Model):
             f"{self.course_code} {self.get_day_display()} "
             f"{start}-{end} {self.venue}"
         )
+
+    def clean(self):
+        """Workshop allocations keep the standard workshop session times.
+
+        Records imported from the raw workshop matrix carry a period but no
+        clock times and stay valid; manually entered times must equal one whole
+        standard session for the day. Enforcement is lazy-imported so loading
+        ``core.workshop_times`` (which imports this module) never forms an
+        import cycle.
+        """
+        super().clean()
+        if not self.day:
+            return
+        from core.workshop_times import validate_workshop_record
+
+        errors = validate_workshop_record(self)
+        if errors:
+            raise ValidationError({
+                field: msgs
+                for error in errors
+                for field, msgs in error.error_dict.items()
+            })
 
 
 class TechnicalDrawingAllocation(models.Model):

@@ -9,19 +9,19 @@
     </div>
 
     <!-- Shared semester / year controls -->
-    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
-        <div class="flex flex-wrap items-end gap-4">
-            <div>
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4 sm:p-5 mb-6">
+        <div class="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-end gap-3 sm:gap-4 sm:mb-3">
+            <div class="w-full sm:w-auto">
                 <label for="semester" class="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Semester</label>
-                <select id="semester" class="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                <select id="semester" class="w-full sm:w-auto border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white">
                     {% for s in semesters %}
                     <option value="{{ s.pk }}" {% if default_semester and s.pk == default_semester.pk %}selected{% endif %}>{{ s }}</option>
                     {% endfor %}
                 </select>
             </div>
-            <div>
+            <div class="w-full sm:w-auto">
                 <label for="year" class="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Year of Study</label>
-                <select id="year" class="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                <select id="year" class="w-full sm:w-auto border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white">
                     {% for y in year_options %}
                     <option value="{{ y }}">{{ y }} {% if y == 1 %}st{% elif y == 2 %}nd{% elif y == 3 %}rd{% else %}th{% endif %} Year</option>
                     {% endfor %}
@@ -33,21 +33,23 @@
 
     <!-- Results -->
     <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-        <div class="px-6 py-4 border-b border-gray-200 flex flex-wrap items-center justify-between gap-3">
+        <div class="px-4 sm:px-6 py-4 border-b border-gray-200 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
             <div>
                 <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">Student Groups</h2>
                 <p class="text-xs text-gray-500 mt-0.5">Export a single group's timetable, or the whole programme.</p>
             </div>
-            <form method="get" action="." class="flex items-center gap-2">
-                <div class="relative">
+            <form method="get" action="." class="flex flex-col sm:flex-row sm:items-center gap-2 w-full lg:w-auto">
+                <div class="relative w-full">
                     <svg class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
                     <input type="text" name="q" value="{{ q }}" placeholder="Search group or programme..."
-                           class="w-64 pl-9 pr-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                           class="w-full sm:w-72 pl-9 pr-3 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
                 </div>
-                <button type="submit" class="px-4 py-2 bg-gray-800 text-white text-sm font-medium rounded-lg hover:bg-gray-900 transition">Search</button>
-                {% if q %}
-                <a href="?" class="px-4 py-2 text-sm font-medium text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 transition">Reset</a>
-                {% endif %}
+                <div class="flex gap-2 w-full sm:w-auto">
+                    <button type="submit" class="flex-1 sm:flex-none px-4 py-2.5 bg-gray-800 text-white text-sm font-medium rounded-lg hover:bg-gray-900 transition">Search</button>
+                    {% if q %}
+                    <a href="?" class="flex-1 sm:flex-none flex items-center justify-center px-4 py-2.5 text-sm font-medium text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 transition">Reset</a>
+                    {% endif %}
+                </div>
             </form>
         </div>
         {% if rows %}
@@ -57,20 +59,20 @@
         <div class="divide-y divide-gray-100">
             {% for r in rows %}
             <div>
-                <div class="px-6 py-4 flex flex-wrap items-center justify-between gap-3 bg-gray-50/70">
+                <div class="px-4 sm:px-6 py-4 flex flex-wrap items-center justify-between gap-3 bg-gray-50/70">
                     <div class="min-w-0">
-                        <p class="font-semibold text-gray-800">{{ r.programme.name }}</p>
+                        <p class="font-semibold text-gray-800 break-safe">{{ r.programme.name }}</p>
                         <p class="text-xs text-gray-500 mt-0.5">{{ r.programme.code }} &middot; {{ r.groups|length }} group{{ r.groups|length|pluralize }}</p>
                     </div>
                     <button type="button" onclick="doExport(this)"
                             data-base="{% url 'programme-timetable-export' r.programme.pk %}"
-                            class="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition shrink-0"
+                            class="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition shrink-0"
                             title="Download one PDF with every group of {{ r.programme.code }} combined">
                         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
                         Whole programme
                     </button>
                 </div>
-                <div class="px-6 py-4 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+                <div class="px-4 sm:px-6 py-4 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
                     {% for g in r.groups %}
                     <div class="border border-gray-200 rounded-lg p-3 flex items-center justify-between gap-2 hover:border-green-300 hover:shadow-sm transition">
                         <div class="min-w-0">
@@ -79,7 +81,7 @@
                         </div>
                         <button type="button" onclick="doExport(this)"
                                 data-base="{% url 'group-timetable-export' g.pk %}"
-                                class="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-green-700 bg-green-50 hover:bg-green-100 rounded-lg transition shrink-0">
+                                class="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-green-700 bg-green-50 hover:bg-green-100 rounded-lg transition shrink-0">
                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
                             Export PDF
                         </button>

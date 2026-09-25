@@ -15,14 +15,37 @@ from core.models import (
     SessionGroup,
     StudentGroup,
     TechnicalDrawingAllocation,
+    TimePeriod,
     Venue,
     WorkshopAllocation,
+)
+from core.workshop_times import (
+    course_programme_codes,
+    programme_codes_for_group_codes,
+    workshop_time_issue,
 )
 from core.venue_quality import base_key, detect_name_conflicts
 from core.workshop_parser import (
     detect_format,
     parse_workbook,
 )
+
+
+def _master_workshop_programme_codes(rec):
+    """Programme code(s) a master-timetable WORKSHOP row belongs to.
+
+    A literal group list resolves via the StudentGroup rows (unknown groups
+    fall back to the default 10:00 Thursday rule); the legacy ``ALL`` group
+    resolves via the programmes that study the course.
+    """
+    if str(rec["raw_groups"]).strip().upper() == "ALL":
+        return course_programme_codes(rec["course_code"])
+    group_codes = [
+        g.strip()
+        for g in str(rec["raw_groups"]).split(",")
+        if g.strip() and g.strip().upper() != "ALL"
+    ]
+    return programme_codes_for_group_codes(group_codes)
 
 DAY_MAP = {
     "mon": Day.MONDAY,
@@ -747,6 +770,17 @@ def _validate_master_rows(df, result) -> list[dict]:
             result.errors.append(f"Row {rec['row_no']}: time parse error: {exc}")
             result.skipped += 1
             continue
+        if rec["activity_type"] == ActivityType.WORKSHOP:
+            issue = workshop_time_issue(
+                rec["day"],
+                rec["start_time"],
+                rec["end_time"],
+                programme_code=_master_workshop_programme_codes(rec),
+            )
+            if issue:
+                result.errors.append(f"Row {rec['row_no']}: {issue}")
+                result.skipped += 1
+                continue
         if rec["raw_groups"].upper() != "ALL":
             rec["group_codes"] = [
                 g.strip()
@@ -932,6 +966,16 @@ def import_master_timetable_from_excel(
         except (ValueError, TypeError):
             continue
         activity_type = normalise_activity_type(rec["activity_raw"])
+        if activity_type == ActivityType.WORKSHOP:
+            issue = workshop_time_issue(
+                day,
+                start_time,
+                end_time,
+                programme_code=_master_workshop_programme_codes(rec),
+            )
+            if issue:
+                # Reported and counted as skipped in the validate pass.
+                continue
 
         venue_raw = rec["venue_raw"]
         if not venue_raw:
@@ -1176,7 +1220,9 @@ def import_workshop_allocation_from_excel(
     time_col = _match_col(
         df, "time", "time_range", "time range", "time_slot", "time slot", "period"
     )
-    venue_col = _match_col(df, "venue", "room", "room_name", "venue_name")
+    venue_col = _match_col(
+        df, "workshop", "venue", "room", "room_name", "venue_name"
+    )
 
     if (
         group_col is None
@@ -1188,14 +1234,15 @@ def import_workshop_allocation_from_excel(
             "group_code",
             "day",
             "a time column ('time' range, or 'start_time' + 'end_time')",
-            "venue",
+            "workshop",
         ]
         if course_col is not None:
             required.insert(0, "course_code")
         result.errors.append(
             "Invalid workshop format. Expected FORMAT A (course_code, group_code, "
-            "day, start_time, end_time, venue) or FORMAT B (group_code, day, "
-            "start_time, end_time, venue where course_code is derived from venue). "
+            "day, start_time, end_time, workshop) or FORMAT B (group_code, day, "
+            "start_time, end_time, workshop where course_code is derived from the "
+            "workshop). "
             f"Required columns: {', '.join(required)}. "
             f"Found columns: {', '.join(map(str, df.columns))}"
         )
@@ -1203,12 +1250,12 @@ def import_workshop_allocation_from_excel(
 
     if course_col is None:
         result.format = (
-            "workshop format (group_code, day, start_time, end_time, venue) — "
-            "course_code derived from venue"
+            "workshop format (group_code, day, start_time, end_time, workshop) — "
+            "course_code derived from workshop"
         )
     else:
         result.format = (
-            "full format (course_code, group_code, day, start_time, end_time, venue)"
+            "full format (course_code, group_code, day, start_time, end_time, workshop)"
         )
 
     if semester_id is None:
@@ -1255,6 +1302,17 @@ def import_workshop_allocation_from_excel(
             end_time = parse_time(end_raw)
         except (ValueError, TypeError) as exc:
             result.errors.append(f"Row {idx + 2}: time parse error: {exc}")
+            result.skipped += 1
+            continue
+
+        issue = workshop_time_issue(
+            day,
+            start_time,
+            end_time,
+            programme_code=programme_codes_for_group_codes(group_code),
+        )
+        if issue:
+            result.errors.append(f"Row {idx + 2}: {issue}")
             result.skipped += 1
             continue
 

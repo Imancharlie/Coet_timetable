@@ -10,10 +10,11 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
 
-from .timetable_grid import build_time_day_grid
+from .timetable_grid import build_day_time_grid
 from .timetable_pdf import (
     collect_entries,
     collect_group_entries,
+    collect_master_entries,
     render_group_timetable,
     render_programme_timetable,
 )
@@ -68,6 +69,7 @@ from .venue_quality import (
     resolve_venue_name_conflict,
     suggested_name,
 )
+from .workshop_times import legacy_workshop_allocations, legacy_workshop_sessions
 
 HTMX_HEADER = "HX-Request"
 
@@ -562,12 +564,15 @@ def group_timetable_pdf(request, pk):
 
 
 def timetable_view(request):
-    """Screen timetable grid: DAYS across the first row, TIME down the first column.
+    """Screen timetable grid: TIME slots across the first row, DAYS down the first column.
 
     Built from the session/workshop/TD records of the selected programme and
-    semester via ``core.timetable_grid.build_time_day_grid`` (same data source
-    as the PDF export), so any programme renders correctly. Cells are shaded
-    by activity type (Lecture grey, Workshop green, Technical Drawing pink).
+    semester via ``core.timetable_grid.build_day_time_grid`` (same data source
+    as the PDF export), so any programme renders correctly. Days run down the
+    first column with full weekday labels (Monday..Friday, plus any weekend
+    days with data), and each day is drawn as a vertical band of lanes:
+    sessions are rendered as one Activity Card per cell spanning their hourly
+    columns, and overlapping sessions sit on separate lanes.
     """
     programmes = list(Programme.objects.all())
     semesters = list(Semester.objects.order_by("-academic_year", "-semester"))
@@ -576,6 +581,8 @@ def timetable_view(request):
     programme_id = request.GET.get("programme")
     if programme_id and programme_id != "all":
         active_programme = Programme.objects.filter(pk=programme_id).first()
+    # Empty/missing selection (or "all") means the whole COET First Year.
+    show_all = active_programme is None
 
     active_group = None
     group_id = request.GET.get("group")
@@ -602,10 +609,9 @@ def timetable_view(request):
             entries = collect_group_entries(active_group, active_semester, year=year)
         elif active_programme:
             entries = collect_entries(active_programme, active_semester, year=year)
-        elif programmes:
-            for prog in programmes:
-                entries.extend(collect_entries(prog, active_semester, year=year))
-        grid = build_time_day_grid(entries)
+        elif show_all:
+            entries = collect_master_entries(active_semester, year=year)
+        grid = build_day_time_grid(entries)
 
     ordinal = {1: "1st", 2: "2nd", 3: "3rd", 4: "4th"}
     
@@ -613,7 +619,6 @@ def timetable_view(request):
     if active_programme:
         groups_for_programme = list(StudentGroup.objects.filter(programme=active_programme))
     
-    show_all = programme_id == "all"
     ctx = {
         "page_title": "Timetable",
         "programmes": programmes,
@@ -1380,6 +1385,7 @@ def session_list(request):
     if start_to:
         qs = qs.filter(start_time__lte=start_to)
     items, page, pages, total = _paginate(request, qs)
+    legacy_sessions = legacy_workshop_sessions()
     ctx = {
         "items": items,
         "columns": SESS_COLS,
@@ -1448,6 +1454,16 @@ def session_list(request):
         "active_activity": act,
         "active_day": day,
         "active_semester": sem,
+        "legacy_sessions_count": len(legacy_sessions),
+        "legacy_sessions_examples": [
+            {
+                "course": ses.course_code,
+                "day": ses.get_day_display(),
+                "time": f"{ses.start_time:%H:%M}-{ses.end_time:%H:%M}",
+                "issue": issue,
+            }
+            for ses, issue in legacy_sessions[:3]
+        ],
     }
     if _htmx(request):
         return render(request, "core/_table_and_cards.html", ctx)
@@ -1734,7 +1750,7 @@ WS_COLS = [
     {"key": "time_period", "label": "Period"},
     {"key": "start_time", "label": "Start"},
     {"key": "end_time", "label": "End"},
-    {"key": "venue", "label": "Venue"},
+    {"key": "venue", "label": "Workshop"},
 ]
 WS_FIELDS = [
     {"label": "Semester", "key": "semester"},
@@ -1749,7 +1765,7 @@ WS_FIELDS = [
     {"label": "Week End", "key": "week_end"},
     {"label": "Start Time", "key": "start_time"},
     {"label": "End Time", "key": "end_time"},
-    {"label": "Venue", "key": "venue"},
+    {"label": "Workshop", "key": "venue"},
     {"label": "Year of Study", "key": "year_of_study"},
 ]
 
@@ -1771,6 +1787,7 @@ def workshop_list(request):
     if start_to:
         qs = qs.filter(start_time__lte=start_to)
     items, page, pages, total = _paginate(request, qs)
+    legacy = legacy_workshop_allocations()
     ctx = {
         "items": items,
         "columns": WS_COLS,
@@ -1812,10 +1829,26 @@ def workshop_list(request):
         "total": total,
         "semesters": Semester.objects.all(),
         "active_semester": sem,
+        "legacy_count": len(legacy),
+        "legacy_examples": [
+            {
+                "course": rec.course_code,
+                "group": rec.group_code,
+                "day": rec.get_day_display(),
+                "time": (
+                    f"{rec.start_time:%H:%M}-{rec.end_time:%H:%M} "
+                    f"({rec.get_time_period_display()})"
+                    if rec.time_period
+                    else f"{rec.start_time:%H:%M}-{rec.end_time:%H:%M}"
+                ),
+                "issue": issue,
+            }
+            for rec, issue in legacy[:3]
+        ],
     }
     if _htmx(request):
         return render(request, "core/_table_and_cards.html", ctx)
-    return render(request, "core/list.html", ctx)
+    return render(request, "core/workshop_list.html", ctx)
 
 
 def workshop_detail(request, pk):
@@ -2414,7 +2447,7 @@ IMPORT_TYPES = {
     "workshop-allocation": {
         "title": "Workshop Allocation",
         "columns": (
-            "Flat: course_code, group_code, day, start_time, end_time, venue — "
+            "Flat: course_code, group_code, day, start_time, end_time, workshop — "
             "or drop in the raw university Workshop Schedule workbook (matrix) directly"
         ),
         "semester": "optional",

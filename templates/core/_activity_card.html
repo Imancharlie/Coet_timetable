@@ -1,0 +1,7 @@
+{% load core_tags %}
+<div class="tt-card tt-kind-{{ entry.kind }}">
+    <div class="tt-line head">{{ entry.type_label|activity_label }}, {{ entry.start }}-{{ entry.end }}, {{ entry.day|slice:":3"|title }}</div>
+    <div class="tt-line">Course: {{ entry.name }}</div>
+    <div class="tt-line">Venue: {{ entry.venue }}</div>
+    <div class="tt-line groups">Assigned groups: {{ entry.groups }}</div>
+</div>

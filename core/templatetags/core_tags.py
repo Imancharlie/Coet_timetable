@@ -22,6 +22,31 @@ def time_short(value):
     return value
 
 
+_ACTIVITY_LABELS = {
+    "lecture": "Lecture",
+    "tutorial": "Tutorial",
+    "practical": "Practical",
+    "seminar": "Seminar",
+    "workshop": "Workshop",
+}
+
+
+@register.filter
+def activity_label(value):
+    """Map an activity type label to one of the five canonical labels.
+
+    Any variant text from the source data (case, spacing, plurals such as
+    "Lectures" or "Workshops") maps to exactly one of Lecture / Tutorial /
+    Practical / Seminar / Workshop; unrecognised labels pass through.
+    """
+    if not value:
+        return value
+    key = value.strip().lower()
+    singular = key.rstrip("s")
+    mapping = _ACTIVITY_LABELS.get(key) or _ACTIVITY_LABELS.get(singular)
+    return mapping if mapping else value
+
+
 @register.filter
 def get_item(mapping, key):
     """Dictionary lookup by key; returns None when missing."""

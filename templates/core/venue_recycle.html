@@ -78,10 +78,10 @@
                                     {% if info.duplicate_of %}&middot; matches: {{ info.duplicate_of|join:", " }}{% endif %}
                                 </p>
                             </div>
-                            <div class="flex items-center gap-2 shrink-0">
+                            <div class="flex flex-wrap items-center gap-x-2 gap-y-2 shrink-0">
                                 {% with imp=venue_impacts|get_item:venue.pk %}
                                 {% if imp %}
-                                <span class="text-xs text-gray-500 max-w-[220px] text-right">{{ imp.summary }}</span>
+                                <span class="text-xs text-gray-500 w-full sm:w-auto sm:max-w-[220px] sm:text-right">{{ imp.summary }}</span>
                                 {% endif %}
                                 <form method="post" action="{{ recycle_url }}">
                                     {% csrf_token %}
@@ -89,7 +89,7 @@
                                     <input type="hidden" name="pk" value="{{ venue.pk }}">
                                     <button type="submit"
                                             onclick="return confirm('Remove {{ venue.name|escapejs }}? {{ imp.summary|default:'' }}')"
-                                            class="px-3 py-1.5 text-xs font-medium text-rose-700 border border-rose-300 rounded-lg hover:bg-rose-50 transition">
+                                            class="px-3 py-2 text-xs font-medium text-rose-700 border border-rose-300 rounded-lg hover:bg-rose-50 transition">
                                         Remove
                                     </button>
                                 </form>
@@ -101,13 +101,13 @@
                             <input type="hidden" name="action" value="edit">
                             <input type="hidden" name="pk" value="{{ venue.pk }}">
                             <input type="text" name="name" value="{{ info.suggested }}"
-                                   class="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-amber-500">
+                                   class="w-full sm:flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-amber-500">
                             <div class="flex items-center gap-2">
                                 <span class="text-xs text-gray-500">Capacity:</span>
                                 <input type="number" name="capacity" value="{{ venue.capacity|default:'' }}" min="0"
                                        class="w-24 px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-amber-500">
                                 <button type="submit"
-                                        class="inline-flex items-center gap-1 px-3 py-2 bg-amber-500 hover:bg-amber-600 text-white text-xs font-medium rounded-lg transition">
+                                        class="inline-flex items-center justify-center gap-1 px-3 py-2 bg-amber-500 hover:bg-amber-600 text-white text-xs font-medium rounded-lg transition">
                                     Fix
                                 </button>
                             </div>
@@ -132,34 +132,34 @@
             {% with info=issues_map|get_item:venue.pk %}
             <div class="p-4">
                 <div class="flex flex-wrap items-start justify-between gap-3">
-                    <div class="min-w-0">
-                        <div class="flex items-center gap-2 flex-wrap">
-                            <span class="font-semibold text-sm text-gray-800">{{ venue.name }}</span>
-                            {% for badge in info.issues %}
-                            <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium
-                                {% if badge == 'Casing' %}bg-rose-100 text-rose-700
-                                {% else %}bg-blue-100 text-blue-700{% endif %}">
-                                {{ badge }}
-                            </span>
-                            {% endfor %}
+                        <div class="min-w-0">
+                            <div class="flex items-center gap-2 flex-wrap">
+                                <span class="font-semibold text-sm text-gray-800">{{ venue.name }}</span>
+                                {% for badge in info.issues %}
+                                <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium
+                                    {% if badge == 'Casing' %}bg-rose-100 text-rose-700
+                                    {% else %}bg-blue-100 text-blue-700{% endif %}">
+                                    {{ badge }}
+                                </span>
+                                {% endfor %}
+                            </div>
+                            <p class="text-xs text-gray-500 mt-1">
+                                Capacity: {{ venue.capacity|default:"—" }}
+                                {% if info.summary %}&middot; {{ info.summary }}{% endif %}
+                            </p>
                         </div>
-                        <p class="text-xs text-gray-500 mt-1">
-                            Capacity: {{ venue.capacity|default:"—" }}
-                            {% if info.summary %}&middot; {{ info.summary }}{% endif %}
-                        </p>
+                        <form method="post" action="{{ recycle_url }}" class="flex flex-col sm:flex-row sm:items-center gap-2 w-full sm:w-auto">
+                            {% csrf_token %}
+                            <input type="hidden" name="action" value="edit">
+                            <input type="hidden" name="pk" value="{{ venue.pk }}">
+                            <input type="text" name="name" value="{{ info.suggested }}"
+                                   class="w-full sm:w-44 px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-amber-500">
+                            <button type="submit"
+                                    class="inline-flex items-center justify-center gap-1 px-3 py-2 bg-amber-500 hover:bg-amber-600 text-white text-xs font-medium rounded-lg transition">
+                                Fix
+                            </button>
+                        </form>
                     </div>
-                    <form method="post" action="{{ recycle_url }}" class="flex items-center gap-2 shrink-0">
-                        {% csrf_token %}
-                        <input type="hidden" name="action" value="edit">
-                        <input type="hidden" name="pk" value="{{ venue.pk }}">
-                        <input type="text" name="name" value="{{ info.suggested }}"
-                               class="w-44 px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-amber-500">
-                        <button type="submit"
-                                class="inline-flex items-center gap-1 px-3 py-2 bg-amber-500 hover:bg-amber-600 text-white text-xs font-medium rounded-lg transition">
-                            Fix
-                        </button>
-                    </form>
-                </div>
             </div>
             {% endwith %}
             {% endfor %}

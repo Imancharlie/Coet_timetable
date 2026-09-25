@@ -1,100 +1,203 @@
 {% load core_tags %}
 {% nav_section as nav %}
-<aside :class="sidebarOpen ? 'translate-x-0' : '-translate-x-full'"
-       class="fixed lg:sticky top-0 left-0 z-40 h-screen w-64 bg-slate-900 text-slate-200 flex flex-col transition-transform lg:translate-x-0 shrink-0">
-    <!-- Logo -->
-    <div class="px-5 py-5 border-b border-slate-700">
-        <a href="{% url 'dashboard' %}" class="text-lg font-bold text-white tracking-tight">
-            <span class="text-emerald-400">CoET</span> Timetable
-        </a>
-        <p class="text-xs text-slate-400 mt-0.5">Group Allocation &amp; Validation</p>
+<aside id="app-sidebar"
+       :class="(sidebarOpen ? 'translate-x-0' : '-translate-x-full') + ' ' + (collapsed ? 'lg:w-20' : 'lg:w-64')"
+       class="fixed lg:sticky top-0 left-0 z-40 h-screen w-64 bg-slate-900 text-slate-200 flex flex-col shrink-0 transition-[width,transform] duration-300 ease-in-out lg:translate-x-0">
+    <div class="px-4 py-4 border-b border-slate-700 flex flex-col gap-2">
+        <div class="tt-brand-row flex items-center justify-between gap-2" :class="collapsed ? 'lg:justify-center lg:gap-0' : ''">
+            <a href="{% url 'dashboard' %}"
+               :class="collapsed ? 'lg:max-w-0 lg:opacity-0' : 'lg:max-w-48 lg:opacity-100'"
+               class="tt-brand-link text-lg font-bold text-white tracking-tight truncate transition-all duration-300 min-w-0">
+                <span class="text-emerald-400">CoET</span> Timetable
+            </a>
+            <button type="button"
+                    @click="toggle()"
+                    :aria-expanded="collapsed ? 'false' : 'true'"
+                    aria-controls="app-sidebar"
+                    :aria-label="collapsed ? 'Expand sidebar' : 'Collapse sidebar'"
+                    :title="collapsed ? 'Expand sidebar' : 'Collapse sidebar'"
+                    class="hidden lg:inline-flex items-center justify-center w-8 h-8 rounded-md text-slate-300 hover:text-white hover:bg-slate-700/60 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 transition shrink-0">
+                <svg x-show="!collapsed" x-cloak class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 19l-7-7 7-7m8 14l-7-7 7-7"/></svg>
+                <svg x-show="collapsed" x-cloak class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 5l7 7-7 7M5 5l7 7-7 7"/></svg>
+            </button>
+        </div>
+        <p :class="collapsed ? 'lg:hidden' : ''" class="tt-hide-when-collapsed text-xs text-slate-400">Group Allocation &amp; Validation</p>
     </div>
-    <!-- Nav -->
-    <nav class="flex-1 overflow-y-auto py-4 px-3 space-y-1 text-sm">
+    <nav class="flex-1 overflow-y-auto py-4 px-3 space-y-1 text-sm" @mouseleave="hideTooltip()">
         <a href="{% url 'dashboard' %}"
-           class="flex items-center gap-3 px-3 py-2.5 rounded-lg transition {{ nav|active_cls:'dashboard' }}">
+           aria-label="Dashboard"
+           @mouseenter="showTooltip($el, 'Dashboard')"
+           @mouseleave="hideTooltip()"
+           @focus="showTooltip($el, 'Dashboard')"
+           @blur="hideTooltip()"
+           :class="collapsed ? 'lg:justify-center lg:gap-0' : 'lg:justify-start lg:gap-3'"
+           class="relative flex items-center justify-start gap-3 px-3 py-2.5 rounded-lg transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 {{ nav|active_cls:'dashboard' }}">
             <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-4 0a1 1 0 01-1-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 01-1 1h-2z"/></svg>
-            Dashboard
+            <span :class="collapsed ? 'lg:max-w-0 lg:opacity-0' : 'lg:max-w-44 lg:opacity-100'" class="truncate transition-all duration-300">Dashboard</span>
         </a>
 
-        <div class="pt-3 pb-1 px-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Reference Data</div>
+        <div :class="collapsed ? 'lg:my-2 lg:h-px lg:py-0 lg:overflow-hidden lg:bg-slate-700/50 lg:text-transparent' : ''"
+             class="tt-section px-3 pt-3 pb-1 text-xs font-semibold uppercase tracking-wider text-slate-500 transition-all duration-300">Reference Data</div>
         <a href="{% url 'programme-list' %}"
-           class="flex items-center gap-3 px-3 py-2.5 rounded-lg transition {{ nav|active_cls:'programmes' }}">
+           aria-label="Programmes"
+           @mouseenter="showTooltip($el, 'Programmes')"
+           @mouseleave="hideTooltip()"
+           @focus="showTooltip($el, 'Programmes')"
+           @blur="hideTooltip()"
+           :class="collapsed ? 'lg:justify-center lg:gap-0' : 'lg:justify-start lg:gap-3'"
+           class="relative flex items-center justify-start gap-3 px-3 py-2.5 rounded-lg transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 {{ nav|active_cls:'programmes' }}">
             <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"/></svg>
-            Programmes
+            <span :class="collapsed ? 'lg:max-w-0 lg:opacity-0' : 'lg:max-w-44 lg:opacity-100'" class="truncate transition-all duration-300">Programmes</span>
         </a>
         <a href="{% url 'group-list' %}"
-           class="flex items-center gap-3 px-3 py-2.5 rounded-lg transition {{ nav|active_cls:'groups' }}">
+           aria-label="Student Groups"
+           @mouseenter="showTooltip($el, 'Student Groups')"
+           @mouseleave="hideTooltip()"
+           @focus="showTooltip($el, 'Student Groups')"
+           @blur="hideTooltip()"
+           :class="collapsed ? 'lg:justify-center lg:gap-0' : 'lg:justify-start lg:gap-3'"
+           class="relative flex items-center justify-start gap-3 px-3 py-2.5 rounded-lg transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 {{ nav|active_cls:'groups' }}">
             <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
-            Student Groups
+            <span :class="collapsed ? 'lg:max-w-0 lg:opacity-0' : 'lg:max-w-44 lg:opacity-100'" class="truncate transition-all duration-300">Student Groups</span>
         </a>
         <a href="{% url 'course-list' %}"
-           class="flex items-center gap-3 px-3 py-2.5 rounded-lg transition {{ nav|active_cls:'courses' }}">
+           aria-label="Programme Courses"
+           @mouseenter="showTooltip($el, 'Programme Courses')"
+           @mouseleave="hideTooltip()"
+           @focus="showTooltip($el, 'Programme Courses')"
+           @blur="hideTooltip()"
+           :class="collapsed ? 'lg:justify-center lg:gap-0' : 'lg:justify-start lg:gap-3'"
+           class="relative flex items-center justify-start gap-3 px-3 py-2.5 rounded-lg transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 {{ nav|active_cls:'courses' }}">
             <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/></svg>
-            Programme Courses
+            <span :class="collapsed ? 'lg:max-w-0 lg:opacity-0' : 'lg:max-w-44 lg:opacity-100'" class="truncate transition-all duration-300">Programme Courses</span>
         </a>
         <a href="{% url 'venue-list' %}"
-           class="flex items-center gap-3 px-3 py-2.5 rounded-lg transition {{ nav|active_cls:'venues' }}">
+           aria-label="Venues"
+           @mouseenter="showTooltip($el, 'Venues')"
+           @mouseleave="hideTooltip()"
+           @focus="showTooltip($el, 'Venues')"
+           @blur="hideTooltip()"
+           :class="collapsed ? 'lg:justify-center lg:gap-0' : 'lg:justify-start lg:gap-3'"
+           class="relative flex items-center justify-start gap-3 px-3 py-2.5 rounded-lg transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 {{ nav|active_cls:'venues' }}">
             <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"/></svg>
-            Venues
+            <span :class="collapsed ? 'lg:max-w-0 lg:opacity-0' : 'lg:max-w-44 lg:opacity-100'" class="truncate transition-all duration-300">Venues</span>
         </a>
         <a href="{% url 'semester-list' %}"
-           class="flex items-center gap-3 px-3 py-2.5 rounded-lg transition {{ nav|active_cls:'semesters' }}">
+           aria-label="Semesters"
+           @mouseenter="showTooltip($el, 'Semesters')"
+           @mouseleave="hideTooltip()"
+           @focus="showTooltip($el, 'Semesters')"
+           @blur="hideTooltip()"
+           :class="collapsed ? 'lg:justify-center lg:gap-0' : 'lg:justify-start lg:gap-3'"
+           class="relative flex items-center justify-start gap-3 px-3 py-2.5 rounded-lg transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 {{ nav|active_cls:'semesters' }}">
             <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
-            Semesters
+            <span :class="collapsed ? 'lg:max-w-0 lg:opacity-0' : 'lg:max-w-44 lg:opacity-100'" class="truncate transition-all duration-300">Semesters</span>
         </a>
 
-        <div class="pt-3 pb-1 px-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Timetable</div>
+        <div :class="collapsed ? 'lg:my-2 lg:h-px lg:py-0 lg:overflow-hidden lg:bg-slate-700/50 lg:text-transparent' : ''"
+             class="tt-section px-3 pt-3 pb-1 text-xs font-semibold uppercase tracking-wider text-slate-500 transition-all duration-300">Timetable</div>
         <a href="{% url 'timetable' %}"
-           class="flex items-center gap-3 px-3 py-2.5 rounded-lg transition {{ nav|active_cls:'timetable' }}">
+           aria-label="Timetable View"
+           @mouseenter="showTooltip($el, 'Timetable View')"
+           @mouseleave="hideTooltip()"
+           @focus="showTooltip($el, 'Timetable View')"
+           @blur="hideTooltip()"
+           :class="collapsed ? 'lg:justify-center lg:gap-0' : 'lg:justify-start lg:gap-3'"
+           class="relative flex items-center justify-start gap-3 px-3 py-2.5 rounded-lg transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 {{ nav|active_cls:'timetable' }}">
             <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 5a2 2 0 012-2h12a2 2 0 012 2v14a2 2 0 01-2 2H6a2 2 0 01-2-2V5z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 3v4m8-4v4M4 11h16M8 15h.01M12 15h.01M16 15h.01"/></svg>
-            Timetable View
+            <span :class="collapsed ? 'lg:max-w-0 lg:opacity-0' : 'lg:max-w-44 lg:opacity-100'" class="truncate transition-all duration-300">Timetable View</span>
         </a>
         <a href="{% url 'session-list' %}"
-           class="flex items-center gap-3 px-3 py-2.5 rounded-lg transition {{ nav|active_cls:'sessions' }}">
+           aria-label="Master Timetable"
+           @mouseenter="showTooltip($el, 'Master Timetable')"
+           @mouseleave="hideTooltip()"
+           @focus="showTooltip($el, 'Master Timetable')"
+           @blur="hideTooltip()"
+           :class="collapsed ? 'lg:justify-center lg:gap-0' : 'lg:justify-start lg:gap-3'"
+           class="relative flex items-center justify-start gap-3 px-3 py-2.5 rounded-lg transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 {{ nav|active_cls:'sessions' }}">
             <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"/></svg>
-            Master Timetable
+            <span :class="collapsed ? 'lg:max-w-0 lg:opacity-0' : 'lg:max-w-44 lg:opacity-100'" class="truncate transition-all duration-300">Master Timetable</span>
         </a>
         <a href="{% url 'workshop-list' %}"
-           class="flex items-center gap-3 px-3 py-2.5 rounded-lg transition {{ nav|active_cls:'workshops' }}">
+           aria-label="Workshop Allocation"
+           @mouseenter="showTooltip($el, 'Workshop Allocation')"
+           @mouseleave="hideTooltip()"
+           @focus="showTooltip($el, 'Workshop Allocation')"
+           @blur="hideTooltip()"
+           :class="collapsed ? 'lg:justify-center lg:gap-0' : 'lg:justify-start lg:gap-3'"
+           class="relative flex items-center justify-start gap-3 px-3 py-2.5 rounded-lg transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 {{ nav|active_cls:'workshops' }}">
             <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
-            Workshop Allocations
+            <span :class="collapsed ? 'lg:max-w-0 lg:opacity-0' : 'lg:max-w-44 lg:opacity-100'" class="truncate transition-all duration-300">Workshop Allocations</span>
         </a>
         <a href="{% url 'td-list' %}"
-           class="flex items-center gap-3 px-3 py-2.5 rounded-lg transition {{ nav|active_cls:'td' }}">
+           aria-label="TD Allocations"
+           @mouseenter="showTooltip($el, 'TD Allocations')"
+           @mouseleave="hideTooltip()"
+           @focus="showTooltip($el, 'TD Allocations')"
+           @blur="hideTooltip()"
+           :class="collapsed ? 'lg:justify-center lg:gap-0' : 'lg:justify-start lg:gap-3'"
+           class="relative flex items-center justify-start gap-3 px-3 py-2.5 rounded-lg transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 {{ nav|active_cls:'td' }}">
             <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
-            TD Allocations
+            <span :class="collapsed ? 'lg:max-w-0 lg:opacity-0' : 'lg:max-w-44 lg:opacity-100'" class="truncate transition-all duration-300">TD Allocations</span>
         </a>
 
-        <div class="pt-3 pb-1 px-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Data Import</div>
+        <div :class="collapsed ? 'lg:my-2 lg:h-px lg:py-0 lg:overflow-hidden lg:bg-slate-700/50 lg:text-transparent' : ''"
+             class="tt-section px-3 pt-3 pb-1 text-xs font-semibold uppercase tracking-wider text-slate-500 transition-all duration-300">Data Import</div>
         <a href="{% url 'import-hub' %}"
-           class="flex items-center gap-3 px-3 py-2.5 rounded-lg transition {{ nav|active_cls:'imports' }}">
+           aria-label="Import Data"
+           @mouseenter="showTooltip($el, 'Import Data')"
+           @mouseleave="hideTooltip()"
+           @focus="showTooltip($el, 'Import Data')"
+           @blur="hideTooltip()"
+           :class="collapsed ? 'lg:justify-center lg:gap-0' : 'lg:justify-start lg:gap-3'"
+           class="relative flex items-center justify-start gap-3 px-3 py-2.5 rounded-lg transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 {{ nav|active_cls:'imports' }}">
             <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
-            Import Data
+            <span :class="collapsed ? 'lg:max-w-0 lg:opacity-0' : 'lg:max-w-44 lg:opacity-100'" class="truncate transition-all duration-300">Import Data</span>
         </a>
         <a href="{% url 'import-history' %}"
-           class="flex items-center gap-3 px-3 py-2.5 rounded-lg transition {{ nav|active_cls:'imports' }}">
+           aria-label="Import History"
+           @mouseenter="showTooltip($el, 'Import History')"
+           @mouseleave="hideTooltip()"
+           @focus="showTooltip($el, 'Import History')"
+           @blur="hideTooltip()"
+           :class="collapsed ? 'lg:justify-center lg:gap-0' : 'lg:justify-start lg:gap-3'"
+           class="relative flex items-center justify-start gap-3 px-3 py-2.5 rounded-lg transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 {{ nav|active_cls:'imports' }}">
             <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 0l-2-2m2 2l2-2m-2 4h6a2 2 0 002-2V6a2 2 0 00-2-2h-6a2 2 0 00-2 2v4M5 12H3v6a2 2 0 002 2h10a2 2 0 002-2v-3"/></svg>
-            Import History
+            <span :class="collapsed ? 'lg:max-w-0 lg:opacity-0' : 'lg:max-w-44 lg:opacity-100'" class="truncate transition-all duration-300">Import History</span>
         </a>
 
-        <div class="pt-3 pb-1 px-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Export</div>
+        <div :class="collapsed ? 'lg:my-2 lg:h-px lg:py-0 lg:overflow-hidden lg:bg-slate-700/50 lg:text-transparent' : ''"
+             class="tt-section px-3 pt-3 pb-1 text-xs font-semibold uppercase tracking-wider text-slate-500 transition-all duration-300">Export</div>
         <a href="{% url 'export-timetable' %}"
-           class="flex items-center gap-3 px-3 py-2.5 rounded-lg transition {{ nav|active_cls:'exports' }}">
+           aria-label="Export Timetable"
+           @mouseenter="showTooltip($el, 'Export Timetable')"
+           @mouseleave="hideTooltip()"
+           @focus="showTooltip($el, 'Export Timetable')"
+           @blur="hideTooltip()"
+           :class="collapsed ? 'lg:justify-center lg:gap-0' : 'lg:justify-start lg:gap-3'"
+           class="relative flex items-center justify-start gap-3 px-3 py-2.5 rounded-lg transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 {{ nav|active_cls:'exports' }}">
             <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
-            Export Timetable
+            <span :class="collapsed ? 'lg:max-w-0 lg:opacity-0' : 'lg:max-w-44 lg:opacity-100'" class="truncate transition-all duration-300">Export Timetable</span>
         </a>
 
-        <div class="pt-3 pb-1 px-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Activity Log</div>
+        <div :class="collapsed ? 'lg:my-2 lg:h-px lg:py-0 lg:overflow-hidden lg:bg-slate-700/50 lg:text-transparent' : ''"
+             class="tt-section px-3 pt-3 pb-1 text-xs font-semibold uppercase tracking-wider text-slate-500 transition-all duration-300">Activity Log</div>
         <a href="{% url 'activity-list' %}"
-           class="flex items-center gap-3 px-3 py-2.5 rounded-lg transition {{ nav|active_cls:'activity' }}">
+           aria-label="Activity Log"
+           @mouseenter="showTooltip($el, 'Activity Log')"
+           @mouseleave="hideTooltip()"
+           @focus="showTooltip($el, 'Activity Log')"
+           @blur="hideTooltip()"
+           :class="collapsed ? 'lg:justify-center lg:gap-0' : 'lg:justify-start lg:gap-3'"
+           class="relative flex items-center justify-start gap-3 px-3 py-2.5 rounded-lg transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 {{ nav|active_cls:'activity' }}">
             <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-            Activity Log
+            <span :class="collapsed ? 'lg:max-w-0 lg:opacity-0' : 'lg:max-w-44 lg:opacity-100'" class="truncate transition-all duration-300">Activity Log</span>
         </a>
         {% activity_logs 6 as logs %}
         {% for log in logs %}
         <a href="{% url 'dashboard' %}?log={{ log.pk }}"
-           class="flex items-start gap-2 px-2 py-1.5 rounded-lg transition hover:bg-slate-800/60 group">
+           :class="collapsed ? 'lg:hidden' : ''"
+           class="tt-hide-when-collapsed flex items-start gap-2 px-2 py-1.5 rounded-lg transition hover:bg-slate-800/60 group">
             <span class="mt-1.5 w-1.5 h-1.5 rounded-full {{ log.action|log_badge_cls }} shrink-0"></span>
             <span class="min-w-0 flex-1 leading-snug">
                 <span class="block text-xs text-slate-300 group-hover:text-white truncate">{{ log.message|truncatechars:44 }}</span>
@@ -102,9 +205,8 @@
             </span>
         </a>
         {% empty %}
-        <p class="px-3 py-2 text-xs text-slate-500">No activity yet.</p>
+        <p :class="collapsed ? 'lg:hidden' : ''" class="tt-hide-when-collapsed px-3 py-2 text-xs text-slate-500">No activity yet.</p>
         {% endfor %}
     </nav>
-    <!-- Version -->
-    <div class="px-5 py-3 border-t border-slate-700 text-xs text-slate-500">v0.1 — Phase 1</div>
+    <div :class="collapsed ? 'lg:hidden' : ''" class="tt-hide-when-collapsed px-5 py-3 border-t border-slate-700 text-xs text-slate-500">v0.1 — Phase 1</div>
 </aside>

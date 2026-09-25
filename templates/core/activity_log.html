@@ -12,11 +12,11 @@
                 <div class="flex-1 relative">
                     <svg class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
                     <input type="text" name="q" value="{{ q }}" placeholder="Search activity..."
-                           class="w-full pl-9 pr-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                           class="w-full pl-9 pr-3 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
                 </div>
                 {% for f in filters %}
                     {% if f.type == "select" %}
-                    <select name="{{ f.name }}" class="shrink-0 px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                    <select name="{{ f.name }}" class="w-full md:w-auto shrink-0 px-3 py-2.5 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
                         <option value="">All {{ f.label }}s</option>
                         {% for v, label in f.options %}
                         <option value="{{ v }}" {% if f.value == v %}selected{% endif %}>{{ label }}</option>
@@ -24,12 +24,14 @@
                     </select>
                     {% endif %}
                 {% endfor %}
-                <button type="submit" class="px-4 py-2 bg-gray-800 text-white text-sm font-medium rounded-lg hover:bg-gray-900 transition">
-                    Filter
-                </button>
-                <a href="?" class="px-4 py-2 text-sm font-medium text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 transition">
-                    Reset
-                </a>
+                <div class="flex gap-2 w-full md:w-auto">
+                    <button type="submit" class="flex-1 md:flex-none px-4 py-2.5 bg-gray-800 text-white text-sm font-medium rounded-lg hover:bg-gray-900 transition">
+                        Filter
+                    </button>
+                    <a href="?" class="flex-1 md:flex-none flex items-center justify-center px-4 py-2.5 text-sm font-medium text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 transition">
+                        Reset
+                    </a>
+                </div>
             </div>
         </form>
     </div>
