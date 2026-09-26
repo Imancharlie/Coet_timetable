@@ -35,16 +35,20 @@ from xml.sax.saxutils import escape
 from django.db.models import Q
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER
-from reportlab.lib.pagesizes import A4
+from reportlab.lib.pagesizes import A3, A4, landscape
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
+from reportlab.pdfbase import pdfmetrics
 from reportlab.platypus import (
+    Flowable,
+    PageBreak,
     Paragraph,
     SimpleDocTemplate,
     Spacer,
     Table,
     TableStyle,
 )
+from reportlab.platypus.flowables import HRFlowable
 
 from core.models import (
     Day,
@@ -54,7 +58,15 @@ from core.models import (
     TimePeriod,
     WorkshopAllocation,
 )
-from core.timetable_grid import build_time_day_grid, time_day_grid_to_table
+from core.timetable_grid import (
+    DAY_ORDER,
+    GRID_HOUR_END,
+    GRID_HOUR_START,
+    WEEKEND_ORDER,
+    build_time_day_grid,
+    fill_color,
+    time_day_grid_to_table,
+)
 from core.workshop_times import (
     allocation_programme_codes,
     workshop_hours,
@@ -803,4 +815,553 @@ def _render_grid(
     elements.append(Paragraph(f"Prepared for personal use · {export_date}", foot_style))
 
     doc.build(elements)
+    return doc
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STRUCTURE OF THE CODE — ALL-PROGRAMMES (MASTER) TIMETABLE
+# Both the master timetable and the on-screen-format export are built as ONE
+# reportlab `Table`:
+#   - cells are real bordered Table cells, so they cannot visually overlap
+#   - every cell's text is a real `Paragraph`, so line breaks actually render
+#     (a raw string handed to a Table cell is treated as one unstyled line)
+#   - every session cell is padded to a floor of three lines, so a short entry
+#     is never a squeezed sliver and a long one just grows the row
+#   - pagination is reportlab's own Table splitting; no manual page-fitting
+#   - the heading is painted on the canvas via onFirstPage/onLaterPages, so it
+#     repeats on every page however many the table ends up needing
+# ─────────────────────────────────────────────────────────────────────────────
+
+_SEMESTER_WORDS = {
+    1: "FIRST",
+    2: "SECOND",
+    3: "THIRD",
+    4: "FOURTH",
+    5: "FIFTH",
+    6: "SIXTH",
+}
+
+
+def _semester_word(number):
+    """``1`` -> ``"FIRST"``; an unknown number falls back to an ordinal-ish tag."""
+    try:
+        number = int(number)
+    except (TypeError, ValueError):
+        return str(number or "").upper()
+    return _SEMESTER_WORDS.get(number, f"{number}TH")
+
+
+def _master_cell_text(entries, show_groups=False):
+    """Build one master-timetable cell's text from its merged entries.
+
+    Each entry is one line-block in UDSM field order: the session type, the
+    time it runs, the venue, the course, and the groups. ``cell_text`` cannot
+    be reused here because it renders a single run-on line per entry and only
+    ever appends groups for workshop entries — it would print the full
+    twenty-odd group codes of a whole-cohort lecture instead of ``ALL``, and it
+    would drop the group line for every other kind.
+
+    A merged TD or workshop block carries just its type and the groups
+    attending: its time is already given by the block's own columns, and the
+    individual workshop names would otherwise swamp the cell.
+    """
+    blocks = []
+    for entry in entries or ():
+        if entry.get("kind") in ("td", "workshop"):
+            lines = [entry.get("type_label") or "TD"]
+            if entry.get("groups"):
+                lines.append(entry["groups"])
+        else:
+            lines = [entry.get("type_label") or entry.get("name") or "Session"]
+            start, end = entry.get("start") or "", entry.get("end") or ""
+            if start and end:
+                lines.append(f"{start}–{end}")
+            if entry.get("venue"):
+                lines.append(entry["venue"])
+            if entry.get("course_code"):
+                lines.append(entry["course_code"])
+            if show_groups and entry.get("groups"):
+                lines.append(entry["groups"])
+        blocks.append("\n".join(line for line in lines if line))
+    return "\n\n".join(block for block in blocks if block)
+
+
+def _split_group_codes(text):
+    """Split a stored group string into its individual codes.
+
+    ``collect_master_entries`` stores a session's groups as a comma-separated
+    list of codes, so ``"A1, A2"`` becomes ``["A1", "A2"]``. A code that is not
+    comma-separated at all (a TD or workshop record carries a single
+    ``group_code`` such as ``"EE C1"``) comes back as a one-item list.
+    """
+    if not text:
+        return []
+    return [part.strip() for part in str(text).split(",") if part.strip()]
+
+
+def _compact_group_codes(codes):
+    """Shorten a list of group codes by dropping a repeated programme prefix.
+
+    Technical-drawing and workshop records name the group in full, so one
+    block attending ``"EE C1"``, ``"EE C2"`` and ``"CE A1"`` reads much better
+    as ``"EE C1, C2, CE A1"``: the first code of a run keeps its prefix and the
+    rest of the run drops it. Order of first appearance is preserved so the
+    output is stable and matches the order the records were collected in.
+    """
+    runs = []
+    for code in codes:
+        prefix, sep, suffix = str(code).rpartition(" ")
+        if sep:
+            for run_prefix, run_members in runs:
+                if run_prefix == prefix:
+                    run_members.append(suffix)
+                    break
+            else:
+                runs.append((prefix, [suffix]))
+        else:
+            runs.append((None, [code]))
+
+    parts = []
+    for prefix, members in runs:
+        if prefix is None:
+            parts.extend(members)
+        else:
+            parts.append(f"{prefix} {members[0]}")
+            parts.extend(members[1:])
+    return ", ".join(parts)
+
+
+def _entry_codes(entry):
+    """The individual group codes an entry's ``groups`` string carries."""
+    return _split_group_codes(entry.get("groups") or "")
+
+
+def _groups_label(codes, all_groups):
+    """Render the groups line for a block.
+
+    A block reaching every known group reads ``ALL`` rather than listing twenty
+    codes; otherwise the codes are shown compacted. A block with no groups
+    assigned gets no line at all — the empty string.
+    """
+    if not codes:
+        return ""
+    if all_groups and set(codes) >= set(all_groups):
+        return "ALL"
+    return _compact_group_codes(codes)
+
+
+# Courses whose lectures are taken by the entire first-year cohort. Their
+# records may name only some of the groups that actually attend — a lecture is
+# not split by group — so the master timetable states "ALL" for them and never
+# lists group codes, which would misdescribe who has to attend.
+_WHOLE_COHORT_LECTURES = {"CL111", "MT161", "MT171", "ME101"}
+
+# Every lecture of a DS-prefixed course is likewise whole-cohort: the
+# development-studies service courses run once for all programmes.
+_WHOLE_COHORT_LECTURE_PREFIXES = ("DS",)
+
+
+def _is_whole_cohort_lecture(entry):
+    """True when this lecture is open to every group regardless of its links.
+
+    Only lectures are affected. A tutorial, seminar or practical is genuinely
+    per-group, so its assigned codes are still shown.
+    """
+    if entry.get("kind") != "lecture":
+        return False
+    course = (entry.get("course_code") or "").strip().upper()
+    if course in _WHOLE_COHORT_LECTURES:
+        return True
+    return course.startswith(_WHOLE_COHORT_LECTURE_PREFIXES)
+
+
+def _merge_bucket_key(entry):
+    """Identity of the block an entry belongs to.
+
+    Sessions are identified by what they actually show, so three byte-identical
+    records collapse into one block while two different courses at the same
+    time stay apart. TD and workshop allocations are identified only by the
+    day and the slot they occupy: that is the whole point of the master
+    timetable, where twenty groups' technical drawing at 09:00-12:00 is one
+    block listing the groups rather than twenty identical blocks.
+    """
+    kind = entry.get("kind")
+    if kind in ("td", "workshop"):
+        return (kind, entry.get("day"), entry.get("start"), entry.get("end"))
+    return (
+        "session",
+        entry.get("day"),
+        entry.get("start"),
+        entry.get("end"),
+        entry.get("label"),
+    )
+
+
+class _Bucket(list):
+    """A list of entries that collapse into one block, plus its merge key."""
+
+    def __init__(self, key):
+        super().__init__()
+        self.key = key
+
+
+def _merged_entry(bucket, all_groups):
+    """The one display entry representing a bucket of merged records."""
+    first = bucket[0]
+    kind = first.get("kind")
+    codes = []
+    for entry in bucket:
+        for code in _entry_codes(entry):
+            if code not in codes:
+                codes.append(code)
+
+    merged = dict(first)
+    merged["hours"] = set().union(*(set(e.get("hours") or ()) for e in bucket))
+    merged["key"] = bucket.key
+    if _is_whole_cohort_lecture(first):
+        # A whole-cohort lecture reads "ALL" even when only some groups are
+        # linked to it: the codes would understate who attends.
+        merged["groups"] = "ALL"
+    else:
+        merged["groups"] = _groups_label(codes, all_groups)
+
+    if kind in ("td", "workshop"):
+        # The block's own columns already give the time, and the individual
+        # course/venue detail would swamp it: type and groups are all that is
+        # shown.
+        merged["type_label"] = "Technical Drawing" if kind == "td" else "Workshop"
+        merged["label"] = "\n".join(
+            part for part in (merged["type_label"], merged["groups"]) if part
+        )
+    else:
+        merged["label"] = "\n".join(
+            part
+            for part in (
+                f"{first.get('course_code') or ''} {first.get('type_label') or ''}".strip(),
+                merged["groups"],
+                first.get("venue") or "",
+            )
+            if part
+        )
+    return merged
+
+
+def _merge_master_entries(entries, all_groups):
+    """Group the raw master entries into the blocks the master grid draws.
+
+    TD and workshop records that share a day, a start and an end time collapse
+    into a single block listing the groups attending — the master timetable
+    shows the week as a whole, not one block per group. Byte-identical session
+    records collapse the same way. Genuinely different sessions at the same
+    time (two different courses, say) are never merged.
+
+    Nothing is dropped: every input entry ends up in exactly one block, so the
+    block count can only go down.
+    """
+    order = []
+    buckets = {}
+    for entry in entries:
+        key = _merge_bucket_key(entry)
+        bucket = buckets.get(key)
+        if bucket is None:
+            bucket = _Bucket(key)
+            buckets[key] = bucket
+            order.append(key)
+        bucket.append(entry)
+
+    return [_merged_entry(buckets[key], all_groups) for key in order]
+
+
+def _wrap_line(text, width, font, size):
+    """Break one logical line of cell text so it fits `width` points.
+
+    A single word can be wider than the box it belongs to (a long venue name
+    with no spaces, say). Word wrapping alone would then leave it running out
+    past the box border, so such a word is split mid-word as a last resort.
+    """
+    text = (text or "").strip()
+    if not text or pdfmetrics.stringWidth(text, font, size) <= width:
+        return [text] if text else [""]
+    lines, cur = [], ""
+    for word in text.split():
+        if pdfmetrics.stringWidth(word, font, size) > width:
+            # Too long to ever fit: flush what we have, then break it up.
+            if cur:
+                lines.append(cur)
+                cur = ""
+            for piece in _break_word(word, width, font, size):
+                if (
+                    cur
+                    and pdfmetrics.stringWidth(f"{cur} {piece}", font, size)
+                    > width
+                ):
+                    lines.append(cur)
+                    cur = piece
+                else:
+                    cur = f"{cur} {piece}".strip()
+            continue
+        candidate = f"{cur} {word}".strip()
+        if not cur or pdfmetrics.stringWidth(candidate, font, size) <= width:
+            cur = candidate
+        else:
+            lines.append(cur)
+            cur = word
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def _break_word(word, width, font, size):
+    """Chop one over-long word into pieces that each fit `width`."""
+    pieces, current = [], ""
+    for char in word:
+        candidate = current + char
+        if current and pdfmetrics.stringWidth(candidate, font, size) > width:
+            pieces.append(current)
+            current = char
+        else:
+            current = candidate
+    if current:
+        pieces.append(current)
+    return pieces
+
+
+def _wrap_line(text, width, font, size):
+    """Break one logical line of cell text so it fits `width` points.
+
+    A single word can be wider than the box it belongs to (a long venue name
+    with no spaces, say). Word wrapping alone would then leave it running out
+    past the box border, so such a word is split mid-word as a last resort.
+    """
+    text = (text or "").strip()
+    if not text or pdfmetrics.stringWidth(text, font, size) <= width:
+        return [text] if text else [""]
+    lines, cur = [], ""
+    for word in text.split():
+        if pdfmetrics.stringWidth(word, font, size) > width:
+            # Too long to ever fit: flush what we have, then break it up.
+            if cur:
+                lines.append(cur)
+                cur = ""
+            for piece in _break_word(word, width, font, size):
+                if (
+                    cur
+                    and pdfmetrics.stringWidth(f"{cur} {piece}", font, size)
+                    > width
+                ):
+                    lines.append(cur)
+                    cur = piece
+                else:
+                    cur = f"{cur} {piece}".strip()
+            continue
+        candidate = f"{cur} {word}".strip()
+        if not cur or pdfmetrics.stringWidth(candidate, font, size) <= width:
+            cur = candidate
+        else:
+            lines.append(cur)
+            cur = word
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def _break_word(word, width, font, size):
+    """Chop one over-long word into pieces that each fit `width`."""
+    pieces, current = [], ""
+    for char in word:
+        candidate = current + char
+        if current and pdfmetrics.stringWidth(candidate, font, size) > width:
+            pieces.append(current)
+            current = char
+        else:
+            current = candidate
+    if current:
+        pieces.append(current)
+    return pieces
+
+
+def _entry_lines(e):
+    if e.get("kind") in ("td", "workshop"):
+        lines = [e.get("type_label") or "TD"]
+        if e.get("groups") and e["groups"] != "ALL":
+            lines.append(e["groups"])
+        return lines
+    lines = [e.get("type_label") or e.get("name") or "Session"]
+    if e.get("start") and e.get("end"):
+        lines.append(f"{e['start']}\u2013{e['end']}")
+    if e.get("venue"):
+        lines.append(e["venue"])
+    if e.get("course_code"):
+        lines.append(e["course_code"])
+    if e.get("groups") and e["groups"] != "ALL":
+        lines.append(e["groups"])
+    return lines
+
+
+class _DayFlowable(Flowable):
+    """Render a single day as a clean flowable that stays together on one page."""
+    
+    FONT, BOLD = "Helvetica", "Helvetica-Bold"
+    CELL_SIZE, LEADING, MIN_LINES = 7, 8.4, 3
+    PAD_X, PAD_Y, DAY_FONT = 3, 3, 11
+
+    def __init__(self, day_entries, day_label, slots, col_width, day_width):
+        super().__init__()
+        self.day_entries = day_entries
+        self.day_label = day_label
+        self.slots = slots
+        self.col_width = col_width
+        self.day_width = day_width
+        self.boxes, self.height = self._build_boxes()
+
+    def _build_boxes(self):
+        """Build boxes for this day using the cursor approach."""
+        idx = {h: i for i, h in enumerate(self.slots)}
+        cursor = [0.0] * len(self.slots)
+        boxes = []
+        
+        for e in sorted(self.day_entries, key=lambda e: (min(e["hours"]), e["course_code"], str(e["key"]))):
+            hrs = sorted(e["hours"])
+            s, en = idx.get(hrs[0]), idx.get(hrs[-1])
+            if s is None or en is None:
+                continue
+            span = en - s + 1
+            top = max(cursor[s:s + span])
+            lines = _entry_lines(e)
+            inner_w = self.col_width * span - 2 * self.PAD_X
+            wrapped = [w for ln in lines for w in _wrap_line(ln, inner_w, self.FONT, self.CELL_SIZE)]
+            while len(wrapped) < self.MIN_LINES:
+                wrapped.append("")
+            height = len(wrapped) * self.LEADING + 2 * self.PAD_Y
+            bottom = top + height
+            for i in range(s, s + span):
+                cursor[i] = bottom
+            boxes.append({"col": s, "colspan": span, "top": top, "bottom": bottom,
+                         "lines": wrapped, "fill": fill_color([e])})
+        
+        total_height = max(cursor) if cursor else 0
+        floor = self.MIN_LINES * self.LEADING + 2 * self.PAD_Y
+        return boxes, max(total_height, floor) if boxes else 0
+
+    def wrap(self, avail_width, avail_height):
+        width = self.day_width + self.col_width * len(self.slots)
+        return (width, self.height)
+
+    def split(self, avail_width, avail_height):
+        """Don't split - each day stays together or moves to next page."""
+        if self.height <= avail_height:
+            return [self]
+        return []
+
+    def draw(self):
+        canvas = self.canv
+        width = self.day_width + self.col_width * len(self.slots)
+        canvas.saveState()
+        
+        # Draw day frame
+        canvas.setStrokeColor(colors.black)
+        canvas.setLineWidth(1.1)
+        canvas.line(0, self.height, width, self.height)
+        canvas.setLineWidth(0.4)
+        canvas.rect(0, 0, self.day_width, self.height, fill=0, stroke=1)
+        
+        # Draw rotated day label
+        canvas.saveState()
+        canvas.translate(self.day_width / 2.0, self.height / 2.0)
+        canvas.rotate(90)
+        canvas.setFillColor(colors.black)
+        canvas.setFont(self.BOLD, self.DAY_FONT)
+        canvas.drawCentredString(0, -self.DAY_FONT / 3.0, self.day_label)
+        canvas.restoreState()
+        
+        # Draw column lines
+        canvas.setStrokeColor(colors.HexColor("#9aa0a6"))
+        canvas.setLineWidth(0.3)
+        for i in range(len(self.slots) + 1):
+            x = self.day_width + self.col_width * i
+            canvas.line(x, 0, x, self.height)
+        
+        # Draw boxes
+        for box in self.boxes:
+            left = self.day_width + self.col_width * box["col"]
+            box_width = self.col_width * box["colspan"]
+            box_top = self.height - box["top"]
+            box_bottom = self.height - box["bottom"]
+            canvas.setFillColor(colors.HexColor(box["fill"]))
+            canvas.setStrokeColor(colors.black)
+            canvas.setLineWidth(0.5)
+            canvas.rect(left, box_bottom, box_width, box_top - box_bottom, fill=1, stroke=1)
+            canvas.setFillColor(colors.black)
+            canvas.setFont(self.FONT, self.CELL_SIZE)
+            y = box_top - self.PAD_Y - self.LEADING * 0.78
+            for line in box["lines"]:
+                canvas.drawString(left + self.PAD_X, y, line)
+                y -= self.LEADING
+        
+        canvas.restoreState()
+
+
+def _build_day_flowables(merged_entries, col_width, day_width):
+    """Build a separate flowable for each day - days won't be split across pages."""
+    slots = list(range(GRID_HOUR_START, GRID_HOUR_END + 1))
+    present = {e["day"] for e in merged_entries}
+    day_order = [d for d in DAY_ORDER if d in present] + [d for d in WEEKEND_ORDER if d in present]
+    by_day = {}
+    for e in merged_entries:
+        if e["hours"]:
+            by_day.setdefault(e["day"], []).append(e)
+    
+    flowables = []
+    for day in day_order:
+        day_entries = by_day.get(day, [])
+        if day_entries:
+            day_label = Day(day).label
+            flowable = _DayFlowable(day_entries, day_label, slots, col_width, day_width)
+            flowables.append(flowable)
+    
+    return flowables, slots
+
+
+def _draw_master_header(canvas, doc, heading_lines, slots, col_width, day_width):
+    canvas.saveState()
+    pw, ph = landscape(A3)
+    canvas.setFont("Helvetica-Bold", 16); canvas.drawCentredString(pw/2, ph-10*mm, heading_lines[0])
+    canvas.setFont("Helvetica", 10)
+    canvas.drawCentredString(pw/2, ph-15*mm, heading_lines[1])
+    canvas.drawCentredString(pw/2, ph-19*mm, heading_lines[2])
+    x0, top, bottom = doc.leftMargin, ph-22*mm, ph-30*mm
+    canvas.setFillColor(colors.HexColor("#dce6f1"))
+    canvas.rect(x0, bottom, day_width + col_width*len(slots), top-bottom, fill=1, stroke=1)
+    canvas.setFillColor(colors.black); canvas.setFont("Helvetica-Bold", 8)
+    for i, h in enumerate(slots):
+        cx = x0 + day_width + col_width*i + col_width/2.0
+        canvas.drawCentredString(cx, bottom + (top-bottom)/2 - 3, f"{h:02d}:00\u2013{h+1:02d}:00")
+        canvas.line(x0+day_width+col_width*i, bottom, x0+day_width+col_width*i, top)
+    canvas.line(x0+day_width+col_width*len(slots), bottom, x0+day_width+col_width*len(slots), top)
+    canvas.restoreState()
+
+
+def render_udsm_master_timetable(entries, semester, year_of_study=1, out=None):
+    all_groups = set(StudentGroup.objects.values_list("code", flat=True))
+    merged_entries = _merge_master_entries(entries, all_groups)
+
+    doc = SimpleDocTemplate(out, pagesize=landscape(A3), leftMargin=10*mm, rightMargin=10*mm,
+                             topMargin=32*mm, bottomMargin=12*mm, title="University Master Timetable")
+
+    usable_w = landscape(A3)[0] - doc.leftMargin - doc.rightMargin
+    day_width = 46
+    n_slots = GRID_HOUR_END - GRID_HOUR_START + 1
+    col_width = (usable_w - day_width) / n_slots
+
+    day_flowables, slots = _build_day_flowables(merged_entries, col_width, day_width)
+    year_note = f" \u00b7 {_ordinal(int(year_of_study)).upper()} YEAR" if year_of_study and int(year_of_study) > 1 else ""
+    subtitle = f"TEACHING TIMETABLE FOR {_semester_word(semester.semester)} SEMESTER {semester.academic_year}{year_note}"
+    heading = ["UNIVERSITY OF DAR ES SALAAM", subtitle, f"SEMESTER {semester.semester}"]
+    page_cb = lambda c, d: _draw_master_header(c, d, heading, slots, col_width, day_width)
+
+    elements = day_flowables if day_flowables else \
+               [Paragraph("No timetable sessions scheduled for this selection.", ParagraphStyle("e"))]
+    elements += [Spacer(1, 5*mm), Paragraph(f"Prepared for personal use \u00b7 {datetime.date.today():%d %B %Y}",
+                 ParagraphStyle("f", fontName="Helvetica", fontSize=8, alignment=TA_CENTER))]
+    doc.build(elements, onFirstPage=page_cb, onLaterPages=page_cb)
     return doc

@@ -17,6 +17,7 @@ from .timetable_pdf import (
     collect_master_entries,
     render_group_timetable,
     render_programme_timetable,
+    render_udsm_master_timetable,
 )
 
 from .deletion_impact import deletion_impact
@@ -560,6 +561,32 @@ def group_timetable_pdf(request, pk):
     filename = f"timetable_{group.programme.code}_{group.code}_{year}.pdf"
     response["Content-Disposition"] = f'attachment; filename="{filename}"'
     render_group_timetable(group, semester, year, out=response)
+    return response
+
+
+def all_programmes_timetable_pdf(request):
+    """Export all programmes' timetable in UDSM style format."""
+    sem_id = request.GET.get("semester", "")
+    semester = None
+    if sem_id:
+        semester = get_object_or_404(Semester, pk=sem_id)
+    else:
+        semester = _latest_semester_with_data()
+    try:
+        year = int(request.GET.get("year", 1))
+    except (TypeError, ValueError):
+        year = 1
+    entries = collect_master_entries(semester, year=year)
+    response = HttpResponse(content_type="application/pdf")
+    filename = f"master_timetable_{year}.pdf"
+    response["Content-Disposition"] = f'attachment; filename="{filename}"'
+
+    render_udsm_master_timetable(
+        entries,
+        semester=semester,
+        year_of_study=year,
+        out=response,
+    )
     return response
 
 

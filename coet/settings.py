@@ -25,23 +25,13 @@ SECRET_KEY = 'django-insecure-g3p@&5=erpv-+2i#0xs$+tu5l+i&##j*gwukeoznqf*prr0xy7
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = [
-    'localhost',
-    '127.0.0.1',
-    '0.0.0.0',
-    '[::1]',
-    '172.16.185.226',
-    '192.168.100.6',
-    '41.86.184.98',
-]
+ALLOWED_HOSTS = ['*', '192.168.1.9', '172.16.185.226', '192.168.100.6']
 
 CSRF_TRUSTED_ORIGINS = [
-    'http://localhost:8000',
-    'http://127.0.0.1:8000',
-    'http://0.0.0.0:8000',
-    'http://172.16.185.226:8000',
-    'http://192.168.100.6:8000',
-    'http://41.86.184.98:8000',
+    'http://*.127.0.0.1',
+    'http://localhost',
+    'http://*',
+    'https://*',
 ]
 
 

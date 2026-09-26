@@ -129,6 +129,11 @@ urlpatterns = [
         views.group_timetable_pdf,
         name="group-timetable-export",
     ),
+    path(
+        "export/all-programmes/timetable.pdf/",
+        views.all_programmes_timetable_pdf,
+        name="all-programmes-timetable-export",
+    ),
     # Timetable display
     path("timetable/", views.timetable_view, name="timetable"),
     path("timetable/groups/", views.timetable_groups_json, name="timetable-groups"),
