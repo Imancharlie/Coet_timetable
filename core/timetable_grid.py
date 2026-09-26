@@ -27,11 +27,16 @@ WEEKEND_ORDER = ["SATURDAY", "SUNDAY"]
 GRID_HOUR_START = 7
 GRID_HOUR_END = 19
 
-# Light "faded" fills used by the PDF. Priority when a merged block contains
-# several session types: TD > Workshop > Lecture > Tutorial > Seminar > Practical.
+# Light "faded" fills used by the PDF and the on-screen grid, so a workshop
+# reads as a workshop at a glance. Workshop is a clearly pale green rather than
+# a near-white one: at 6.5pt on a white page the previous green-100 was
+# indistinguishable from an empty slot, which made workshop blocks look blank.
+# Black text stays comfortably readable on every one of these.
+# Priority when a block contains several session types:
+# TD > Workshop > Lecture > Tutorial > Seminar > Practical.
 FILL_COLORS = {
     "td": "#fce7f3",
-    "workshop": "#dcfce7",
+    "workshop": "#bbf7d0",
     "lecture": "#d1d5db",
     "tutorial": "#dbeafe",
     "seminar": "#ede9fe",

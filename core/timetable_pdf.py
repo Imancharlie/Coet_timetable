@@ -572,7 +572,12 @@ def render_programme_timetable(programme, semester, year_of_study=1, out=None):
     entries, rotation_keys = _collect_entries_and_rotations(
         programme, semester, year=year_of_study
     )
-    show_groups = StudentGroup.objects.filter(programme=programme).count() > 1
+    groups = list(StudentGroup.objects.filter(programme=programme))
+    show_groups = len(groups) > 1
+    # Fold the records that describe one session before drawing: a workshop and
+    # the placeholder practical written for it, and the same course recorded
+    # once per group, become one cell listing every group.
+    entries = fold_for_display(entries, {g.code for g in groups})
     return _render_grid(
         entries,
         title=f"{programme.name.upper()}",
@@ -590,6 +595,9 @@ def render_group_timetable(group, semester, year_of_study=1, out=None):
     entries, rotation_keys = _collect_group_entries_and_rotations(
         group, semester, year=year_of_study
     )
+    # Same fold as the programme export, so a group's own workshop and the
+    # placeholder practical for it are one cell rather than two.
+    entries = fold_for_display(entries, {group.code})
     return _render_grid(
         entries,
         title=f"{group.programme.name.upper()}",
@@ -975,26 +983,151 @@ def _is_whole_cohort_lecture(entry):
     return course.startswith(_WHOLE_COHORT_LECTURE_PREFIXES)
 
 
-def _merge_bucket_key(entry):
-    """Identity of the block an entry belongs to.
+# A session row whose course code is one of these names no real course: it is a
+# stand-in for the workshop or technical-drawing allocations that carry the
+# real detail. Drawing both would show one session twice -- a grey "WORKSHOP
+# Practical" block sitting on top of the green workshop block for the very same
+# slot. These are dropped whenever allocations actually describe their slot.
+PLACEHOLDER_COURSE_CODES = {
+    "WORKSHOP",
+    "WORK SHOPS",
+    "TD",
+    "T/D",
+    "T-DRAWING",
+    "TECHNICAL DRAWING",
+    "TECHNICALDRAWING",
+}
 
-    Sessions are identified by what they actually show, so three byte-identical
-    records collapse into one block while two different courses at the same
-    time stay apart. TD and workshop allocations are identified only by the
-    day and the slot they occupy: that is the whole point of the master
-    timetable, where twenty groups' technical drawing at 09:00-12:00 is one
-    block listing the groups rather than twenty identical blocks.
+
+def _is_placeholder(entry):
+    """True when this session row is a stand-in for an allocation.
+
+    A stand-in names no real course, only the activity it stands for. A row
+    whose course code IS a real code is not a stand-in -- an ``ME101`` practical
+    is a stand-in only because an ``ME101`` technical drawing shares its slot,
+    which :func:`fold_same_sessions` decides.
+    """
+    return (entry.get("course_code") or "").strip().upper() in PLACEHOLDER_COURSE_CODES
+
+
+def _slot_of(entry):
+    """The slot an entry occupies: its day and the hours it covers.
+
+    Keyed on the covered HOURS rather than on the clock strings, so a
+    09:00-12:55 placeholder and a 09:00-13:00 allocation are recognised as the
+    same slot even though their end times differ by five minutes. Matching on
+    the raw start/end is what let the two be drawn as separate blocks.
+    """
+    return (entry.get("day"), frozenset(entry.get("hours") or ()))
+
+
+def _identity_of(entry):
+    """What an entry is a session OF, within its slot.
+
+    Two entries in one slot that resolve to the same identity are the same
+    session and collapse into a single block. A stand-in resolves to
+    ``("allocation", "")``: it is whatever allocation shares its slot, decided
+    by :func:`fold_same_sessions`.
+
+    A workshop is identified by its SLOT ALONE, not by which craft it is. Every
+    group's workshop in one daily slot is one workshop session for the week, so
+    Carpentry, Welding and Masonry at Monday 09:00-13:00 belong in a single
+    block reading ``Workshop`` with every attending group listed under it.
+    Splitting them per craft was tried and rejected: it turned one session into
+    three and buried the group list. Technical drawing keeps its course, so two
+    genuinely different TD courses in one slot still read separately.
     """
     kind = entry.get("kind")
-    if kind in ("td", "workshop"):
-        return (kind, entry.get("day"), entry.get("start"), entry.get("end"))
-    return (
-        "session",
-        entry.get("day"),
-        entry.get("start"),
-        entry.get("end"),
-        entry.get("label"),
-    )
+    course = (entry.get("course_code") or "").strip()
+    if kind == "td":
+        return ("td", course.upper())
+    if kind == "workshop":
+        return ("workshop", "")
+    if _is_placeholder(entry):
+        return ("allocation", "")
+    return ("session", course.upper())
+
+
+def fold_same_sessions(entries):
+    """Collapse the records that describe one and the same session.
+
+    Three pairs of records turn out to be a single session, and drawing both is
+    what makes the timetable look like it has duplicated itself:
+
+    * a workshop or technical-drawing allocation and the placeholder practical
+      written to stand for it -- the placeholder is dropped and the allocation
+      keeps its real group list;
+    * every group's record of the same workshop slot -- one block whose groups
+      line lists them all;
+    * two session rows naming the same course in the same slot.
+
+    A session whose course an allocation already covers in the same slot also
+    folds in, which is how an ``ME101`` practical and the ``ME101`` technical
+    drawing become the single block they really are.
+
+    Returns one entry per surviving (slot, identity), each carrying the union of
+    the hours and the groups of everything it absorbed, in first-seen order.
+    Nothing is invented and nothing unrelated is merged: two different session
+    courses in one slot stay two blocks, and a placeholder with no allocation
+    behind it is kept rather than silently deleted.
+    """
+    order = []
+    buckets = {}
+    for entry in entries:
+        key = (_slot_of(entry), _identity_of(entry))
+        bucket = buckets.get(key)
+        if bucket is None:
+            bucket = _Bucket(key)
+            buckets[key] = bucket
+            order.append(key)
+        bucket.append(entry)
+
+    # Within each slot, work out which stand-ins are backed by a real
+    # allocation, and which sessions an allocation already covers.
+    by_slot = defaultdict(list)
+    for key in order:
+        by_slot[key[0]].append(key)
+
+    keep = set()
+    for keys in by_slot.values():
+        families = {key[1][0] for key in keys}
+        # A workshop covers its whole slot, so it needs no course to match on.
+        has_workshop = "workshop" in families
+        # Courses a technical drawing already speaks for in this slot, e.g. the
+        # ME101 an ME101 practical is really the technical drawing of.
+        td_courses = {
+            key[1][1] for key in keys if key[1][0] == "td" and key[1][1]
+        }
+        for key in keys:
+            family, course = key[1]
+            if family == "allocation" and (has_workshop or td_courses):
+                # The allocations already draw this slot, groups and all.
+                continue
+            if family == "session" and course in td_courses:
+                # e.g. an ME101 practical that is really the ME101 technical
+                # drawing: the allocation block stands in for both.
+                continue
+            keep.add(key)
+
+    folded = []
+    # Emitted in first-seen order, so the fold never reshuffles the week.
+    for key in order:
+        if key not in keep:
+            continue
+        bucket = buckets[key]
+        merged = dict(bucket[0])
+        merged["hours"] = set().union(
+            *(set(e.get("hours") or ()) for e in bucket)
+        )
+        merged["key"] = key
+        codes = []
+        for entry in bucket:
+            for code in _entry_codes(entry):
+                if code not in codes:
+                    codes.append(code)
+        merged["_codes"] = codes
+        folded.append(merged)
+    return folded
 
 
 class _Bucket(list):
@@ -1005,71 +1138,72 @@ class _Bucket(list):
         self.key = key
 
 
-def _merged_entry(bucket, all_groups):
-    """The one display entry representing a bucket of merged records."""
-    first = bucket[0]
-    kind = first.get("kind")
-    codes = []
-    for entry in bucket:
-        for code in _entry_codes(entry):
-            if code not in codes:
-                codes.append(code)
+def _merge_master_entries(entries, all_groups):
+    """Group the raw master entries into the blocks the master grid draws.
 
-    merged = dict(first)
-    merged["hours"] = set().union(*(set(e.get("hours") or ()) for e in bucket))
-    merged["key"] = bucket.key
-    if _is_whole_cohort_lecture(first):
+    Delegates the "are these the same session?" judgement to
+    :func:`fold_same_sessions` -- a workshop allocation and the placeholder
+    practical written for it are one session, as are two allocations of the same
+    course for different groups -- and then labels each surviving block: the
+    groups line, ``ALL`` for a whole-cohort lecture, and the cell text.
+
+    Genuinely different sessions in one slot (two different courses, say) are
+    never merged.
+    """
+    return fold_for_display(entries, all_groups)
+
+
+def fold_for_display(entries, all_group_codes):
+    """Fold duplicate records and label what survives: what an export draws.
+
+    This is the one place the "same day, same time, same course is one session"
+    rule lives, shared by every export so they cannot drift apart. The
+    on-screen timetable view deliberately does NOT use it yet -- it still draws
+    one block per group for workshops and technical drawing.
+    """
+    return [
+        _labelled_entry(entry, all_group_codes)
+        for entry in fold_same_sessions(entries)
+    ]
+
+
+def _labelled_entry(entry, all_groups):
+    """Attach the group list and the cell text to one folded block."""
+    codes = entry.pop("_codes", None)
+    if codes is None:
+        codes = []
+        for source in (entry,):
+            for code in _entry_codes(source):
+                if code not in codes:
+                    codes.append(code)
+    kind = entry.get("kind")
+    if _is_whole_cohort_lecture(entry):
         # A whole-cohort lecture reads "ALL" even when only some groups are
         # linked to it: the codes would understate who attends.
-        merged["groups"] = "ALL"
+        entry["groups"] = "ALL"
     else:
-        merged["groups"] = _groups_label(codes, all_groups)
+        entry["groups"] = _groups_label(codes, all_groups)
 
     if kind in ("td", "workshop"):
         # The block's own columns already give the time, and the individual
         # course/venue detail would swamp it: type and groups are all that is
         # shown.
-        merged["type_label"] = "Technical Drawing" if kind == "td" else "Workshop"
-        merged["label"] = "\n".join(
-            part for part in (merged["type_label"], merged["groups"]) if part
+        entry["type_label"] = "Technical Drawing" if kind == "td" else "Workshop"
+        entry["label"] = "\n".join(
+            part for part in (entry["type_label"], entry["groups"]) if part
         )
     else:
-        merged["label"] = "\n".join(
+        entry["label"] = "\n".join(
             part
             for part in (
-                f"{first.get('course_code') or ''} {first.get('type_label') or ''}".strip(),
-                merged["groups"],
-                first.get("venue") or "",
+                f"{entry.get('course_code') or ''} "
+                f"{entry.get('type_label') or ''}".strip(),
+                entry["groups"],
+                entry.get("venue") or "",
             )
             if part
         )
-    return merged
-
-
-def _merge_master_entries(entries, all_groups):
-    """Group the raw master entries into the blocks the master grid draws.
-
-    TD and workshop records that share a day, a start and an end time collapse
-    into a single block listing the groups attending — the master timetable
-    shows the week as a whole, not one block per group. Byte-identical session
-    records collapse the same way. Genuinely different sessions at the same
-    time (two different courses, say) are never merged.
-
-    Nothing is dropped: every input entry ends up in exactly one block, so the
-    block count can only go down.
-    """
-    order = []
-    buckets = {}
-    for entry in entries:
-        key = _merge_bucket_key(entry)
-        bucket = buckets.get(key)
-        if bucket is None:
-            bucket = _Bucket(key)
-            buckets[key] = bucket
-            order.append(key)
-        bucket.append(entry)
-
-    return [_merged_entry(buckets[key], all_groups) for key in order]
+    return entry
 
 
 def _wrap_line(text, width, font, size):
@@ -1198,81 +1332,401 @@ def _entry_lines(e):
     return lines
 
 
-class _DayFlowable(Flowable):
-    """Render a single day as a clean flowable that stays together on one page."""
-    
-    FONT, BOLD = "Helvetica", "Helvetica-Bold"
-    CELL_SIZE, LEADING, MIN_LINES = 7, 8.4, 3
-    PAD_X, PAD_Y, DAY_FONT = 3, 3, 11
+def _stack_order(e):
+    """Sort key deciding the order a day's blocks are laid down in.
 
-    def __init__(self, day_entries, day_label, slots, col_width, day_width):
+    SHORTEST SESSION FIRST, then the earliest start, then the course code and
+    finally the block's identity. The narrow blocks therefore reach the top of
+    the day band and the wider ones fill in underneath, so a band reads as a
+    one-hour session, then the two-hour ones, then the three-hour ones, and so
+    on.
+
+    This is a packing *preference*, never a hard constraint. The packer
+    (``_DayFlowable._pack``) still drops every block onto the lowest position
+    clear of the ones already laid down, so two simultaneous sessions stack
+    instead of overlapping and no data can produce an invalid layout. A longer
+    block that starts earlier than a shorter one simply ends up beneath it --
+    the short one wins the top because it is shorter, and the grid is never
+    distorted to let it.
+
+    Laying the narrow blocks down first also pays off twice over: they keep the
+    top of the band, and the wide ones left over get to sink into the gaps
+    between them instead of each claiming a fresh full-height row.
+    """
+    hours = set(e.get("hours") or ())
+    return (
+        len(hours),
+        min(hours) if hours else 0,
+        e.get("course_code") or "",
+        str(e.get("key")),
+    )
+
+
+def _occupy(runs, top, bottom):
+    """Record ``[top, bottom)`` in a column's sorted, non-overlapping runs."""
+    runs.append((top, bottom))
+    runs.sort()
+    merged = []
+    for low, high in runs:
+        if merged and low <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], high))
+        else:
+            merged.append((low, high))
+    runs[:] = merged
+
+
+class _DayFlowable(Flowable):
+    """Render one day of the week as a single, tightly packed band.
+
+    A band is a horizontal strip: a narrow day-label column on the left and one
+    grid column per printed hour after it. The blocks inside are packed by
+    ``_pack`` (shortest session on top, never overlapping) and the band is
+    closed by a single heavy rule along its BOTTOM edge. That rule doubles as
+    the separator between two consecutive days, so a week reads as one
+    continuous grid with a clear line between the days and no gutter; a band's
+    top edge is closed by whatever sits above it -- the neighbouring day's rule,
+    or the hour header when the band starts a page.
+
+    The band carries a ``BLOCK_GAP`` margin below its content, which is what
+    puts that same clear space between the last block of one day and the first
+    block of the next. The rule is drawn into the middle of that margin, so the
+    space either side of the line is the same size as the space between any two
+    sessions of a day.
+
+    A day taller than the page frame is broken by ``split`` at a block
+    boundary, never inside a block, so no session is ever sliced in two. Every
+    chunk of a day keeps its own bordered label column, so the column never
+    looks cut off, and the day's name is written exactly once -- on whichever
+    chunk holds the MIDDLE of the day, not merely the first one. A chunk that
+    runs on from a previous page therefore never repeats the name, and a chunk
+    holding more than half the day has its name sit low, where the day's real
+    centre falls rather than at the middle of the fragment on show.
+    """
+
+    FONT, BOLD = "Helvetica", "Helvetica-Bold"
+    # Cell metrics. 6.5pt matches the cell size the classic A4 export already
+    # uses; the leading is a comfortable 1.26x so consecutive lines of a session
+    # read as separate lines rather than a paragraph of jammed text.
+    CELL_SIZE, LEADING, MIN_LINES = 6.5, 8.2, 3
+    PAD_X, PAD_Y, DAY_FONT = 3, 3, 10
+    # A small clear margin drawn around every block, so two sessions stacked in
+    # the same hour column never touch skin to skin. The packer reserves this
+    # much space between neighbours, which is why the drawn box is inset by
+    # half of it on all four sides.
+    BLOCK_GAP = 1.5
+    RULE_WIDTH = 1.1
+
+    def __init__(
+        self,
+        day_entries,
+        day_label,
+        slots,
+        col_width,
+        day_width,
+        boxes=None,
+        day_offset=0.0,
+        day_extent=None,
+        height=None,
+        label_here=True,
+    ):
         super().__init__()
         self.day_entries = day_entries
         self.day_label = day_label
         self.slots = slots
         self.col_width = col_width
         self.day_width = day_width
-        self.boxes, self.height = self._build_boxes()
+        # Where this chunk sits inside its day, and how tall the whole day is.
+        # An unsplit day is its own extent and starts at zero.
+        self.day_offset = day_offset
+        self.label_here = label_here
+        self.boxes = self._pack(day_entries) if boxes is None else boxes
+        self.content_height = self._content_height(self.boxes)
+        self.day_extent = (
+            self.content_height if day_extent is None else day_extent
+        )
+        # An empty band is nothing at all -- not even the trailing margin. A
+        # chunk cut short by ``split`` is given the exact height it settled on,
+        # which is its content plus whatever margin fitted.
+        if height is not None:
+            self.height = max(self.content_height, height)
+        else:
+            self.height = (
+                self.content_height + self.BLOCK_GAP if self.boxes else 0.0
+            )
+        # The rule sits in the middle of whatever margin there is, so it is
+        # always equally clear of the content above and below it.
+        self.rule_y = (self.height - self.content_height) / 2.0
 
-    def _build_boxes(self):
-        """Build boxes for this day using the cursor approach."""
+    def _content_height(self, boxes):
+        """Height of the blocks themselves, ignoring the band margin."""
+        if not boxes:
+            return 0.0
+        return max(box["bottom"] for box in boxes)
+
+    def _clean_cut_levels(self):
+        """The horizontal lines a day may be broken at without harm.
+
+        A line is clean when, in every hour column, the lowest block above it
+        ends before the highest block below it begins. Blocks in *different*
+        columns may well overlap vertically -- they are drawn side by side -- so
+        a line may pass through a block provided nothing sharing its columns
+        sits on the other side of the break.
+
+        Requiring the stricter "no block is crossed at all" looks tempting but
+        is wrong: a densely packed day is a staircase, where the tallest block
+        in every prefix runs past the next line, so NO line would qualify and
+        the whole day would jump to a fresh page with the space below it empty.
+        """
+        columns = defaultdict(list)
+        for box in self.boxes:
+            for column in range(box["col"], box["col"] + box["colspan"]):
+                columns[column].append(box)
+        for blocks in columns.values():
+            blocks.sort(key=lambda box: box["top"])
+
+        levels = sorted({box["top"] for box in self.boxes})
+        split_at = {column: 0 for column in columns}
+        for level in levels:
+            for column, blocks in columns.items():
+                index = split_at[column]
+                while index < len(blocks) and blocks[index]["top"] < level:
+                    index += 1
+                split_at[column] = index
+            if all(
+                not (0 < index < len(columns[column]))
+                or columns[column][index - 1]["bottom"]
+                <= columns[column][index]["top"]
+                for column, index in split_at.items()
+            ):
+                # Columns the line does not actually cross are irrelevant: a
+                # block alone in its column may span the break harmlessly.
+                yield level
+
+    def _label_offset(self):
+        """Where to draw the rotated day name, or ``None`` for this chunk.
+
+        The name belongs to the whole day, not to the fragment on show, so it
+        is centred on the day's vertical midpoint and lands on whichever chunk
+        owns that midpoint (``label_here``, decided in ``split``). A chunk that
+        does not own it draws no name at all, which is what stops a continued
+        day repeating itself. The position is clamped into this chunk's own
+        content, so a midpoint that falls in the clear space at a page seam
+        still puts the name against the blocks rather than in mid-air.
+        """
+        if not self.label_here or not self.boxes:
+            return None
+        return max(
+            0.0,
+            min(self.day_extent / 2.0 - self.day_offset, self.content_height),
+        )
+
+    # -- packing ---------------------------------------------------------
+    def _pack(self, day_entries):
+        """Lay a day's blocks out shortest-first without leaving dead bands.
+
+        Each hour column keeps the vertical spans already taken. A block is
+        dropped onto the LOWEST position free across every column it covers --
+        including down into a hole left by a narrower neighbour -- so the band
+        is as short as the data allows while the order the blocks were laid
+        down in is preserved. Because the shortest blocks go down first they
+        keep the top of the band; the wide ones then sink into whatever space
+        is left instead of each claiming a fresh full-height row.
+
+        Reclaiming those holes is worth about a quarter of the export's height:
+        the busy sample week packs from 2633 to 1957 points, which is the
+        difference between five pages and four.
+        """
         idx = {h: i for i, h in enumerate(self.slots)}
-        cursor = [0.0] * len(self.slots)
+        taken = [[] for _ in self.slots]
         boxes = []
-        
-        for e in sorted(self.day_entries, key=lambda e: (min(e["hours"]), e["course_code"], str(e["key"]))):
-            hrs = sorted(e["hours"])
-            s, en = idx.get(hrs[0]), idx.get(hrs[-1])
-            if s is None or en is None:
+
+        for e in sorted(day_entries, key=_stack_order):
+            hours = sorted(set(e.get("hours") or ()))
+            if not hours:
                 continue
-            span = en - s + 1
-            top = max(cursor[s:s + span])
+            start, end = idx.get(hours[0]), idx.get(hours[-1])
+            if start is None or end is None:
+                # An hour this band does not print is skipped, not squeezed in.
+                continue
+            span = end - start + 1
+            columns = list(range(start, start + span))
             lines = _entry_lines(e)
             inner_w = self.col_width * span - 2 * self.PAD_X
-            wrapped = [w for ln in lines for w in _wrap_line(ln, inner_w, self.FONT, self.CELL_SIZE)]
+            wrapped = [
+                piece
+                for line in lines
+                for piece in _wrap_line(line, inner_w, self.FONT, self.CELL_SIZE)
+            ]
             while len(wrapped) < self.MIN_LINES:
                 wrapped.append("")
             height = len(wrapped) * self.LEADING + 2 * self.PAD_Y
+            top = self._lowest_free(taken, columns, height)
             bottom = top + height
-            for i in range(s, s + span):
-                cursor[i] = bottom
-            boxes.append({"col": s, "colspan": span, "top": top, "bottom": bottom,
-                         "lines": wrapped, "fill": fill_color([e])})
-        
-        total_height = max(cursor) if cursor else 0
-        floor = self.MIN_LINES * self.LEADING + 2 * self.PAD_Y
-        return boxes, max(total_height, floor) if boxes else 0
+            for column in columns:
+                _occupy(taken[column], top, bottom)
+            boxes.append(
+                {
+                    "col": start,
+                    "colspan": span,
+                    "top": top,
+                    "bottom": bottom,
+                    "lines": wrapped,
+                    "fill": fill_color([e]),
+                }
+            )
+        return boxes
 
+    def _lowest_free(self, taken, columns, height):
+        """The lowest y at which a ``height`` block clears all ``columns``.
+
+        A new block has to clear every occupied run in the columns it covers by
+        ``BLOCK_GAP``, so the only positions worth trying are the band floor and
+        the top of each run plus that margin; the first that fits wins.
+        """
+        candidates = {0.0}
+        for column in columns:
+            candidates.update(high + self.BLOCK_GAP for _low, high in taken[column])
+        for top in sorted(candidates):
+            bottom = top + height
+            if all(
+                not any(top < high and low < bottom for low, high in taken[column])
+                for column in columns
+            ):
+                return top
+        return max(candidates)
+
+    # -- page fitting ----------------------------------------------------
     def wrap(self, avail_width, avail_height):
         width = self.day_width + self.col_width * len(self.slots)
         return (width, self.height)
 
     def split(self, avail_width, avail_height):
-        """Don't split - each day stays together or moves to next page."""
-        if self.height <= avail_height:
+        """Break a too-tall day between blocks, never through one.
+
+        The break has to fall on a horizontal line that no block straddles, so
+        the only candidates are the blocks' own top edges. The highest such
+        line whose blocks all still fit the room left on the page is used, which
+        puts as much of the day as possible on this page and sends the rest
+        over whole. Every session is therefore drawn complete on exactly one
+        page -- nothing is ever sliced through the middle.
+        """
+        if self.height <= avail_height or not self.boxes:
             return [self]
-        return []
+
+        ordered = sorted(self.boxes, key=lambda box: (box["top"], box["col"]))
+        clean = set(self._clean_cut_levels())
+        cut = None
+        for level in sorted({box["top"] for box in ordered}):
+            above = [box for box in ordered if box["top"] < level]
+            below = [box for box in ordered if box["top"] >= level]
+            if not above:
+                # The band's own floor: no block lies above this line.
+                continue
+            if not below:
+                # The topmost line: nothing left to carry over.
+                break
+            content = self._content_height(above)
+            if content + self.BLOCK_GAP > avail_height:
+                # Every line above this one holds at least as many blocks, so
+                # none of them fits either: this is all the day that this page
+                # can take, and the day starts here rather than being cut.
+                break
+            if level not in clean:
+                # Something shares a column across this line and would collide.
+                # A higher line may well be clear, so keep looking rather than
+                # giving up and pushing the whole day to the next page.
+                continue
+            # The chunk takes the band margin too, but only when there is room
+            # for it before the continuation starts; at a page-break seam a
+            # missing margin is invisible, an overlap would not be.
+            margin = self.BLOCK_GAP if content + self.BLOCK_GAP <= level else 0.0
+            cut = (above, below, level, content + margin)
+        if cut is None:
+            # Not even the topmost block fits in what is left of this page, so
+            # nothing is placed here and reportlab carries the whole day over.
+            # A day that cannot fit an entire empty page raises reportlab's own
+            # clear "too large on page" error rather than looping.
+            return []
+
+        above, below, level, height = cut
+        # Exactly one chunk of a day carries its name, and ownership is settled
+        # once and then handed straight down: a chunk that does not already own
+        # the name never passes it on, so it can neither be written twice nor
+        # lost. The owning chunk is the one holding the day's vertical midpoint;
+        # a midpoint that lands in the clear space at a seam goes to the earlier
+        # chunk, so the name appears as early in the day as it possibly can.
+        midpoint = self.day_extent / 2.0
+        first_owns = self.label_here and midpoint <= self.day_offset + height
+        return [
+            self._continuation(
+                above, 0.0, self.day_offset, self.day_extent, height, first_owns
+            ),
+            self._continuation(
+                below, level, self.day_offset + level, self.day_extent, None,
+                # The continuation only inherits the name if this chunk was
+                # holding it and the first half did not take it. Inheriting
+                # "not first_owns" outright would hand the name to a page of a
+                # day whose name was already written earlier.
+                self.label_here and not first_owns,
+            ),
+        ]
+
+    def _continuation(self, boxes, offset, day_offset, day_extent, height, label_here):
+        """A band drawn from already-packed boxes, rebased onto y = 0.
+
+        ``day_offset`` is this chunk's distance from the top of the whole day,
+        which is what lets the day's name be centred on the day rather than on
+        whichever fragment happens to be drawn. ``height`` is the clamped band
+        height ``split`` settled on, or ``None`` to take the usual one.
+        """
+        rebased = [
+            dict(box, top=box["top"] - offset, bottom=box["bottom"] - offset)
+            for box in boxes
+        ]
+        return type(self)(
+            self.day_entries,
+            self.day_label,
+            self.slots,
+            self.col_width,
+            self.day_width,
+            boxes=rebased,
+            day_offset=day_offset,
+            day_extent=day_extent,
+            height=height,
+            label_here=label_here,
+        )
 
     def draw(self):
         canvas = self.canv
         width = self.day_width + self.col_width * len(self.slots)
         canvas.saveState()
         
-        # Draw day frame
+        # One heavy rule closes the band along its bottom edge, drawn into the
+        # middle of the band margin so it sits equally clear of the day above
+        # and the day below. It doubles as the separator between two
+        # consecutive days, so the week reads as one continuous grid rather than
+        # a stack of open-ended columns.
         canvas.setStrokeColor(colors.black)
-        canvas.setLineWidth(1.1)
-        canvas.line(0, self.height, width, self.height)
+        canvas.setLineWidth(self.RULE_WIDTH)
+        canvas.line(0, self.rule_y, width, self.rule_y)
+
+        # The day-label column is bounded on every chunk of the day, so a day
+        # carried over from the previous page never looks cut off down its side.
         canvas.setLineWidth(0.4)
         canvas.rect(0, 0, self.day_width, self.height, fill=0, stroke=1)
-        
-        # Draw rotated day label
-        canvas.saveState()
-        canvas.translate(self.day_width / 2.0, self.height / 2.0)
-        canvas.rotate(90)
-        canvas.setFillColor(colors.black)
-        canvas.setFont(self.BOLD, self.DAY_FONT)
-        canvas.drawCentredString(0, -self.DAY_FONT / 3.0, self.day_label)
-        canvas.restoreState()
+
+        # The name itself, on the chunk holding the middle of the whole day.
+        label_offset = self._label_offset()
+        if label_offset is not None:
+            canvas.saveState()
+            canvas.translate(
+                self.day_width / 2.0, self.height - label_offset
+            )
+            canvas.rotate(90)
+            canvas.setFillColor(colors.black)
+            canvas.setFont(self.BOLD, self.DAY_FONT)
+            canvas.drawCentredString(0, -self.DAY_FONT / 3.0, self.day_label)
+            canvas.restoreState()
         
         # Draw column lines
         canvas.setStrokeColor(colors.HexColor("#9aa0a6"))
@@ -1281,10 +1735,13 @@ class _DayFlowable(Flowable):
             x = self.day_width + self.col_width * i
             canvas.line(x, 0, x, self.height)
         
-        # Draw boxes
+        # Draw boxes. Vertically the drawn box is exactly the packed box, so the
+        # BLOCK_GAP the packer reserved is the clear space a reader sees; at the
+        # sides the box is inset by half of it so it never touches a column line.
+        inset = self.BLOCK_GAP / 2.0
         for box in self.boxes:
-            left = self.day_width + self.col_width * box["col"]
-            box_width = self.col_width * box["colspan"]
+            left = self.day_width + self.col_width * box["col"] + inset
+            box_width = self.col_width * box["colspan"] - self.BLOCK_GAP
             box_top = self.height - box["top"]
             box_bottom = self.height - box["bottom"]
             canvas.setFillColor(colors.HexColor(box["fill"]))
@@ -1302,7 +1759,13 @@ class _DayFlowable(Flowable):
 
 
 def _build_day_flowables(merged_entries, col_width, day_width):
-    """Build a separate flowable for each day - days won't be split across pages."""
+    """Build one flowable per day, in week order, each closed by its own rule.
+
+    Consecutive bands carry no spacer between them, so days butt up against
+    each other and a single heavy rule marks where one ends and the next
+    begins. A band too tall for the page is broken at a block boundary by
+    ``_DayFlowable.split`` rather than being cut.
+    """
     slots = list(range(GRID_HOUR_START, GRID_HOUR_END + 1))
     present = {e["day"] for e in merged_entries}
     day_order = [d for d in DAY_ORDER if d in present] + [d for d in WEEKEND_ORDER if d in present]
@@ -1322,46 +1785,145 @@ def _build_day_flowables(merged_entries, col_width, day_width):
     return flowables, slots
 
 
+# The hour-column header is painted on the canvas above the frame, so it costs
+# no body space. It is kept deliberately shallow and sits flush on the frame
+# top, which both saves vertical room and closes the top of the first day band
+# on every page.
+HEADER_BAND = 6.0 * mm
+HEADER_TITLE_OFFSET = 6.6 * mm
+HEADER_SUBTITLE_OFFSET = 10.4 * mm
+HEADER_MARGIN = 17.5 * mm
+FOOTER_MARGIN = 13.0 * mm
+FOOTER_TEXT = "Generated from"
+PORTAL_NAME = "CoET Timetable Portal"
+
+
 def _draw_master_header(canvas, doc, heading_lines, slots, col_width, day_width):
+    """Paint the title block and the hour-column header above the frame."""
     canvas.saveState()
-    pw, ph = landscape(A3)
-    canvas.setFont("Helvetica-Bold", 16); canvas.drawCentredString(pw/2, ph-10*mm, heading_lines[0])
-    canvas.setFont("Helvetica", 10)
-    canvas.drawCentredString(pw/2, ph-15*mm, heading_lines[1])
-    canvas.drawCentredString(pw/2, ph-19*mm, heading_lines[2])
-    x0, top, bottom = doc.leftMargin, ph-22*mm, ph-30*mm
+    pw, ph = landscape(A4)
+    canvas.setFillColor(colors.black)
+    canvas.setFont("Helvetica-Bold", 14)
+    canvas.drawCentredString(pw / 2, ph - HEADER_TITLE_OFFSET, heading_lines[0])
+    canvas.setFont("Helvetica", 8.5)
+    canvas.drawCentredString(pw / 2, ph - HEADER_SUBTITLE_OFFSET, heading_lines[1])
+
+    # The band's lower edge is the frame top, so the first day band on the page
+    # starts directly under a closed border instead of leaving the hour columns
+    # hanging into a gap.
+    x0 = doc.leftMargin
+    bottom = ph - doc.topMargin
+    top = bottom + HEADER_BAND
     canvas.setFillColor(colors.HexColor("#dce6f1"))
-    canvas.rect(x0, bottom, day_width + col_width*len(slots), top-bottom, fill=1, stroke=1)
-    canvas.setFillColor(colors.black); canvas.setFont("Helvetica-Bold", 8)
-    for i, h in enumerate(slots):
-        cx = x0 + day_width + col_width*i + col_width/2.0
-        canvas.drawCentredString(cx, bottom + (top-bottom)/2 - 3, f"{h:02d}:00\u2013{h+1:02d}:00")
-        canvas.line(x0+day_width+col_width*i, bottom, x0+day_width+col_width*i, top)
-    canvas.line(x0+day_width+col_width*len(slots), bottom, x0+day_width+col_width*len(slots), top)
+    canvas.setStrokeColor(colors.black)
+    canvas.setLineWidth(0.4)
+    canvas.rect(x0, bottom, day_width + col_width * len(slots), top - bottom, fill=1, stroke=1)
+    canvas.setFillColor(colors.black)
+    canvas.setFont("Helvetica-Bold", 7.5)
+    for i, hour in enumerate(slots):
+        x = x0 + day_width + col_width * i
+        canvas.drawCentredString(
+            x + col_width / 2.0,
+            bottom + (top - bottom) / 2 - 2.7,
+            f"{hour:02d}:00\u2013{hour + 1:02d}:00",
+        )
+        if i:
+            canvas.setLineWidth(0.3)
+            canvas.line(x, bottom, x, top)
     canvas.restoreState()
 
 
-def render_udsm_master_timetable(entries, semester, year_of_study=1, out=None):
+def _draw_master_footer(canvas, doc, portal_url=None, date_text=""):
+    """Paint the footer strip: what generated the file, and which page it is.
+
+    Drawn on the canvas rather than added to the element list, so every page
+    carries it -- not just the last. The portal name is a live link back to the
+    site that produced the export whenever the caller knows its address.
+    """
+    canvas.saveState()
+    pw, ph = landscape(A4)
+    right = pw - doc.rightMargin
+    baseline = FOOTER_MARGIN - 4.6 * mm
+    canvas.setFont("Helvetica", 7.5)
+
+    lead = canvas.stringWidth(FOOTER_TEXT + " ", "Helvetica", 7.5)
+    name = canvas.stringWidth(PORTAL_NAME, "Helvetica-Bold", 7.5)
+    tail = canvas.stringWidth(" on " + date_text, "Helvetica", 7.5)
+    total = lead + name + tail
+    # Centred in the page, so the provenance line reads as a footer rather than
+    # as a stray note in the left margin.
+    x = (pw - total) / 2.0
+    canvas.setFont("Helvetica", 7.5)
+    canvas.setFillColor(colors.HexColor("#444444"))
+    canvas.drawString(x, baseline, FOOTER_TEXT + " ")
+    x += lead
+    canvas.setFillColor(colors.HexColor("#0b4f9e"))
+    canvas.setFont("Helvetica-Bold", 7.5)
+    canvas.drawString(x, baseline, PORTAL_NAME)
+    if portal_url:
+        # A clickable link back to the portal the export came from.
+        canvas.linkURL(
+            portal_url,
+            (x - 1, baseline - 1.5, x + name + 1, baseline + 7.5),
+            relative=0,
+            thickness=0,
+        )
+    canvas.setLineWidth(0.3)
+    canvas.setStrokeColor(colors.HexColor("#0b4f9e"))
+    canvas.line(x, baseline - 1.4, x + name, baseline - 1.4)
+    x += name
+    canvas.setFont("Helvetica", 7.5)
+    canvas.setFillColor(colors.HexColor("#444444"))
+    canvas.drawString(x, baseline, " on " + date_text)
+
+    canvas.setFont("Helvetica-Bold", 8)
+    canvas.setFillColor(colors.black)
+    canvas.drawRightString(right, baseline, f"Page {canvas.getPageNumber()}")
+    canvas.restoreState()
+
+
+def render_udsm_master_timetable(entries, semester, year_of_study=1, out=None, portal_url=None):
     all_groups = set(StudentGroup.objects.values_list("code", flat=True))
     merged_entries = _merge_master_entries(entries, all_groups)
 
-    doc = SimpleDocTemplate(out, pagesize=landscape(A3), leftMargin=10*mm, rightMargin=10*mm,
-                             topMargin=32*mm, bottomMargin=12*mm, title="University Master Timetable")
+    # A4 landscape, not A3: the grid is thirteen hour columns of short text,
+    # so the old page was far wider than the content needed and had to be
+    # scrolled sideways at 100% zoom. The day-label column is only as wide as
+    # its rotated name needs, which hands the rest back to the hour columns.
+    doc = SimpleDocTemplate(
+        out,
+        pagesize=landscape(A4),
+        leftMargin=8 * mm,
+        rightMargin=8 * mm,
+        topMargin=HEADER_MARGIN,
+        bottomMargin=FOOTER_MARGIN,
+        title="University Master Timetable",
+    )
 
-    usable_w = landscape(A3)[0] - doc.leftMargin - doc.rightMargin
-    day_width = 46
+    usable_w = landscape(A4)[0] - doc.leftMargin - doc.rightMargin
+    day_width = 22
     n_slots = GRID_HOUR_END - GRID_HOUR_START + 1
     col_width = (usable_w - day_width) / n_slots
 
     day_flowables, slots = _build_day_flowables(merged_entries, col_width, day_width)
     year_note = f" \u00b7 {_ordinal(int(year_of_study)).upper()} YEAR" if year_of_study and int(year_of_study) > 1 else ""
     subtitle = f"TEACHING TIMETABLE FOR {_semester_word(semester.semester)} SEMESTER {semester.academic_year}{year_note}"
-    heading = ["UNIVERSITY OF DAR ES SALAAM", subtitle, f"SEMESTER {semester.semester}"]
-    page_cb = lambda c, d: _draw_master_header(c, d, heading, slots, col_width, day_width)
+    heading = [
+        "UNIVERSITY OF DAR ES SALAAM",
+        f"TEACHING TIMETABLE FOR {_semester_word(semester.semester)} SEMESTER "
+        f"{semester.academic_year}{year_note} \u00b7 SEMESTER {semester.semester}",
+    ]
+    date_text = datetime.date.today().strftime("%d %B %Y")
 
-    elements = day_flowables if day_flowables else \
-               [Paragraph("No timetable sessions scheduled for this selection.", ParagraphStyle("e"))]
-    elements += [Spacer(1, 5*mm), Paragraph(f"Prepared for personal use \u00b7 {datetime.date.today():%d %B %Y}",
-                 ParagraphStyle("f", fontName="Helvetica", fontSize=8, alignment=TA_CENTER))]
+    def page_cb(canvas, doc_):
+        _draw_master_header(canvas, doc_, heading, slots, col_width, day_width)
+        _draw_master_footer(canvas, doc_, portal_url=portal_url, date_text=date_text)
+
+    elements = day_flowables if day_flowables else [
+        Paragraph(
+            "No timetable sessions scheduled for this selection.",
+            ParagraphStyle("e", alignment=TA_CENTER),
+        )
+    ]
     doc.build(elements, onFirstPage=page_cb, onLaterPages=page_cb)
     return doc

@@ -586,6 +586,9 @@ def all_programmes_timetable_pdf(request):
         semester=semester,
         year_of_study=year,
         out=response,
+        # The footer links "CoET Timetable Portal" back to the site that
+        # produced the file, so the PDF says where it came from.
+        portal_url=request.build_absolute_uri("/"),
     )
     return response
 

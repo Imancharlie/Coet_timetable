@@ -38,6 +38,7 @@ from core.models import (
     WorkshopAllocation,
 )
 from core.timetable_grid import (
+    FILL_COLORS,
     build_day_time_grid,
     build_time_day_grid,
     time_day_grid_to_table,
@@ -2527,8 +2528,31 @@ class TimetableGridTests(TestCase):
             (2, 4),
             (2, 5),
         )
-        self.assertEqual(fill_map[workshop_cell], "#dcfce7")
-        self.assertIn("#fce7f3", fill_map.values())
+        # A workshop is shaded a pale green, and only that cell uses it.
+        self.assertEqual(fill_map[workshop_cell], FILL_COLORS["workshop"])
+        self.assertEqual(
+            [c for (s, e), c in fill_map.items() if (s, e) != workshop_cell
+             and c == FILL_COLORS["workshop"]],
+            [],
+            "the workshop green leaked into a non-workshop cell",
+        )
+        self.assertIn(FILL_COLORS["td"], fill_map.values())
+
+    def test_workshop_shade_is_clearly_pale_green(self):
+        """The workshop fill must read as green, not as an empty slot.
+
+        Regression: the fill was a near-white green, so a workshop block looked
+        blank on the page. It has to be recognisably green while still pale
+        enough for 6.5pt black text.
+        """
+        rgb = tuple(int(FILL_COLORS["workshop"][i:i + 2], 16) for i in (1, 3, 5))
+        r, g, b = rgb
+        self.assertGreater(g, r, "not green-dominant")
+        self.assertGreater(g, b, "not green-dominant")
+        # Pale: every channel is light, so black text stays readable.
+        self.assertGreater(min(rgb), 150, f"too dark to read black text on: {rgb}")
+        # And it is not so pale that it disappears against the white page.
+        self.assertLess(max(rgb) - min(rgb), 200, f"too saturated: {rgb}")
 
     def test_collect_entries_for_single_group(self):
         g1_entries = collect_entries(self.prog, self.sem, group=self.g1)
@@ -3461,18 +3485,102 @@ class MasterTimetableExportTests(TestCase):
 
     # -- 3. workshops merge and simplify --------------------------------
     def test_same_slot_workshops_merge_and_hide_names(self):
+        """One daily workshop slot is ONE session, whoever attends it.
+
+        Every group's workshop in one slot belongs to a single workshop session
+        for the week, so Carpentry, Welding and Masonry at Monday 09:00-13:00
+        are one block reading "Workshop" with all three groups listed -- not
+        three blocks, which buried the group list.
+        """
         for group_code, workshop in (
             ("C1", "Carpentry"), ("C2", "Welding"), ("A1", "Masonry"),
         ):
             self._workshop(workshop, group_code, "MONDAY", "09:00", "13:00")
         blocks = self._blocks("workshop")
-        self.assertEqual(len(blocks), 1, "three workshops must share one block")
+        self.assertEqual(len(blocks), 1, "one slot must be one workshop block")
         self.assertEqual(blocks[0]["type_label"], "Workshop")
         self.assertEqual(blocks[0]["groups"], "C1, C2, A1")
+        self.assertEqual(blocks[0]["hours"], {9, 10, 11, 12})
         text = _master_cell_text(blocks, show_groups=True)
         self.assertEqual(text.split("\n"), ["Workshop", "C1, C2, A1"])
         for detail in ("Carpentry", "Welding", "Masonry", "Workshop Shed"):
             self.assertNotIn(detail, text)
+
+    def test_same_workshop_for_many_groups_becomes_one_block(self):
+        """The plain case: one craft, many groups, one block."""
+        for group_code in ("C1", "C2", "A1"):
+            self._workshop("Carpentry", group_code, "MONDAY", "09:00", "13:00")
+        blocks = self._blocks("workshop")
+        self.assertEqual(len(blocks), 1, "one workshop must be one block")
+        self.assertEqual(blocks[0]["type_label"], "Workshop")
+        self.assertEqual(blocks[0]["groups"], "C1, C2, A1")
+        text = _master_cell_text(blocks, show_groups=True)
+        self.assertEqual(text.split("\n"), ["Workshop", "C1, C2, A1"])
+        for detail in ("Carpentry", "Workshop Shed"):
+            self.assertNotIn(detail, text)
+
+    def test_workshop_placeholder_practical_is_replaced_by_the_workshop(self):
+        """A four-hour practical named WORKSHOP is the workshop, not a second one.
+
+        This is the duplicate the export used to draw: a grey "WORKSHOP
+        Practical" block sitting on top of the green workshop block for the
+        very same slot.
+        """
+        self._workshop("Carpentry", "C1", "MONDAY", "09:00", "13:00")
+        self._workshop("Carpentry", "C2", "MONDAY", "09:00", "13:00")
+        # 09:00-12:55 rather than 09:00-13:00: the same hours, a different
+        # clock string, which is exactly how the duplicate slipped through.
+        self._session(
+            "WORKSHOP", "MONDAY", "09:00", "12:55",
+            activity_type=ActivityType.PRACTICAL,
+        )
+        blocks = self._blocks("workshop")
+        self.assertEqual(len(blocks), 1, "the placeholder must not add a block")
+        self.assertEqual(blocks[0]["groups"], "C1, C2")
+        practicals = self._blocks("practical")
+        self.assertEqual(practicals, [], "the placeholder practical is gone")
+
+    def test_placeholder_with_no_workshop_behind_it_is_kept(self):
+        """A WORKSHOP practical with nothing behind it is a real session.
+
+        Dropping it would silently lose a scheduled class, so it stays.
+        """
+        self._session(
+            "WORKSHOP", "MONDAY", "09:00", "12:55",
+            activity_type=ActivityType.PRACTICAL,
+        )
+        blocks = self._blocks("practical")
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0]["course_code"], "WORKSHOP")
+
+    def test_me101_practical_folds_into_the_me101_technical_drawing(self):
+        """An ME101 practical IS the ME101 technical drawing: one block."""
+        self._td("ME101", "C1", "WEDNESDAY", "09:00", "12:00")
+        self._td("ME101", "C2", "WEDNESDAY", "09:00", "12:00")
+        self._session(
+            "ME101", "WEDNESDAY", "09:00", "11:55",
+            activity_type=ActivityType.PRACTICAL,
+        )
+        blocks = self._blocks("td")
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0]["type_label"], "Technical Drawing")
+        self.assertEqual(blocks[0]["groups"], "C1, C2")
+        self.assertEqual(self._blocks("practical"), [])
+
+    def test_two_groups_doing_one_course_at_one_time_become_one_block(self):
+        """Same day, same time, same course: one block listing both groups."""
+        for group in (self.ee_c1, self.ee_c2):
+            self._session("EE150", "TUESDAY", "10:00", "11:55", groups=[group])
+        blocks = self._blocks("lecture") or self._blocks("tutorial")
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0]["course_code"], "EE150")
+        self.assertEqual(len(blocks[0]["groups"].split(",")), 2)
+
+    def test_different_courses_in_one_slot_are_never_merged(self):
+        self._session("EE150", "MONDAY", "08:00", "09:55")
+        self._session("EE152", "MONDAY", "08:00", "09:55")
+        codes = {e["course_code"] for e in self._merged()}
+        self.assertEqual(codes, {"EE150", "EE152"})
 
     def test_workshops_at_different_times_stay_separate(self):
         for start, end in (("09:00", "13:00"), ("15:00", "19:00")):
@@ -3514,19 +3622,26 @@ class MasterTimetableExportTests(TestCase):
         self.assertGreaterEqual(len(boxes[0]["lines"]), 3)
         self.assertEqual(
             boxes[0]["bottom"] - boxes[0]["top"],
-            len(boxes[0]["lines"]) * _WeekMasonryFlowable.LEADING
-            + 2 * _WeekMasonryFlowable.PAD_Y,
+            len(boxes[0]["lines"]) * _DayFlowable.LEADING
+            + 2 * _DayFlowable.PAD_Y,
         )
-        self.assertAlmostEqual(height, boxes[0]["bottom"] - boxes[0]["top"])
+        # The band adds the trailing margin that separates it from the next day.
+        self.assertAlmostEqual(
+            height,
+            boxes[0]["bottom"] - boxes[0]["top"] + _DayFlowable.BLOCK_GAP,
+        )
 
     def test_longer_content_is_never_truncated_to_the_floor(self):
         self._session("CL111", "MONDAY", "08:00", "09:55", venue=False)
         merged = self._merged()
-        boxes, _height = _masonry_day_boxes(
+        flowable = _DayFlowable(
             [e for e in merged if e["day"] == "MONDAY"],
+            "MONDAY",
             list(range(7, 20)),
-            col_width=60.0,
+            60.0,
+            46,
         )
+        boxes = flowable.boxes
         # Content is padded to minimum 3 lines for uniform appearance
         self.assertGreaterEqual(len(boxes[0]["lines"]), 3)
 
@@ -3569,11 +3684,17 @@ class MasterTimetableExportTests(TestCase):
         self.assertEqual(len(boxes), 3)
         # Every box occupies the same single hour column.
         self.assertEqual({box["colspan"] for box in boxes}, {1})
-        # They are stacked: each starts where the previous one ended.
+        # They are stacked, each one a clear BLOCK_GAP below the previous, so
+        # two sessions never meet skin to skin.
         for previous, current in zip(boxes, boxes[1:]):
-            self.assertAlmostEqual(current["top"], previous["bottom"])
-        # And the day is only as tall as the stack, not three times a row.
-        self.assertAlmostEqual(height, boxes[-1]["bottom"])
+            self.assertAlmostEqual(
+                current["top"], previous["bottom"] + _DayFlowable.BLOCK_GAP
+            )
+        # The band is only as tall as the stack plus the trailing margin that
+        # separates it from the next day -- not three times a row.
+        self.assertAlmostEqual(
+            height, boxes[-1]["bottom"] + _DayFlowable.BLOCK_GAP
+        )
 
     def test_sequential_blocks_do_not_stack(self):
         """Different hours are different columns, so they sit side by side."""
@@ -3594,24 +3715,32 @@ class MasterTimetableExportTests(TestCase):
         # Both start at the top: no empty row is drawn between them.
         self.assertAlmostEqual(boxes[0]["top"], 0.0)
         self.assertAlmostEqual(boxes[1]["top"], 0.0)
-        self.assertAlmostEqual(height, boxes[0]["bottom"])
+        self.assertAlmostEqual(
+            height, boxes[0]["bottom"] + _DayFlowable.BLOCK_GAP
+        )
 
     def test_a_wide_block_starts_below_the_tallest_column_it_covers(self):
-        """A block's top is the max cursor of the columns it spans."""
+        """A wide block clears the deepest column it covers, plus the margin."""
         # Two one-hour blocks in hour 8 stack; a two-hour block covering hours
         # 8 and 9 must start below both.
         for i in range(2):
             self._session(f"MT{610 + i}", "MONDAY", "08:00", "08:55")
         self._session("MT620", "MONDAY", "08:00", "09:55")
         merged = self._merged()
-        boxes, _height = _masonry_day_boxes(
+        flowable = _DayFlowable(
             [e for e in merged if e["day"] == "MONDAY"],
+            "MONDAY",
             list(range(7, 20)),
-            col_width=60.0,
+            60.0,
+            46,
         )
+        boxes = flowable.boxes
         wide = [b for b in boxes if b["colspan"] == 2][0]
         narrow = [b for b in boxes if b["colspan"] == 1]
-        self.assertAlmostEqual(wide["top"], max(b["bottom"] for b in narrow))
+        self.assertAlmostEqual(
+            wide["top"],
+            max(b["bottom"] for b in narrow) + _DayFlowable.BLOCK_GAP,
+        )
 
     def test_boxes_never_overlap_within_a_day(self):
         """No two boxes in a day may share space, whatever the data."""
@@ -3623,11 +3752,14 @@ class MasterTimetableExportTests(TestCase):
                 )
         self._session("MT800", "MONDAY", "08:00", "11:55")
         merged = self._merged()
-        boxes, _height = _masonry_day_boxes(
+        flowable = _DayFlowable(
             [e for e in merged if e["day"] == "MONDAY"],
+            "MONDAY",
             list(range(7, 20)),
-            col_width=60.0,
+            60.0,
+            46,
         )
+        boxes = flowable.boxes
         for i, first in enumerate(boxes):
             for second in boxes[i + 1:]:
                 same_columns = (
@@ -3645,11 +3777,14 @@ class MasterTimetableExportTests(TestCase):
         """Nothing is emitted for an hour with no session at all."""
         self._session("MT601", "MONDAY", "14:00", "14:55")
         merged = self._merged()
-        boxes, _height = _masonry_day_boxes(
+        flowable = _DayFlowable(
             [e for e in merged if e["day"] == "MONDAY"],
+            "MONDAY",
             list(range(7, 20)),
-            col_width=60.0,
+            60.0,
+            46,
         )
+        boxes = flowable.boxes
         self.assertEqual(len(boxes), 1)
         # One box for one hour: the twelve other printed hours draw nothing.
         self.assertEqual(boxes[0]["colspan"], 1)
@@ -3670,6 +3805,159 @@ class MasterTimetableExportTests(TestCase):
         self.assertEqual(height, 0.0)
 
     # -- 4c. bands, days, and page breaks --------------------------------
+    def test_the_shortest_session_is_stacked_on_top(self):
+        """A band's blocks read shortest-first, whatever the start times are.
+
+        A four-hour block starting at 08:00 used to own the top of the band and
+        push the one-hour block at 10:00 underneath it. The shorter block now
+        wins the top, which is what the export is read for.
+        """
+        self._session("MT501", "MONDAY", "08:00", "11:55")  # four hours
+        self._session("MT502", "MONDAY", "10:00", "10:55")  # one hour
+        merged = self._merged()
+        flowable = _DayFlowable(
+            [e for e in merged if e["day"] == "MONDAY"],
+            "MONDAY",
+            list(range(7, 20)),
+            60.0,
+            46,
+        )
+        by_span = {box["colspan"]: box for box in flowable.boxes}
+        self.assertEqual(set(by_span), {1, 4})
+        self.assertEqual(by_span[1]["top"], 0.0)
+        self.assertLess(by_span[1]["top"], by_span[4]["top"])
+
+    def test_stacking_is_shortest_first_across_a_mixed_day(self):
+        """Blocks of equal length stay in start-time order among themselves."""
+        for course, start, end in (
+            ("MT401", "08:00", "10:55"),   # three hours
+            ("MT402", "09:00", "10:55"),   # two hours
+            ("MT403", "10:00", "10:55"),   # one hour
+            ("MT404", "14:00", "14:55"),   # one hour
+        ):
+            self._session(course, "MONDAY", start, end)
+        merged = self._merged()
+        flowable = _DayFlowable(
+            [e for e in merged if e["day"] == "MONDAY"],
+            "MONDAY",
+            list(range(7, 20)),
+            60.0,
+            46,
+        )
+        rows = sorted(flowable.boxes, key=lambda b: (b["top"], b["col"]))
+        # One hour, then one hour, then two, then three.
+        self.assertEqual(
+            [box["colspan"] for box in rows], [1, 1, 2, 3]
+        )
+        # The two one-hour blocks sit side by side at the very top.
+        self.assertEqual([box["top"] for box in rows[:2]], [0.0, 0.0])
+        self.assertNotEqual(rows[0]["col"], rows[1]["col"])
+
+    def test_shortest_first_never_forces_blocks_to_overlap(self):
+        """The shorter-on-top rule is a preference, never a layout constraint."""
+        for course, start, end in (
+            ("MT301", "08:00", "12:55"),   # five hours
+            ("MT302", "09:00", "09:55"),   # one hour inside it
+            ("MT303", "10:00", "11:55"),   # two hours inside it
+            ("MT304", "11:00", "11:55"),   # one hour inside that
+        ):
+            self._session(course, "MONDAY", start, end)
+        merged = self._merged()
+        flowable = _DayFlowable(
+            [e for e in merged if e["day"] == "MONDAY"],
+            "MONDAY",
+            list(range(7, 20)),
+            60.0,
+            46,
+        )
+        boxes = flowable.boxes
+        for i, first in enumerate(boxes):
+            for second in boxes[i + 1:]:
+                share_columns = (
+                    first["col"] < second["col"] + second["colspan"]
+                    and second["col"] < first["col"] + first["colspan"]
+                )
+                if not share_columns:
+                    continue
+                self.assertFalse(
+                    first["top"] < second["bottom"] and second["top"] < first["bottom"],
+                    f"boxes overlap: {first} and {second}",
+                )
+
+    def test_every_stacked_pair_is_separated_by_the_block_gap(self):
+        """No two blocks ever touch: a clear margin is always reserved.
+
+        The packer, not the renderer, is what reserves the space, so this holds
+        for any data -- including blocks that only partly share columns.
+        """
+        for hour in (8, 9, 10):
+            for i in range(3):
+                self._session(
+                    f"MT{760 + hour}{i}", "MONDAY",
+                    f"{hour:02d}:00", f"{hour:02d}:55",
+                )
+        self._session("MT790", "MONDAY", "08:00", "10:55")
+        merged = self._merged()
+        flowable = _DayFlowable(
+            [e for e in merged if e["day"] == "MONDAY"],
+            "MONDAY",
+            list(range(7, 20)),
+            60.0,
+            46,
+        )
+        gap = _DayFlowable.BLOCK_GAP
+        self.assertGreater(gap, 0.0)
+        checked = 0
+        for i, first in enumerate(flowable.boxes):
+            for second in flowable.boxes[i + 1:]:
+                share_columns = (
+                    first["col"] < second["col"] + second["colspan"]
+                    and second["col"] < first["col"] + first["colspan"]
+                )
+                if not share_columns:
+                    continue
+                upper, lower = sorted((first, second), key=lambda b: b["top"])
+                if lower["top"] < upper["bottom"]:
+                    continue  # side by side, not stacked
+                self.assertGreaterEqual(
+                    lower["top"] - upper["bottom"], gap - 1e-6,
+                    f"only {lower['top'] - upper['bottom']}pt clear",
+                )
+                checked += 1
+        self.assertGreater(checked, 0, "fixture produced no stacked pairs")
+
+    def test_cell_leading_leaves_the_lines_readable(self):
+        """Consecutive lines of a session get real breathing room.
+
+        A block's height is derived from the leading, so this is what stops the
+        fields of a session reading as one jammed-together paragraph.
+        """
+        self.assertGreater(_DayFlowable.LEADING, _DayFlowable.CELL_SIZE)
+        self.assertGreaterEqual(
+            _DayFlowable.LEADING / _DayFlowable.CELL_SIZE, 1.2
+        )
+        self._session("CL111", "MONDAY", "08:00", "08:55", venue=False)
+        merged = self._merged()
+        flowable = _DayFlowable(
+            [e for e in merged if e["day"] == "MONDAY"],
+            "MONDAY",
+            list(range(7, 20)),
+            60.0,
+            46,
+        )
+        box = flowable.boxes[0]
+        self.assertEqual(
+            box["bottom"] - box["top"],
+            len(box["lines"]) * _DayFlowable.LEADING + 2 * _DayFlowable.PAD_Y,
+        )
+        # The block is tall enough for its lines plus the padding, and every
+        # line sits LEADING apart rather than jammed against the next.
+        self.assertGreaterEqual(len(box["lines"]), 3)
+        self.assertEqual(
+            box["bottom"] - box["top"],
+            len(box["lines"]) * _DayFlowable.LEADING + 2 * _DayFlowable.PAD_Y,
+        )
+
     def test_bands_appear_in_week_order_and_carry_day_labels(self):
         for day in ("FRIDAY", "MONDAY", "WEDNESDAY"):
             self._session(f"MT{800 + len(day)}", day, "08:00", "08:55")
@@ -3684,34 +3972,186 @@ class MasterTimetableExportTests(TestCase):
     def test_a_day_with_no_sessions_gets_no_band(self):
         self._session("MT601", "MONDAY", "08:00", "08:55")
         merged = self._merged()
-        bands, _slots = _build_week_masonry(merged, col_width=60.0, day_width=46)
+        day_flowables, _slots = _build_day_flowables(
+            merged, col_width=60.0, day_width=46
+        )
         self.assertEqual([flowable.day_label for flowable in day_flowables], ["Monday"])
 
-    def test_split_breaks_between_days(self):
-        """Days continue into one another; only a full page forces a break."""
-        for day in ("MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY"):
-            self._session(f"MT{810 + len(day)}", day, "08:00", "08:55")
+    def test_split_breaks_between_blocks_and_never_through_one(self):
+        """A too-tall day is broken in the gap between two blocks.
+
+        The whole point of the export is that no session is ever sliced through
+        the middle and shown half on one page, half on the next. Every block
+        must come out whole, exactly once, across the pieces.
+        """
+        for i in range(60):
+            self._session(f"MT{1000 + i}", "MONDAY", "08:00", "08:55")
         merged = self._merged()
-        day_flowables, slots = _build_day_flowables(merged, col_width=60.0, day_width=46)
-        # With day-by-day flowables, days don't split - they move to next page
-        # Test that each day can be placed independently
-        for flowable in day_flowables:
-            whole = flowable.split(1000, 5000)
-            self.assertEqual(len(whole), 1)
-        self.assertEqual(len(whole), 1)
-        self.assertEqual(len(whole[0].bands), 5)
-        # Room for two days only: the rest continues on the next page.
-        two_days = sum(b["height"] for b in bands[:2])
-        pieces = flowable.split(1000, two_days + 1)
-        self.assertEqual(len(pieces), 2)
-        self.assertEqual(
-            [b["label"] for b in pieces[0].bands],
-            ["Monday", "Tuesday"],
+        day_flowables, _slots = _build_day_flowables(
+            merged, col_width=60.0, day_width=46
         )
+        self.assertEqual(len(day_flowables), 1)
+        monday = day_flowables[0]
+        self.assertGreater(monday.height, 700.0)
+
+        pieces = monday.split(1000, 700.0)
+        self.assertGreater(len(pieces), 1)
+        self.assertLessEqual(pieces[0].height, 700.0 + 0.01)
+        # The continuation is the same day, and the day's name is written on
+        # exactly one of the two pages.
+        self.assertEqual(pieces[1].day_label, monday.day_label)
         self.assertEqual(
-            [b["label"] for b in pieces[1].bands],
-            ["Wednesday", "Thursday", "Friday"],
+            [p._label_offset() is not None for p in pieces].count(True), 1
         )
+        # Every page keeps a bounded day-label column, so a day carried over
+        # from the previous page never looks cut off down its side.
+        for piece in pieces:
+            self.assertGreater(piece.day_width, 0)
+        # The two pages abut in whole-day coordinates: no gap and no overlap.
+        self.assertAlmostEqual(
+            pieces[1].day_offset, pieces[0].day_offset + pieces[0].height
+        )
+
+        # Drive reportlab's own loop: keep splitting whatever is still too tall
+        # and check that every block lands whole on exactly one page.
+        pages, queue, guard = [], list(pieces), 0
+        while queue:
+            guard += 1
+            self.assertLess(guard, 50, "splitting did not converge")
+            piece = queue.pop(0)
+            if piece.height <= 700.0:
+                pages.append(piece)
+                continue
+            queue = list(piece.split(1000, 700.0)) + queue
+        self.assertGreater(len(pages), 1)
+        seen = []
+        for page in pages:
+            self.assertLessEqual(page.height, 700.0 + 0.01)
+            for box in page.boxes:
+                self.assertGreaterEqual(box["top"], -0.01)
+                seen.append((tuple(box["lines"]), box["colspan"]))
+        # Nothing lost, nothing duplicated: 60 distinct blocks, once each.
+        self.assertEqual(len(seen), 60)
+        self.assertEqual(len(set(seen)), 60)
+        # The day's name is written on exactly one page, never repeated.
+        self.assertEqual(
+            sum(1 for page in pages if page._label_offset() is not None), 1
+        )
+        # And no page overlaps the next in whole-day coordinates.
+        for earlier, later in zip(pages, pages[1:]):
+            self.assertGreaterEqual(
+                later.day_offset, earlier.day_offset + earlier.height - 0.01
+            )
+
+    def test_a_day_with_no_room_left_moves_whole_to_the_next_page(self):
+        """With no space left, nothing is drawn and the day carries over."""
+        for i in range(40):
+            self._session(f"MT{1100 + i}", "MONDAY", "08:00", "08:55")
+        merged = self._merged()
+        day_flowables, _slots = _build_day_flowables(
+            merged, col_width=60.0, day_width=46
+        )
+        monday = day_flowables[0]
+        # Too little room for even the first block: reportlab is told "nothing
+        # here", so it starts the day again on a fresh page, whole.
+        self.assertEqual(monday.split(1000, 4.0), [])
+        # And given a full page it is placed in one piece.
+        self.assertEqual(monday.split(1000, 5000), [monday])
+
+    def test_a_day_starts_on_a_page_that_still_has_room(self):
+        """A day must use the space left on a page, not skip to the next one.
+
+        Regression: a cut line was rejected whenever ANY block crossed it, even
+        one in a different hour column that is drawn alongside and cannot
+        collide. A densely packed day is a staircase where the tallest block in
+        every prefix crosses the next line, so no line qualified at all and the
+        whole day jumped to a fresh page, leaving the space below it empty.
+        """
+        # Three hours, three different block heights, three rows: the day packs
+        # as a staircase, where the tallest block in every prefix crosses the
+        # next candidate line. Built as plain entries so the shape is exact.
+        def entry(course, hour, n_lines):
+            return {
+                "key": ("session", course), "day": "MONDAY", "hours": {hour},
+                "label": course, "kind": "lecture", "course_code": course,
+                "name": course, "type_label": "Lecture",
+                "venue": "R217" if n_lines >= 4 else None,
+                "start": "08:00", "end": "08:55",
+                "groups": "EE C1" if n_lines >= 5 else "ALL", "note": "",
+            }
+
+        rows = [
+            entry(course, hour, n_lines)
+            for repeat in range(3)
+            for course, hour, n_lines in (
+                ("MT20%d" % (1 + repeat), 8, 3),
+                ("MT30%d" % (1 + repeat), 10, 4),
+                ("MT40%d" % (1 + repeat), 12, 5),
+            )
+        ]
+        monday = _DayFlowable(rows, "Monday", list(range(7, 20)), 60.0, 46)
+        gap = _DayFlowable.BLOCK_GAP
+        spaces = (120.0, 100.0, 80.0, 60.0)
+        # The day is a staircase, and every line is crossed by a block in
+        # another column -- so a cut exists only because crossing is allowed.
+        self.assertGreater(monday.height, max(spaces))
+        self.assertGreater(
+            sum(1 for space in spaces if len(monday.split(1000, space)) > 1),
+            0,
+            "no space in the fixture forces a split, so it proves nothing",
+        )
+
+        for space in spaces:
+            # How much of the day this space can actually hold, derived
+            # independently: the highest line that collides with nothing in a
+            # shared column and does not overflow.
+            best = None
+            for level in sorted({b["top"] for b in monday.boxes}):
+                above = [b for b in monday.boxes if b["top"] < level]
+                below = [b for b in monday.boxes if b["top"] >= level]
+                if not above or not below:
+                    continue
+                content = max(b["bottom"] for b in above)
+                if content + gap > space:
+                    continue
+                collides = any(
+                    a["col"] < c["col"] + c["colspan"]
+                    and c["col"] < a["col"] + a["colspan"]
+                    and a["bottom"] > c["top"]
+                    for a in above
+                    for c in below
+                )
+                if collides:
+                    continue
+                margin = gap if content + gap <= level else 0.0
+                best = content + margin
+            pieces = monday.split(1000, space)
+            if best is None:
+                # Nothing fits: the day moves whole to a fresh page.
+                self.assertEqual(pieces, [monday])
+                continue
+            # The day starts here and the first page takes the most it can.
+            self.assertGreaterEqual(len(pieces), 2)
+            self.assertAlmostEqual(pieces[0].height, best)
+            self.assertLessEqual(pieces[0].height, space)
+            # Every block is on exactly one page, and none collides across a
+            # seam in a column they share.
+            self.assertEqual(sum(len(p.boxes) for p in pieces), len(monday.boxes))
+            for first, second in zip(pieces, pieces[1:]):
+                for a in first.boxes:
+                    for c in second.boxes:
+                        share = (
+                            a["col"] < c["col"] + c["colspan"]
+                            and c["col"] < a["col"] + a["colspan"]
+                        )
+                        if not share:
+                            continue
+                        self.assertLessEqual(
+                            a["bottom"] + first.day_offset,
+                            c["top"] + second.day_offset,
+                            f"blocks collide across the seam: {a} / {c}",
+                        )
+                self.assertGreaterEqual(second.day_offset, first.day_offset)
 
     def test_split_keeps_every_block_exactly_once(self):
         """Splitting must never drop or duplicate a block."""
@@ -3731,66 +4171,23 @@ class MasterTimetableExportTests(TestCase):
             after = len(pieces[0].boxes)
             self.assertEqual(before, after)
 
-    def test_a_day_taller_than_a_page_moves_to_next_page(self):
-        """A day that doesn't fit moves to the next page instead of being cut."""
-        for i in range(60):
-            self._session(f"MT{1000 + i}", "MONDAY", "08:00", "08:55")
-        merged = self._merged()
-        day_flowables, slots = _build_day_flowables(merged, col_width=60.0, day_width=46)
-        self.assertEqual(len(day_flowables), 1)
-        monday = day_flowables[0]
-        self.assertGreater(monday.height, 700.0)
-        # A day that doesn't fit should return empty split (move to next page)
-        pieces = monday.split(1000, 700.0)
-        self.assertEqual(len(pieces), 0)
-        # Every piece still says Monday, so the day names itself on each page.
-        for piece in pieces:
-            for band in piece.bands:
-                self.assertEqual(band["label"], "Monday")
-        # And the split respects the page height it was given.
-        for piece in pieces:
-            for band in piece.bands:
-                self.assertLessEqual(band["height"], 700.0 + 0.01)
-        # No block is lost or duplicated by the cut.
-        self.assertEqual(
-            sum(len(b["boxes"]) for p in pieces for b in p.bands),
-            len(bands[0]["boxes"]),
-        )
-
-    def test_cut_band_rebases_boxes_onto_their_new_chunk(self):
-        band = {
-            "label": "Monday",
-            "height": 300.0,
-            "boxes": [
-                {"col": 0, "colspan": 1, "top": 0.0, "bottom": 30.0,
-                 "lines": ["a"], "fill": "#fff"},
-                {"col": 0, "colspan": 1, "top": 30.0, "bottom": 60.0,
-                 "lines": ["b"], "fill": "#fff"},
-                {"col": 0, "colspan": 1, "top": 60.0, "bottom": 90.0,
-                 "lines": ["c"], "fill": "#fff"},
-            ],
-        }
-        chunks = _cut_band(band, 70.0)
-        self.assertEqual(len(chunks), 2)
-        self.assertEqual([b["lines"][0] for b in chunks[0]["boxes"]], ["a", "b"])
-        self.assertEqual([b["lines"][0] for b in chunks[1]["boxes"]], ["c"])
-        # Each chunk starts at zero and its height is its own stack.
-        self.assertEqual(chunks[0]["boxes"][0]["top"], 0.0)
-        self.assertAlmostEqual(chunks[0]["height"], 60.0)
-        self.assertEqual(chunks[1]["boxes"][0]["top"], 0.0)
-        self.assertAlmostEqual(chunks[1]["height"], 30.0)
-
-    def test_the_week_flowable_reports_its_full_size(self):
+    def test_the_day_flowable_reports_its_full_size(self):
         for day in ("MONDAY", "TUESDAY"):
             self._session(f"MT{1100 + len(day)}", day, "08:00", "08:55")
         merged = self._merged()
         day_flowables, slots = _build_day_flowables(merged, col_width=60.0, day_width=46)
-        # Test that day flowables report their correct size
+        # Every day flowable reports its own width and height.
         for flowable in day_flowables:
             width, height = flowable.wrap(10000, 10000)
             self.assertAlmostEqual(width, 46 + 60 * len(slots))
             self.assertGreater(height, 0)
-        self.assertAlmostEqual(height, sum(b["height"] for b in bands))
+            # The band is exactly as tall as the blocks it holds, plus the
+            # margin that separates it from the next day.
+            self.assertAlmostEqual(
+                height,
+                max(box["bottom"] for box in flowable.boxes)
+                + _DayFlowable.BLOCK_GAP,
+            )
 
     def test_export_draws_the_day_labels_rotated(self):
         """The day column is drawn through a rotated canvas, not as text."""
@@ -3844,6 +4241,121 @@ class MasterTimetableExportTests(TestCase):
         pdf, _pages, _calls = self._render()
         self.assertTrue(pdf.startswith(b"%PDF-"))
         self.assertIn(b"Master Timetable", pdf)
+
+    def test_page_is_a4_landscape_so_it_needs_no_sideways_scrolling(self):
+        """The grid must fit the page at 100% zoom.
+
+        Regression: the export was A3 landscape, whose 1191pt width is far more
+        than thirteen short hour columns need, so the reader had to scroll
+        sideways to see the timetable at all.
+        """
+        self._session("AR111", "MONDAY", "08:00", "12:55")
+        pdf, _pages, _calls = self._render()
+        boxes = re.findall(rb"/MediaBox\s*\[\s*([\d.\-]+)\s+([\d.\-]+)\s+"
+                           rb"([\d.\-]+)\s+([\d.\-]+)\s*\]", pdf)
+        self.assertTrue(boxes, "no MediaBox in the PDF")
+        widths = {round(float(b[2])) for b in boxes}
+        heights = {round(float(b[3])) for b in boxes}
+        self.assertEqual(widths, {842})
+        self.assertEqual(heights, {595})
+
+    def test_footer_names_the_portal_the_date_and_the_page_on_every_page(self):
+        """Every page carries the provenance line and its own page number."""
+        import datetime as _dt
+
+        self._busy_week()
+        pdf, pages, _calls = self._render()
+        self.assertGreater(pages, 1, "this fixture must span more than one page")
+        content = b"\n".join(self._page_streams(pdf)).decode("latin-1")
+        # Once per page: the line, and a page number counting 1..n.
+        self.assertEqual(content.count("Generated from"), pages)
+        self.assertEqual(content.count("CoET Timetable Portal"), pages)
+        for number in range(1, pages + 1):
+            self.assertIn(f"(Page {number})", content)
+        self.assertNotIn(f"(Page {pages + 1})", content)
+        # Today's date, written out, on every page.
+        self.assertEqual(
+            content.count(_dt.date.today().strftime("%d %B %Y")), pages
+        )
+
+    def test_portal_name_is_a_link_back_to_the_site(self):
+        """The portal name in the footer is a live link, once per page."""
+        from io import BytesIO
+
+        buf = BytesIO()
+        render_udsm_master_timetable(
+            collect_master_entries(self.sem), self.sem, 1, out=buf,
+            portal_url="http://example.test/",
+        )
+        pdf = buf.getvalue()
+        self.assertEqual(pdf.count(b"/URI (http://example.test/)"),
+                         len(re.findall(rb"/Type\s*/Page[^s]", pdf)))
+
+    def test_export_view_passes_its_own_address_as_the_portal_link(self):
+        """The download view hands the renderer the site it was served from."""
+        resp = self.client.get(
+            "/export/all-programmes/timetable.pdf/",
+            {"semester": self.sem.pk, "year": "1"},
+            HTTP_HOST="timetable.test",
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp["Content-Type"], "application/pdf")
+        # The portal name in the footer links back to this very host.
+        self.assertIn(b"/URI (http://timetable.test/)", resp.content)
+
+    def test_every_day_is_closed_by_a_boundary_rule(self):
+        """Each day band is closed by one rule, not left hanging open.
+
+        Regression: the day frame stroked a heavy rule along the top but none
+        along the bottom, so the hour columns trailed away into nothing under
+        the last block. One heavy rule along the bottom edge closes the band
+        and doubles as the separator from the day that follows it.
+        """
+        for day in ("MONDAY", "TUESDAY", "WEDNESDAY"):
+            self._session(f"MT{1300 + len(day)}", day, "08:00", "08:55")
+        pdf, _pages, _calls = self._render()
+        content = b"\n".join(self._page_streams(pdf)).decode("latin-1")
+
+        # reportlab writes "w" for a line width, then "x1 y1 m x2 y2 l S".
+        width = None
+        rules = []
+        for match in re.finditer(
+            r"([\d.]+) w|n ([\d.]+) ([\d.]+) m ([\d.]+) ([\d.]+) l S", content
+        ):
+            if match.group(1) is not None:
+                width = float(match.group(1))
+                continue
+            x1, y1, x2, y2 = (float(match.group(i)) for i in (2, 3, 4, 5))
+            if width and width > 1.0 and abs(y1 - y2) < 0.01 and abs(x1 - x2) > 1:
+                rules.append((x1, y1, x2))
+        # Exactly one heavy rule per day band, drawn at y = 0 inside the band's
+        # own coordinate space. Three days therefore produce three rules -- not
+        # six, because the same rule separates one day from the next instead of
+        # every band stroking a line along both of its edges.
+        self.assertEqual(len(rules), 3, rules)
+        for x1, y1, x2 in rules:
+            # The rule sits in the middle of the band's trailing margin, so it
+            # stands equally clear of the day above and the day below.
+            self.assertAlmostEqual(y1, _DayFlowable.BLOCK_GAP / 2.0)
+            # The rule spans the whole grid, day-label column included, so no
+            # hour column is ever left hanging open-ended. The page is A4
+            # landscape, so the grid ends just short of 842pt.
+            self.assertAlmostEqual(x1, 0.0)
+            self.assertGreater(x2, 700.0)
+            self.assertLess(x2, 841.89)
+
+    def test_a_continued_day_does_not_repeat_its_name(self):
+        """A day carried onto the next page does not name itself again."""
+        for i in range(60):
+            self._session(f"MT{1400 + i}", "MONDAY", "08:00", "08:55")
+        self._session("MT1500", "TUESDAY", "08:00", "08:55")
+        pdf, pages, _calls = self._render()
+        content = b"\n".join(self._page_streams(pdf)).decode("latin-1")
+        self.assertGreater(pages, 1, "this fixture must span more than one page")
+        # The name is written exactly once for the whole export, however many
+        # pages the day runs on to.
+        self.assertEqual(content.count("(Monday)"), 1)
+        self.assertEqual(content.count("(Tuesday)"), 1)
 
     def test_year_of_study_appears_in_the_subtitle(self):
         from io import BytesIO
