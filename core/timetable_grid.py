@@ -16,6 +16,8 @@ templates and the PDF can shade Lecture (grey), Workshop (green) and Technical
 Drawing (pink).
 """
 
+from xml.sax.saxutils import escape
+
 from core.models import Day
 
 DAY_ORDER = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY"]
@@ -44,6 +46,55 @@ FILL_COLORS = {
 }
 _FILL_PRIORITY = ["td", "workshop", "lecture", "tutorial", "seminar", "practical"]
 
+# The assigned-groups line is emphasised wherever it is drawn, so a reader can
+# pick out who attends a session without reading every field. Kept here so the
+# grid builder and the PDF renderers cannot drift apart on the colour.
+GROUPS_STYLE = {"color": "#0b4f9e", "font": "Helvetica-BoldOblique"}
+_GROUPS_MARKUP = '<font color="{color}"><b><i>@@</i></b></font>'
+
+
+def _entry_cell_lines(e, show_groups):
+    """One entry's cell text as a list of ``(text, is_groups)`` lines.
+
+    The groups line is whichever line *is* the entry's own group list, which
+    covers all three shapes: a session and a technical drawing carry it inside
+    their label, while a workshop has it appended as its own line. Matching on
+    the value rather than on position means the styling never has to assume
+    the groups are the last line. ``ALL`` counts -- it says who attends just as
+    much as a list of codes does.
+    """
+    bits = [e["label"]]
+    note = e.get("note")
+    if note:
+        bits.append(str(note))
+    if e.get("kind") == "workshop":
+        venue = e.get("venue")
+        if venue and venue != e.get("name"):
+            bits.append(str(venue))
+        if show_groups and e.get("groups"):
+            bits.append(str(e["groups"]))
+    groups = str(e["groups"]).strip() if e.get("groups") else ""
+    return [
+        (line, bool(groups) and line.strip() == groups)
+        for line in " · ".join(bits).split("\n")
+    ]
+
+
+def _cell_blocks(entries, show_groups):
+    """A cell's entries, de-duplicated, each a list of ``(text, is_groups)``."""
+    seen = set()
+    blocks = []
+    for same in _by_label(entries).values():
+        for e in same:
+            lines = _entry_cell_lines(e, show_groups)
+            text = "\n".join(part for part, _ in lines)
+            if text in seen:
+                continue
+            seen.add(text)
+            blocks.append(lines)
+    return blocks
+
+
 def cell_text(entries, show_groups=False):
     """Render one cell's entries as a compact multi-line label.
 
@@ -53,29 +104,29 @@ def cell_text(entries, show_groups=False):
     group code are appended so the reader can tell entries apart. Exact
     duplicate text is shown only once.
     """
-    def render(e):
-        bits = [e["label"]]
-        note = e.get("note")
-        if note:
-            bits.append(str(note))
-        if e.get("kind") == "workshop":
-            venue = e.get("venue")
-            if venue and venue != e.get("name"):
-                bits.append(str(venue))
-            if show_groups and e.get("groups"):
-                bits.append(str(e["groups"]))
-        return " · ".join(bits)
+    return "\n\n".join(
+        "\n".join(part for part, _ in block)
+        for block in _cell_blocks(entries, show_groups)
+    )
 
-    seen = set()
-    lines = []
-    for same in _by_label(entries).values():
-        for e in same:
-            text = render(e)
-            if text in seen:
-                continue
-            seen.add(text)
-            lines.append(text)
-    return "\n\n".join(lines)
+
+def cell_markup(entries, show_groups=False):
+    """The same cell text as reportlab Paragraph markup, groups emphasised.
+
+    Identical to :func:`cell_text` except that the assigned-groups line carries
+    :data:`GROUPS_STYLE` and every other part is XML-escaped, so a venue
+    containing ``&`` or ``<`` can never be read as a tag.
+    """
+    blocks = []
+    for block in _cell_blocks(entries, show_groups):
+        parts = []
+        for text, is_groups in block:
+            safe = escape(text)
+            if is_groups:
+                safe = _GROUPS_MARKUP.format(**GROUPS_STYLE).replace("@@", safe)
+            parts.append(safe)
+        blocks.append("<br/>".join(parts))
+    return "<br/><br/>".join(blocks)
 
 
 def _by_label(entries):
@@ -317,19 +368,24 @@ def fill_color(entries):
     return "#ffffff"
 
 
-def time_day_grid_to_table(grid, show_groups=False):
+def time_day_grid_to_table(grid, show_groups=False, markup=False):
     """Flatten a grid for reportlab's Table.
 
     Column 0 is the TIME column; columns 1..n are weekdays. Returns
     (data, spans, fills); ``spans`` are vertical SPAN commands for merged
     session blocks and ``fills`` carries one BACKGROUND command per block,
     colour-coded by session type.
+
+    Cell text is plain by default. With ``markup=True`` each cell comes back as
+    ready-made Paragraph markup via :func:`cell_markup`, which emphasises the
+    assigned-groups line -- the caller must then NOT escape it again.
     """
     day_headers = grid["days"]
     rows = grid["rows"]
     if not day_headers:
         return [["TIME", "DAY"]], [], []
 
+    render = cell_markup if markup else cell_text
     data = [["TIME"] + [d["day"] for d in day_headers]]
     for row in rows:
         line = [row["slot"]["label"]]
@@ -337,7 +393,7 @@ def time_day_grid_to_table(grid, show_groups=False):
             if cell is None or cell.get("empty"):
                 line.append("")
             else:
-                line.append(cell_text(cell["entries"], show_groups=show_groups))
+                line.append(render(cell["entries"], show_groups=show_groups))
         data.append(line)
 
     spans = []

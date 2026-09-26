@@ -39,14 +39,18 @@ from core.models import (
 )
 from core.timetable_grid import (
     FILL_COLORS,
+    GROUPS_STYLE,
     build_day_time_grid,
     build_time_day_grid,
+    cell_markup,
+    cell_text,
     time_day_grid_to_table,
 )
 from core.timetable_pdf import (
     _build_day_flowables,
     _compact_group_codes,
     _entry_lines,
+    _entry_parts,
     _master_cell_text,
     _merge_master_entries,
     _wrap_line,
@@ -56,6 +60,7 @@ from core.timetable_pdf import (
     collect_group_entries,
     collect_master_entries,
     collect_workshop_rotations,
+    fold_for_display,
     render_group_timetable,
     render_programme_timetable,
     render_udsm_master_timetable,
@@ -3455,6 +3460,37 @@ class MasterTimetableExportTests(TestCase):
         ][0]
         self.assertEqual(block["groups"], "C1")
 
+    def test_every_listed_whole_cohort_course_reads_all(self):
+        """The courses the timetable names: SC121, MT161, MT171, CL111, DS114, DS115.
+
+        Each of these also runs per-group tutorials and seminars, so this checks
+        the LECTURE rows only -- the per-group rows of the same course must keep
+        naming their own groups.
+        """
+        for course in ("SC121", "MT161", "MT171", "CL111", "DS114", "DS115"):
+            with self.subTest(course=course):
+                Session.objects.filter(course_code=course).delete()
+                self._session(
+                    course, "MONDAY", "08:00", "09:55",
+                    groups=[self.ee_c1], activity_type="LECTURE",
+                )
+                block = [
+                    e for e in self._merged() if e["course_code"] == course
+                ][0]
+                self.assertEqual(block["groups"], "ALL", course)
+                self.assertEqual(_entry_parts(block)[-1], ("ALL", True), course)
+
+                # The same course's tutorial is per-group and stays that way.
+                self._session(
+                    course, "TUESDAY", "10:00", "10:55",
+                    groups=[self.ee_c1], activity_type="TUTORIAL",
+                )
+                tutorial = [
+                    e for e in self._merged()
+                    if e["course_code"] == course and e["kind"] == "tutorial"
+                ][0]
+                self.assertEqual(tutorial["groups"], "C1", course)
+
     def test_other_lectures_still_list_their_groups(self):
         self._session(
             "QS125", "MONDAY", "09:00", "10:55", groups=[self.ee_c1, self.ee_c2],
@@ -3501,8 +3537,11 @@ class MasterTimetableExportTests(TestCase):
         self.assertEqual(blocks[0]["type_label"], "Workshop")
         self.assertEqual(blocks[0]["groups"], "C1, C2, A1")
         self.assertEqual(blocks[0]["hours"], {9, 10, 11, 12})
+        # Type, the time it runs, then the groups -- like every other block.
         text = _master_cell_text(blocks, show_groups=True)
-        self.assertEqual(text.split("\n"), ["Workshop", "C1, C2, A1"])
+        self.assertEqual(
+            text.split("\n"), ["Workshop", "09:00\u201313:00", "C1, C2, A1"]
+        )
         for detail in ("Carpentry", "Welding", "Masonry", "Workshop Shed"):
             self.assertNotIn(detail, text)
 
@@ -3515,7 +3554,9 @@ class MasterTimetableExportTests(TestCase):
         self.assertEqual(blocks[0]["type_label"], "Workshop")
         self.assertEqual(blocks[0]["groups"], "C1, C2, A1")
         text = _master_cell_text(blocks, show_groups=True)
-        self.assertEqual(text.split("\n"), ["Workshop", "C1, C2, A1"])
+        self.assertEqual(
+            text.split("\n"), ["Workshop", "09:00\u201313:00", "C1, C2, A1"]
+        )
         for detail in ("Carpentry", "Workshop Shed"):
             self.assertNotIn(detail, text)
 
@@ -3604,6 +3645,187 @@ class MasterTimetableExportTests(TestCase):
         entry = self._blocks("lecture")[0]
         for field in ("Lecture", "08:00–09:55", "R217", "EE150"):
             self.assertIn(field, _entry_lines(entry))
+
+    # -- 3c. the assigned-groups line is emphasised -----------------------
+    def test_the_groups_line_is_the_only_emphasised_one(self):
+        """Blue/bold/italic marks the groups, and nothing else.
+
+        The flag is decided where the field order is decided, so it identifies
+        the line by matching the entry's own group list rather than by assuming
+        it comes last.
+        """
+        self._session(
+            "EE150", "MONDAY", "08:00", "09:55",
+            groups=[self.ee_c1, self.ee_c2],
+        )
+        parts = _entry_parts(self._blocks("lecture")[0])
+        self.assertEqual(
+            [text for text, _ in parts],
+            ["Lecture", "08:00\u201309:55", "R217", "EE150", "C1, C2"],
+        )
+        self.assertEqual([flag for _, flag in parts], [False] * 4 + [True])
+
+    def test_a_technical_drawing_states_its_time_and_emphasises_its_groups(self):
+        """A TD block reads type, time, groups -- and the time is stated."""
+        self._td("ME101", "C1", "MONDAY", "09:00", "12:00")
+        self._td("ME101", "C2", "MONDAY", "09:00", "12:00")
+        parts = _entry_parts(self._blocks("td")[0])
+        self.assertEqual(
+            [text for text, _ in parts],
+            ["Technical Drawing", "09:00\u201312:00", "C1, C2"],
+        )
+        self.assertEqual([flag for _, flag in parts], [False, False, True])
+
+    def test_a_workshop_states_its_time(self):
+        """A workshop states the time it runs, like any other block."""
+        self._workshop("Carpentry", "C1", "MONDAY", "08:00", "11:00")
+        parts = _entry_parts(self._blocks("workshop")[0])
+        self.assertEqual(
+            [text for text, _ in parts],
+            ["Workshop", "08:00\u201311:00", "C1"],
+        )
+        self.assertEqual([flag for _, flag in parts], [False, False, True])
+
+    def test_a_workshop_without_clock_times_invents_none(self):
+        """A period-only workshop (raw matrix import) states no clock time.
+
+        Its hours are only known as grid slots, so no "09:00-13:00" is
+        fabricated; the block simply omits the line.
+        """
+        entry = {
+            "kind": "workshop", "course_code": "Carpentry", "name": "Carpentry",
+            "type_label": "Workshop", "groups": "C1", "hours": {9, 10, 11, 12},
+            "label": "Carpentry", "venue": "", "note": "",
+            "start": "", "end": "",
+        }
+        parts = _entry_parts(entry)
+        self.assertEqual([text for text, _ in parts], ["Workshop", "C1"])
+        self.assertEqual([flag for _, flag in parts], [False, True])
+
+    def test_a_whole_cohort_lecture_writes_all_as_its_group_line(self):
+        """A whole-cohort lecture says so on the page, not by going silent.
+
+        The ``ALL`` marker is the assigned group, so it is drawn and emphasised
+        exactly like a list of codes.
+        """
+        self._session(
+            "QS125", "MONDAY", "09:00", "10:55",
+            groups=[self.ee_c1, self.ee_c2, self.ce_a1, self.ce_a2],
+        )
+        block = self._blocks("lecture")[0]
+        self.assertEqual(block["groups"], "ALL")
+        parts = _entry_parts(block)
+        self.assertEqual(parts[-1], ("ALL", True))
+        for code in ("C1", "C2", "A1", "A2"):
+            self.assertNotIn(code, " ".join(text for text, _ in parts))
+
+    def test_a_block_with_no_groups_emphasises_nothing(self):
+        self._session("EE150", "MONDAY", "08:00", "09:55")
+        parts = _entry_parts(self._blocks("lecture")[0])
+        self.assertTrue(all(not flag for _text, flag in parts))
+
+    def test_the_emphasis_survives_wrapping(self):
+        """A group list too wide for its box stays emphasised once wrapped."""
+        entry = {
+            "kind": "workshop", "course_code": "Carpentry", "name": "Carpentry",
+            "type_label": "Workshop",
+            "groups": " ".join("EE%d" % i for i in range(1, 14)),
+            "hours": {8}, "label": "Carpentry", "venue": "", "note": "",
+            "start": "", "end": "",
+        }
+        flowable = _DayFlowable([entry], "Monday", list(range(7, 20)), 40.0, 22)
+        lines = flowable.boxes[0]["lines"]
+        self.assertGreater(len(lines), 2, "the group list should have wrapped")
+        self.assertFalse(lines[0][1], "the heading must not be emphasised")
+        self.assertTrue(all(flag for _text, flag in lines[1:]))
+
+    def test_cell_markup_emphasises_groups_and_escapes_the_rest(self):
+        """The classic export styles the groups and escapes every other part."""
+        entry = {
+            "kind": "lecture", "course_code": "R&D <lab>", "name": "R&D <lab>",
+            "type_label": "Lecture", "start": "08:00", "end": "08:55",
+            "venue": "A & B", "groups": "EE C1, C2", "hours": {8},
+            "label": "R&D <lab> Lecture\n08:00\u201308:55\nA & B\nEE C1, C2",
+            "note": "",
+        }
+        markup = cell_markup([entry], show_groups=True)
+        self.assertIn(GROUPS_STYLE["color"], markup)
+        self.assertIn("<b><i>EE C1, C2</i></b>", markup)
+        # Dangerous characters are escaped, so they can never become tags.
+        self.assertIn("R&amp;D &lt;lab&gt;", markup)
+        self.assertIn("A &amp; B", markup)
+        self.assertNotIn("<lab>", markup)
+        # The plain-text form is unchanged and carries no markup at all.
+        self.assertEqual(
+            cell_text([entry], show_groups=True),
+            "R&D <lab> Lecture\n08:00\u201308:55\nA & B\nEE C1, C2",
+        )
+
+    def test_cell_markup_emphasises_the_all_marker(self):
+        entry = {
+            "kind": "lecture", "course_code": "QS125", "name": "QS125",
+            "type_label": "Lecture", "start": "09:00", "end": "10:55",
+            "venue": "R217", "groups": "ALL", "hours": {9},
+            "label": "QS125 Lecture\n09:00\u201310:55\nR217\nALL", "note": "",
+        }
+        markup = cell_markup([entry], show_groups=True)
+        self.assertIn("<b><i>ALL</i></b>", markup)
+        self.assertIn(GROUPS_STYLE["color"], markup)
+
+    def test_cell_markup_leaves_a_block_without_groups_untouched(self):
+        entry = {
+            "kind": "lecture", "course_code": "EE150", "name": "EE150",
+            "type_label": "Lecture", "start": "08:00", "end": "08:55",
+            "venue": "R217", "groups": "", "hours": {8},
+            "label": "EE150 Lecture\n08:00\u201308:55\nR217", "note": "",
+        }
+        markup = cell_markup([entry], show_groups=True)
+        self.assertNotIn(GROUPS_STYLE["color"], markup)
+        self.assertNotIn("<i>", markup)
+
+    def test_both_exports_really_draw_the_emphasis(self):
+        """The blue fill and the bold-oblique face reach the actual PDF bytes."""
+        from io import BytesIO
+
+        # A third EE group the session does NOT attend: without it the session
+        # would cover every group in the programme, and a block that needs no
+        # group list has nothing for the styling to emphasise.
+        ee_c3 = StudentGroup.objects.create(programme=self.ee, code="C3")
+        self._session(
+            "EE150", "MONDAY", "08:00", "09:55",
+            groups=[self.ee_c1, self.ee_c2],
+        )
+        # Folded blocks must carry a group list for the styling to have anything
+        # to emphasise, so this also guards the fold's output shape.
+        folded = fold_for_display(
+            collect_entries(self.ee, self.sem),
+            {self.ee_c1.code, self.ee_c2.code, ee_c3.code},
+        )
+        self.assertTrue(
+            [e for e in folded if e.get("groups") == "C1, C2"],
+            f"no folded block carried the group list: "
+            f"{[e.get('groups') for e in folded]}",
+        )
+
+        blue = int(GROUPS_STYLE["color"][5:7], 16) / 255
+        needle = f"{blue:.6f}".lstrip("0").encode()
+        self.assertEqual(GROUPS_STYLE["font"], "Helvetica-BoldOblique")
+
+        master = BytesIO()
+        render_udsm_master_timetable(
+            collect_master_entries(self.sem), self.sem, 1, out=master
+        )
+        self.assertIn(b"/Helvetica-BoldOblique", master.getvalue())
+
+        classic = BytesIO()
+        render_programme_timetable(self.ee, self.sem, 1, out=classic)
+        classic_pdf = classic.getvalue()
+        self.assertIn(b"/Helvetica-BoldOblique", classic_pdf)
+
+        # The blue reaches the page: it is a fill colour in a content stream.
+        for pdf in (master.getvalue(), classic_pdf):
+            content = b"\n".join(self._page_streams(pdf))
+            self.assertIn(needle, content)
 
     def test_boxes_are_padded_to_a_three_line_floor(self):
         """A short block still occupies three lines, so blocks stay uniform."""

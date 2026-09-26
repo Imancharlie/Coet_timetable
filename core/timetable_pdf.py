@@ -30,7 +30,6 @@ produce a rotation-key entry.
 """
 import datetime
 from collections import defaultdict
-from xml.sax.saxutils import escape
 
 from django.db.models import Q
 from reportlab.lib import colors
@@ -60,6 +59,7 @@ from core.models import (
 )
 from core.timetable_grid import (
     DAY_ORDER,
+    GROUPS_STYLE,
     GRID_HOUR_END,
     GRID_HOUR_START,
     WEEKEND_ORDER,
@@ -380,17 +380,6 @@ def _period_hours(time_period, day=None, programme_code=None):
     return set()
 
 
-def _cell_markup(text):
-    """Escape a cell's text for a reportlab Paragraph, keeping real line breaks.
-
-    reportlab's Paragraph treats literal newlines as spaces, so the ``\n``
-    separators used by entry labels are converted to explicit ``<br/>`` tags.
-    XML-special characters (``&``, ``<``, ``>``) are escaped first so venue or
-    course names cannot be misread as markup.
-    """
-    return escape(text).replace("\n", "<br/>")
-
-
 def _apply_year_filter(qs, year):
     if year:
         return qs.filter(Q(year_of_study__isnull=True) | Q(year_of_study=year))
@@ -552,7 +541,7 @@ def collect_workshop_rotations(programme, semester, group=None, year=None):
     ]
 
 
-def build_grid(entries, show_groups=False):
+def build_grid(entries, show_groups=False, markup=False):
     """Return table data (list of rows), SPAN commands and fill colours.
 
     Classic layout: column 0 is TIME, columns 1..n are the weekdays, row 0 is
@@ -561,10 +550,13 @@ def build_grid(entries, show_groups=False):
     blocks vertically; fills carries one BACKGROUND command per block,
     colour-coded by activity type (Lecture grey, Workshop green, TD pink).
     ``show_groups`` appends owning group codes to workshop cells (the
-    all-groups export).
+    all-groups export). ``markup`` returns cell text as Paragraph markup with
+    the assigned-groups line emphasised, already escaped.
     """
     grid = build_time_day_grid(entries, full_range=True)
-    return time_day_grid_to_table(grid, show_groups=show_groups)
+    return time_day_grid_to_table(
+        grid, show_groups=show_groups, markup=markup
+    )
 
 
 def render_programme_timetable(programme, semester, year_of_study=1, out=None):
@@ -750,7 +742,9 @@ def _render_grid(
     ]
 
     if entries:
-        data, spans, fills = build_grid(entries, show_groups=show_groups)
+        data, spans, fills = build_grid(
+            entries, show_groups=show_groups, markup=True
+        )
 
         n_days = max(len(data[0]) - 1, 1) if data else 1
         usable = A4[0] - 22 * mm
@@ -765,7 +759,10 @@ def _render_grid(
                     Paragraph(row[0], time_style) if row[0] else "",
                 ]
                 + [
-                    Paragraph(_cell_markup(cell), cell_style) if cell else ""
+                    # Cell text arrives as ready-made markup: the
+                    # assigned-groups line is already blue, bold and italic,
+                    # and every other part is already escaped.
+                    Paragraph(cell, cell_style) if cell else ""
                     for cell in row[1:]
                 ]
             )
@@ -860,37 +857,22 @@ def _semester_word(number):
 
 
 def _master_cell_text(entries, show_groups=False):
-    """Build one master-timetable cell's text from its merged entries.
+    """Build one master-timetable cell's text from its folded entries.
 
-    Each entry is one line-block in UDSM field order: the session type, the
-    time it runs, the venue, the course, and the groups. ``cell_text`` cannot
-    be reused here because it renders a single run-on line per entry and only
-    ever appends groups for workshop entries — it would print the full
-    twenty-odd group codes of a whole-cohort lecture instead of ``ALL``, and it
-    would drop the group line for every other kind.
+    Each entry is one line-block in UDSM field order, joined by a blank line:
+    the type, the time it runs, the venue, the course, and the groups. A merged
+    TD or workshop block drops the venue and course — the individual workshop
+    names would swamp the cell — but keeps its time, like every other block.
 
-    A merged TD or workshop block carries just its type and the groups
-    attending: its time is already given by the block's own columns, and the
-    individual workshop names would otherwise swamp the cell.
+    This delegates to :func:`_entry_lines`, the one place the field order is
+    decided. It used to carry its own copy of that logic, which silently drifted
+    and kept omitting the workshop time. ``show_groups`` is accepted for call
+    compatibility but a folded block always carries the group list it was given.
     """
-    blocks = []
-    for entry in entries or ():
-        if entry.get("kind") in ("td", "workshop"):
-            lines = [entry.get("type_label") or "TD"]
-            if entry.get("groups"):
-                lines.append(entry["groups"])
-        else:
-            lines = [entry.get("type_label") or entry.get("name") or "Session"]
-            start, end = entry.get("start") or "", entry.get("end") or ""
-            if start and end:
-                lines.append(f"{start}–{end}")
-            if entry.get("venue"):
-                lines.append(entry["venue"])
-            if entry.get("course_code"):
-                lines.append(entry["course_code"])
-            if show_groups and entry.get("groups"):
-                lines.append(entry["groups"])
-        blocks.append("\n".join(line for line in lines if line))
+    blocks = [
+        "\n".join(line for line in _entry_lines(entry) if line)
+        for entry in entries or ()
+    ]
     return "\n\n".join(block for block in blocks if block)
 
 
@@ -958,22 +940,29 @@ def _groups_label(codes, all_groups):
     return _compact_group_codes(codes)
 
 
-# Courses whose lectures are taken by the entire first-year cohort. Their
-# records may name only some of the groups that actually attend — a lecture is
-# not split by group — so the master timetable states "ALL" for them and never
-# lists group codes, which would misdescribe who has to attend.
-_WHOLE_COHORT_LECTURES = {"CL111", "MT161", "MT171", "ME101"}
+# Courses whose LECTURES are taken by the entire first-year cohort, and so read
+# "ALL" as their assigned group. Their records may name only some of the groups
+# that actually attend — a lecture is not split by group — so listing group codes
+# would misdescribe who has to be there.
+#
+# The rule is LECTURES ONLY. These same courses also run per-group tutorials and
+# seminars (CL111 alone has 24 seminars), and those must keep naming their own
+# groups, so the activity type is checked as well as the course code.
+_WHOLE_COHORT_LECTURES = {"CL111", "MT161", "MT171", "ME101", "SC121"}
 
 # Every lecture of a DS-prefixed course is likewise whole-cohort: the
-# development-studies service courses run once for all programmes.
+# development-studies service courses run once for all programmes. This covers
+# DS114, DS115, DS115_COET and any other DS course without listing them.
 _WHOLE_COHORT_LECTURE_PREFIXES = ("DS",)
 
 
 def _is_whole_cohort_lecture(entry):
-    """True when this lecture is open to every group regardless of its links.
+    """True when this LECTURE is open to every group whatever its links say.
 
-    Only lectures are affected. A tutorial, seminar or practical is genuinely
-    per-group, so its assigned codes are still shown.
+    Only lectures are affected: ``kind`` is the activity type lower-cased, so a
+    tutorial, seminar or practical of the very same course returns False and
+    keeps showing its own group codes. Workshop and technical-drawing blocks are
+    never whole-cohort either.
     """
     if entry.get("kind") != "lecture":
         return False
@@ -1185,12 +1174,14 @@ def _labelled_entry(entry, all_groups):
         entry["groups"] = _groups_label(codes, all_groups)
 
     if kind in ("td", "workshop"):
-        # The block's own columns already give the time, and the individual
-        # course/venue detail would swamp it: type and groups are all that is
-        # shown.
+        # Type, time and the groups: the individual course/venue detail would
+        # swamp the cell, but the time is stated like it is on every other
+        # block so a workshop reads the same way as a lecture does.
         entry["type_label"] = "Technical Drawing" if kind == "td" else "Workshop"
         entry["label"] = "\n".join(
-            part for part in (entry["type_label"], entry["groups"]) if part
+            part
+            for part in (entry["type_label"], _time_span(entry), entry["groups"])
+            if part
         )
     else:
         entry["label"] = "\n".join(
@@ -1314,22 +1305,68 @@ def _break_word(word, width, font, size):
     return pieces
 
 
-def _entry_lines(e):
-    if e.get("kind") in ("td", "workshop"):
-        lines = [e.get("type_label") or "TD"]
-        if e.get("groups") and e["groups"] != "ALL":
-            lines.append(e["groups"])
-        return lines
-    lines = [e.get("type_label") or e.get("name") or "Session"]
+def _entry_parts(e):
+    """A block's cell text as ``(text, is_groups)`` parts.
+
+    The assigned-groups line is flagged so the renderer can draw it in
+    :data:`~core.timetable_grid.GROUPS_STYLE` -- blue, bold and italic -- while
+    the type, time, venue and course lines stay plain. Marking the line here,
+    where the field order is decided, is what keeps the styling from having to
+    guess that the groups are always last.
+    """
+    parts = [(e.get("type_label") or e.get("name") or "Session", False)]
     if e.get("start") and e.get("end"):
-        lines.append(f"{e['start']}\u2013{e['end']}")
+        parts.append((_time_span(e), False))
+    if e.get("kind") in ("td", "workshop"):
+        # Type, time and groups only: the course and venue would swamp the
+        # cell, and the hour columns already place it. The time is still stated
+        # here, exactly as it is on a taught session.
+        if e.get("groups") and e["groups"] != "ALL":
+            parts.append((e["groups"], True))
+        return _flag_groups(parts, e)
     if e.get("venue"):
-        lines.append(e["venue"])
+        parts.append((e["venue"], False))
     if e.get("course_code"):
-        lines.append(e["course_code"])
-    if e.get("groups") and e["groups"] != "ALL":
-        lines.append(e["groups"])
-    return lines
+        parts.append((e["course_code"], False))
+    if e.get("groups"):
+        # Includes the "ALL" marker: a whole-cohort lecture's assigned group is
+        # the whole cohort, and the reader is told so on the page rather than
+        # left to infer it from a missing line.
+        parts.append((e["groups"], True))
+    return _flag_groups(parts, e)
+
+
+def _time_span(entry):
+    """``"08:00-11:00"`` for an entry that states its own times, else "".
+
+    Every block shows the time it runs, not only the taught sessions: a
+    workshop or a technical drawing states it too, so all blocks read alike
+    instead of leaving the reader to infer the hours from the grid columns.
+    A period-only workshop (one imported from the raw matrix workbook) has no
+    clock times of its own and is left out rather than invented.
+    """
+    if entry.get("start") and entry.get("end"):
+        return f"{entry['start']}\u2013{entry['end']}"
+    return ""
+
+
+def _flag_groups(parts, entry):
+    """Mark the line that IS the entry's group list, wherever it sits.
+
+    A whole-cohort lecture's groups line reads ``ALL``, which says who attends
+    just as much as a list of codes does, so it is emphasised as well.
+    """
+    groups = str(entry["groups"]).strip() if entry.get("groups") else ""
+    if not groups:
+        return parts
+    return [
+        (text, is_groups or text.strip() == groups) for text, is_groups in parts
+    ]
+
+
+def _entry_lines(e):
+    """A block's cell text as plain strings (see :func:`_entry_parts`)."""
+    return [text for text, _ in _entry_parts(e)]
 
 
 def _stack_order(e):
@@ -1550,15 +1587,16 @@ class _DayFlowable(Flowable):
                 continue
             span = end - start + 1
             columns = list(range(start, start + span))
-            lines = _entry_lines(e)
             inner_w = self.col_width * span - 2 * self.PAD_X
+            # Each wrapped piece keeps the is_groups flag of the field it came
+            # from, so an emphasised group list survives being wrapped.
             wrapped = [
-                piece
-                for line in lines
+                (piece, is_groups)
+                for line, is_groups in _entry_parts(e)
                 for piece in _wrap_line(line, inner_w, self.FONT, self.CELL_SIZE)
             ]
             while len(wrapped) < self.MIN_LINES:
-                wrapped.append("")
+                wrapped.append(("", False))
             height = len(wrapped) * self.LEADING + 2 * self.PAD_Y
             top = self._lowest_free(taken, columns, height)
             bottom = top + height
@@ -1748,10 +1786,18 @@ class _DayFlowable(Flowable):
             canvas.setStrokeColor(colors.black)
             canvas.setLineWidth(0.5)
             canvas.rect(left, box_bottom, box_width, box_top - box_bottom, fill=1, stroke=1)
-            canvas.setFillColor(colors.black)
-            canvas.setFont(self.FONT, self.CELL_SIZE)
             y = box_top - self.PAD_Y - self.LEADING * 0.78
-            for line in box["lines"]:
+            for line, is_groups in box["lines"]:
+                if is_groups:
+                    # The assigned groups: blue, bold and italic, so who
+                    # attends a session is readable at a glance.
+                    canvas.setFillColor(
+                        colors.HexColor(GROUPS_STYLE["color"])
+                    )
+                    canvas.setFont(GROUPS_STYLE["font"], self.CELL_SIZE)
+                else:
+                    canvas.setFillColor(colors.black)
+                    canvas.setFont(self.FONT, self.CELL_SIZE)
                 canvas.drawString(left + self.PAD_X, y, line)
                 y -= self.LEADING
         
