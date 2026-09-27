@@ -3,6 +3,10 @@ from django.contrib import admin
 from .models import (
     ActivityLog,
     ActivityType,
+    AllocationChange,
+    AllocationRun,
+    Course,
+    CourseActivityRequirement,
     Day,
     LogAction,
     Programme,
@@ -47,13 +51,27 @@ class StudentGroupAdmin(admin.ModelAdmin):
     raw_id_fields = ("programme",)
 
 
+class CourseActivityRequirementInline(admin.TabularInline):
+    model = CourseActivityRequirement
+    extra = 1
+    fields = ("activity_type", "count")
+
+
+@admin.register(Course)
+class CourseAdmin(admin.ModelAdmin):
+    list_display = ("id", "code", "name")
+    list_display_links = list_display
+    search_fields = ("code", "name")
+    inlines = [CourseActivityRequirementInline]
+
+
 @admin.register(ProgrammeCourse)
 class ProgrammeCourseAdmin(admin.ModelAdmin):
-    list_display = ("id", "programme", "course_code", "course_name", "semester")
+    list_display = ("id", "programme", "course", "semester")
     list_display_links = list_display
     list_filter = ("programme", "semester")
-    search_fields = ("course_code", "course_name", "programme__code")
-    raw_id_fields = ("programme",)
+    search_fields = ("course__code", "course__name", "course_code", "programme__code")
+    raw_id_fields = ("programme", "course")
 
 
 @admin.register(Venue)
@@ -137,3 +155,38 @@ class ActivityLogAdmin(admin.ModelAdmin):
     list_filter = ("action", "resource")
     search_fields = ("resource", "target", "message")
     readonly_fields = ("action", "resource", "target", "message", "created_at")
+
+
+class AllocationChangeInline(admin.TabularInline):
+    model = AllocationChange
+    extra = 0
+    fields = ("action", "group", "session", "course_code", "activity_type")
+    readonly_fields = fields
+    raw_id_fields = ("group", "session")
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(AllocationRun)
+class AllocationRunAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "semester",
+        "scope",
+        "status",
+        "assigned",
+        "moved",
+        "retained",
+        "removed",
+        "unresolved",
+        "created_at",
+    )
+    list_display_links = ("id",)
+    list_filter = ("semester", "scope", "status")
+    search_fields = ("semester__academic_year",)
+    readonly_fields = ("created_at", "applied_at", "reverted_at", "summary")
+    inlines = [AllocationChangeInline]
+
+    def has_add_permission(self, request):
+        return False

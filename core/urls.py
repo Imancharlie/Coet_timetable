@@ -103,6 +103,59 @@ urlpatterns = [
     path("courses/<int:pk>/", views.course_detail, name="course-detail"),
     path("courses/<int:pk>/edit/", views.course_edit, name="course-edit"),
     path("courses/<int:pk>/delete/", views.course_delete, name="course-delete"),
+    # Courses (shared records + required activities)
+    path(
+        "course-requirements/", views.course_requirement_list, name="course-requirement-list"
+    ),
+    path(
+        "course-requirements/clear-all/",
+        views.course_requirement_clear_all,
+        name="course-requirement-clear-all",
+    ),
+    path(
+        "course-requirements/create/",
+        views.course_requirement_create,
+        name="course-requirement-create",
+    ),
+    path(
+        "course-requirements/<int:pk>/",
+        views.course_requirement_detail,
+        name="course-requirement-detail",
+    ),
+    path(
+        "course-requirements/<int:pk>/edit/",
+        views.course_requirement_edit,
+        name="course-requirement-edit",
+    ),
+    path(
+        "course-requirements/<int:pk>/delete/",
+        views.course_requirement_delete,
+        name="course-requirement-delete",
+    ),
+    # Group Allocation (seminar / tutorial / practical)
+    path("allocation/", views.allocation_page, name="allocation-page"),
+    path(
+        "allocation/groups/", views.allocation_groups, name="allocation-groups"
+    ),
+    path(
+        "allocation/group/<int:pk>/",
+        views.allocation_group_detail,
+        name="allocation-group",
+    ),
+    path(
+        "allocation/group/<int:pk>/panel/",
+        views.allocation_group_panel,
+        name="allocation-group-panel",
+    ),
+    path(
+        "allocation/preview/", views.allocation_preview, name="allocation-preview"
+    ),
+    path("allocation/apply/", views.allocation_apply, name="allocation-apply"),
+    path("allocation/revert/", views.allocation_revert, name="allocation-revert"),
+    path("allocation/assign/", views.allocation_assign, name="allocation-assign"),
+    path(
+        "allocation/unassign/", views.allocation_unassign, name="allocation-unassign"
+    ),
     # Imports
     path("import/", views.import_hub, name="import-hub"),
     path("import/history/", views.import_history, name="import-history"),

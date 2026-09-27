@@ -1,0 +1,11 @@
+{% comment %}
+The view a placement is being made in, carried back with the mutation.
+
+The panel redraws itself from these, so without them the endpoint would resolve
+"the semester" on its own and the list would change to a different set of
+sessions the moment the coordinator clicked. Sent from every assign/remove form
+on the group page -- see ``_allocation_view_fields`` in ``core/views.py``.
+{% endcomment %}
+<input type="hidden" name="panel" value="1">
+<input type="hidden" name="semester" value="{{ semester.pk|default_if_none:'' }}">
+<input type="hidden" name="scope" value="{{ scope|default_if_none:'ALL' }}">

@@ -11,6 +11,9 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
 from pathlib import Path
+import os
+
+from django.core.exceptions import ImproperlyConfigured
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -21,18 +24,37 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = 'django-insecure-g3p@&5=erpv-+2i#0xs$+tu5l+i&##j*gwukeoznqf*prr0xy7'
+SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', SECRET_KEY)
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.environ.get('DJANGO_DEBUG', 'True').strip().lower() in {'1', 'true', 'yes'}
 
-ALLOWED_HOSTS = ['*', '192.168.1.9', '172.16.185.226', '192.168.100.6']
+_configured_hosts = os.environ.get('DJANGO_ALLOWED_HOSTS', '')
+ALLOWED_HOSTS = (
+    [host.strip() for host in _configured_hosts.split(',') if host.strip()]
+    if _configured_hosts
+    else ['*', '192.168.1.9', '172.16.185.226', '192.168.100.6']
+)
 
-CSRF_TRUSTED_ORIGINS = [
+_configured_csrf_origins = os.environ.get('DJANGO_CSRF_TRUSTED_ORIGINS', '')
+CSRF_TRUSTED_ORIGINS = (
+    [origin.strip() for origin in _configured_csrf_origins.split(',') if origin.strip()]
+    if _configured_csrf_origins
+    else [
     'http://*.127.0.0.1',
     'http://localhost',
     'http://*',
     'https://*',
-]
+    ]
+)
+
+if not DEBUG:
+    if not os.environ.get('DJANGO_SECRET_KEY'):
+        raise ImproperlyConfigured('Set DJANGO_SECRET_KEY for production.')
+    if not _configured_hosts or '*' in ALLOWED_HOSTS:
+        raise ImproperlyConfigured('Set DJANGO_ALLOWED_HOSTS to explicit production hostnames.')
+    if not _configured_csrf_origins:
+        raise ImproperlyConfigured('Set DJANGO_CSRF_TRUSTED_ORIGINS for production.')
 
 
 # Application definition
@@ -46,6 +68,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'core',
     'allocation',
+    'student_portal',
 ]
 
 MIDDLEWARE = [
@@ -54,6 +77,8 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'student_portal.middleware.StaffAccessMiddleware',
+    'student_portal.middleware.StaffIdleTimeoutMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -130,3 +155,24 @@ STATICFILES_DIRS = [BASE_DIR / 'static']
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# Staff workspace security. Student routes are explicitly public; all other
+# application routes require an authenticated staff account.
+LOGIN_URL = '/staff/login/'
+LOGIN_REDIRECT_URL = '/staff/'
+LOGOUT_REDIRECT_URL = '/'
+STAFF_IDLE_TIMEOUT_SECONDS = 15 * 60
+SESSION_COOKIE_AGE = STAFF_IDLE_TIMEOUT_SECONDS
+SESSION_EXPIRE_AT_BROWSER_CLOSE = True
+SESSION_SAVE_EVERY_REQUEST = True
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = 'Lax'
+CSRF_COOKIE_SAMESITE = 'Lax'
+SESSION_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_SECURE = not DEBUG
+SECURE_CONTENT_TYPE_NOSNIFF = True
+X_FRAME_OPTIONS = 'DENY'
+
+if not DEBUG:
+    SECURE_SSL_REDIRECT = True
+    SECURE_HSTS_SECONDS = 31536000

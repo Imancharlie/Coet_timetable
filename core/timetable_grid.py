@@ -53,7 +53,7 @@ GROUPS_STYLE = {"color": "#0b4f9e", "font": "Helvetica-BoldOblique"}
 _GROUPS_MARKUP = '<font color="{color}"><b><i>@@</i></b></font>'
 
 
-def _entry_cell_lines(e, show_groups):
+def _entry_cell_lines(e, show_groups, show_notes=True):
     """One entry's cell text as a list of ``(text, is_groups)`` lines.
 
     The groups line is whichever line *is* the entry's own group list, which
@@ -62,10 +62,17 @@ def _entry_cell_lines(e, show_groups):
     the value rather than on position means the styling never has to assume
     the groups are the last line. ``ALL`` counts -- it says who attends just as
     much as a list of codes does.
+
+    ``show_notes`` drops the week range, which is the one piece of cell text
+    that is *also* printed authoritatively in the workshop rotation key below
+    the grid. On a single group's sheet the cell cannot say which workshop is
+    which week -- the cell names them all as "Electrical / Carpentry" -- so the
+    range there is noise. In a whole-programme sheet it stays on, because there
+    it is sometimes the only thing telling two simultaneous entries apart.
     """
     bits = [e["label"]]
     note = e.get("note")
-    if note:
+    if note and show_notes:
         bits.append(str(note))
     if e.get("kind") == "workshop":
         venue = e.get("venue")
@@ -80,13 +87,13 @@ def _entry_cell_lines(e, show_groups):
     ]
 
 
-def _cell_blocks(entries, show_groups):
+def _cell_blocks(entries, show_groups, show_notes=True):
     """A cell's entries, de-duplicated, each a list of ``(text, is_groups)``."""
     seen = set()
     blocks = []
     for same in _by_label(entries).values():
         for e in same:
-            lines = _entry_cell_lines(e, show_groups)
+            lines = _entry_cell_lines(e, show_groups, show_notes)
             text = "\n".join(part for part, _ in lines)
             if text in seen:
                 continue
@@ -95,22 +102,23 @@ def _cell_blocks(entries, show_groups):
     return blocks
 
 
-def cell_text(entries, show_groups=False):
+def cell_text(entries, show_groups=False, show_notes=True):
     """Render one cell's entries as a compact multi-line label.
 
     Every entry's label appears once. Genuinely distinct simultaneous entries
     are never silently merged: a week range, a venue that differs from the
     workshop name, and (in the all-groups view, ``show_groups``) the owning
     group code are appended so the reader can tell entries apart. Exact
-    duplicate text is shown only once.
+    duplicate text is shown only once. ``show_notes=False`` omits the week
+    range, which the single-group export leaves to the rotation key.
     """
     return "\n\n".join(
         "\n".join(part for part, _ in block)
-        for block in _cell_blocks(entries, show_groups)
+        for block in _cell_blocks(entries, show_groups, show_notes)
     )
 
 
-def cell_markup(entries, show_groups=False):
+def cell_markup(entries, show_groups=False, show_notes=True):
     """The same cell text as reportlab Paragraph markup, groups emphasised.
 
     Identical to :func:`cell_text` except that the assigned-groups line carries
@@ -118,7 +126,7 @@ def cell_markup(entries, show_groups=False):
     containing ``&`` or ``<`` can never be read as a tag.
     """
     blocks = []
-    for block in _cell_blocks(entries, show_groups):
+    for block in _cell_blocks(entries, show_groups, show_notes):
         parts = []
         for text, is_groups in block:
             safe = escape(text)
@@ -368,7 +376,7 @@ def fill_color(entries):
     return "#ffffff"
 
 
-def time_day_grid_to_table(grid, show_groups=False, markup=False):
+def time_day_grid_to_table(grid, show_groups=False, markup=False, show_notes=True):
     """Flatten a grid for reportlab's Table.
 
     Column 0 is the TIME column; columns 1..n are weekdays. Returns
@@ -393,7 +401,13 @@ def time_day_grid_to_table(grid, show_groups=False, markup=False):
             if cell is None or cell.get("empty"):
                 line.append("")
             else:
-                line.append(render(cell["entries"], show_groups=show_groups))
+                line.append(
+                    render(
+                        cell["entries"],
+                        show_groups=show_groups,
+                        show_notes=show_notes,
+                    )
+                )
         data.append(line)
 
     spans = []

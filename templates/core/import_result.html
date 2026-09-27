@@ -99,6 +99,108 @@
     </div>
     {% endif %}
 
+    {% if result.courses_created or result.courses_updated %}
+    <div class="bg-white rounded-xl shadow-sm border border-emerald-200 overflow-hidden">
+        <div class="px-4 py-3 border-b border-emerald-100 bg-emerald-50">
+            <h4 class="text-sm font-semibold text-emerald-700">
+                Shared Courses
+                ({{ result.courses_created|length }} created, {{ result.courses_updated|length }} updated)
+            </h4>
+            <p class="text-xs text-emerald-700 mt-0.5">
+                Each course code is one shared record holding its name and the
+                seminar / tutorial / practical requirements every group must meet.
+            </p>
+        </div>
+        <div class="px-4 py-2 flex flex-wrap gap-2">
+            {% for code in result.courses_created %}
+            <span class="inline-flex items-center px-2.5 py-1 bg-emerald-50 border border-emerald-300 text-emerald-800 rounded-full text-xs font-medium">{{ code }} &middot; new</span>
+            {% endfor %}
+            {% for code in result.courses_updated %}
+            <span class="inline-flex items-center px-2.5 py-1 bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-full text-xs">{{ code }}</span>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+
+    {% if result.invalid_requirements %}
+    <div class="bg-white rounded-xl shadow-sm border border-amber-300 overflow-hidden">
+        <div class="px-4 py-3 border-b border-amber-200 bg-amber-50">
+            <h4 class="text-sm font-semibold text-amber-800">Invalid Required Activities ({{ result.invalid_requirements|length }})</h4>
+            <p class="text-xs text-amber-700 mt-0.5">
+                The course was created or updated but no requirement was set for
+                it, so the allocator will report it as &ldquo;requirement not
+                configured&rdquo; until you fix the cell.
+            </p>
+        </div>
+        <ul class="divide-y divide-amber-100">
+            {% for issue in result.invalid_requirements %}
+            <li class="px-4 py-2 text-sm text-amber-800 bg-amber-50/30">{{ issue }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+
+    {% if result.warnings %}
+    <div class="bg-white rounded-xl shadow-sm border border-amber-300 overflow-hidden">
+        <div class="px-4 py-3 border-b border-amber-200 bg-amber-50">
+            <h4 class="text-sm font-semibold text-amber-800">Warnings ({{ result.warnings|length }})</h4>
+        </div>
+        <ul class="divide-y divide-amber-100">
+            {% for warning in result.warnings %}
+            <li class="px-4 py-2 text-sm text-amber-800 bg-amber-50/30">{{ warning }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+
+    {% if result.requirements_column %}
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+        <div class="px-4 py-3 border-b border-gray-100 bg-gray-50">
+            <h4 class="text-sm font-semibold text-gray-700">
+                Required activities read from &ldquo;{{ result.requirements_column }}&rdquo;
+                {% if result.requirement_count_columns %}
+                &middot; plus count columns
+                {% for activity, column in result.requirement_count_columns.items %}
+                &ldquo;{{ column }}&rdquo;{% if not forloop.last %}, {% endif %}
+                {% endfor %}
+                {% endif %}
+            </h4>
+            <p class="text-xs text-gray-500 mt-0.5">
+                Every group of a programme studying the course must complete
+                each activity listed here. Blank means no allocation is required.
+            </p>
+        </div>
+        <div class="max-h-96 overflow-y-auto">
+            <table class="min-w-full divide-y divide-gray-200 text-sm">
+                <thead class="bg-gray-50 sticky top-0">
+                    <tr>
+                        <th class="px-4 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Course</th>
+                        <th class="px-4 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Name</th>
+                        <th class="px-4 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Required activities</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-100">
+                    {% for row in result.course_requirements %}
+                    <tr>
+                        <td class="px-4 py-2 font-medium text-gray-800 whitespace-nowrap">{{ row.code }}</td>
+                        <td class="px-4 py-2 text-gray-600">{{ row.name }}</td>
+                        <td class="px-4 py-2">
+                            {% if row.requirements == "(none)" %}
+                            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800">
+                                not configured
+                            </span>
+                            {% else %}
+                            <span class="text-gray-700">{{ row.requirements }}</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% endif %}
+
     {% if result.missing_courses %}
     <div class="bg-white rounded-xl shadow-sm border border-red-200 overflow-hidden">
         <div class="px-4 py-3 border-b border-red-100 bg-red-50">

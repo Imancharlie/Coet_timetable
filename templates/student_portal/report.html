@@ -1,0 +1,19 @@
+{% extends "student_portal/base.html" %}
+{% block title %}Report a Timetable Clash · CoET{% endblock %}
+{% block content %}
+<section class="card">
+    <h1>Report a timetable clash</h1>
+    <p class="muted">Tell us what overlaps so the timetable team can check it. Fields marked * are required.</p>
+    {% if rate_limited %}<div class="error" role="alert">Too many reports have been submitted from this connection. Please try again later.</div>{% endif %}
+    <form method="post">{% csrf_token %}
+        <div class="form-grid">{% for field in form %}<div class="field {% if field.name == 'description' %}field-wide{% endif %}">
+            <label for="{{ field.id_for_label }}">{{ field.label }}{% if field.field.required %} <span aria-hidden="true">*</span>{% endif %}</label>
+            {{ field }}
+            {% for error in field.errors %}<p class="error" role="alert">{{ error }}</p>{% endfor %}
+        </div>{% endfor %}</div>
+        {% if form.non_field_errors %}<div class="error" role="alert">{{ form.non_field_errors }}</div>{% endif %}
+        <div class="actions"><button class="button" type="submit">Submit clash report</button><a class="button secondary" href="/">Back to timetable portal</a></div>
+    </form>
+</section>
+{% endblock %}
+

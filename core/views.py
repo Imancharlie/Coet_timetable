@@ -22,6 +22,8 @@ from .timetable_pdf import (
 
 from .deletion_impact import deletion_impact
 from .forms import (
+    CourseForm,
+    CourseRequirementFormSet,
     FileUploadForm,
     ProgrammeCourseForm,
     ProgrammeForm,
@@ -33,6 +35,17 @@ from .forms import (
     VenueForm,
     VenueRecycleForm,
     WorkshopAllocationForm,
+)
+from .group_allocation import (
+    apply_run,
+    GroupStatus,
+    group_statuses,
+    manual_assign,
+    manual_unassign,
+    plan_allocation,
+    revert_run,
+    save_plan,
+    STUDENTS_PER_GROUP,
 )
 from .importers import (
     ImportResult,
@@ -46,7 +59,12 @@ from .importers import (
     import_workshop_allocation_from_excel,
 )
 from .models import (
+    ALLOCATED_ACTIVITY_TYPES,
     ActivityLog,
+    AllocationRun,
+    AllocationScope,
+    Course,
+    CourseActivityRequirement,
     Day,
     ImportHistory,
     ImportStatus,
@@ -255,7 +273,33 @@ def _paginate(request, qs, per_page=50):
 
 
 def dashboard(request):
+    from student_portal.models import CollisionReport, PortalSettings
+
+    configured_semester = PortalSettings.objects.select_related("current_semester").first()
+    semesters = Semester.objects.order_by("-academic_year", "-semester")
+    semester_id = request.GET.get("semester")
+    semester = None
+    if semester_id:
+        semester = semesters.filter(pk=semester_id).first()
+    if semester is None:
+        semester = configured_semester.current_semester if configured_semester else semesters.first()
+    sessions = Session.objects.all()
+    if semester:
+        sessions = sessions.filter(semester=semester)
+    small_group_sessions = sessions.filter(
+        activity_type__in=ALLOCATED_ACTIVITY_TYPES
+    )
+    unassigned_count = small_group_sessions.annotate(
+        assigned_count=Count("session_groups")
+    ).filter(assigned_count=0).count()
     ctx = {
+        "semesters": semesters,
+        "selected_semester": semester,
+        "dashboard_session_count": sessions.count(),
+        "unassigned_count": unassigned_count,
+        "open_collision_count": CollisionReport.objects.exclude(
+            status=CollisionReport.Status.RESOLVED
+        ).count(),
         "programme_count": Programme.objects.count(),
         "group_count": StudentGroup.objects.count(),
         "venue_count": Venue.objects.count(),
@@ -265,7 +309,7 @@ def dashboard(request):
         "td_count": TechnicalDrawingAllocation.objects.count(),
         "course_count": ProgrammeCourse.objects.count(),
         "semester_count": Semester.objects.count(),
-        "recent_sessions": Session.objects.select_related(
+        "recent_sessions": sessions.select_related(
             "semester", "venue"
         ).order_by("-pk")[:10],
     }
@@ -528,7 +572,15 @@ def programme_timetable_pdf(request, pk):
         f'attachment; filename="timetable_{programme.code}_{year}.pdf"'
     )
     response["Content-Disposition"] = disposition
-    render_programme_timetable(programme, semester, year, out=response)
+    render_programme_timetable(
+        programme,
+        semester,
+        year,
+        out=response,
+        # Same footer as the master timetable, linking back to the site that
+        # produced the file.
+        portal_url=request.build_absolute_uri("/"),
+    )
     return response
 
 
@@ -560,7 +612,13 @@ def group_timetable_pdf(request, pk):
     response = HttpResponse(content_type="application/pdf")
     filename = f"timetable_{group.programme.code}_{group.code}_{year}.pdf"
     response["Content-Disposition"] = f'attachment; filename="{filename}"'
-    render_group_timetable(group, semester, year, out=response)
+    render_group_timetable(
+        group,
+        semester,
+        year,
+        out=response,
+        portal_url=request.build_absolute_uri("/"),
+    )
     return response
 
 
@@ -1380,6 +1438,7 @@ SESS_COLS = [
     {"key": "start_time", "label": "Start"},
     {"key": "end_time", "label": "End"},
     {"key": "venue", "label": "Venue"},
+    {"key": "assigned_groups", "label": "Assigned Groups"},
 ]
 SESS_FIELDS = [
     {"label": "Semester", "key": "semester"},
@@ -1389,7 +1448,37 @@ SESS_FIELDS = [
     {"label": "Start Time", "key": "start_time"},
     {"label": "End Time", "key": "end_time"},
     {"label": "Venue", "key": "venue"},
+    {"label": "Assigned Groups", "key": "assigned_groups"},
+    {"label": "Allocatable", "key": "allocatable"},
 ]
+
+
+def _annotate_sessions(sessions, all_group_codes):
+    """Attach the assigned-group summary each session row displays.
+
+    Allocation works by writing ``SessionGroup`` links, so the groups column
+    is the same data the exports read — what the list shows and what a PDF
+    prints can never disagree. ``allocatable`` marks the seminar / tutorial /
+    practical sessions the group allocator can place groups into, which is what
+    makes an unassigned row actionable rather than just empty.
+    """
+    by_session: dict = {}
+    for session_pk, group_code in SessionGroup.objects.filter(
+        session__in=sessions
+    ).values_list("session_id", "group__code"):
+        by_session.setdefault(session_pk, []).append(group_code)
+    for session in sessions:
+        codes = by_session.get(session.pk, [])
+        if not codes:
+            session.assigned_groups = "—"
+        elif all_group_codes and set(codes) >= set(all_group_codes):
+            session.assigned_groups = f"ALL ({len(codes)})"
+        else:
+            session.assigned_groups = ", ".join(sorted(codes))
+        session.allocatable = (
+            "Yes" if session.activity_type in ALLOCATED_ACTIVITY_TYPES else "No"
+        )
+    return sessions
 
 
 def session_list(request):
@@ -1399,8 +1488,7 @@ def session_list(request):
     day = request.GET.get("day", "")
     sem = request.GET.get("semester", "")
     ven = request.GET.get("venue", "")
-    start_from = request.GET.get("start_from", "")
-    start_to = request.GET.get("start_to", "")
+    assigned = request.GET.get("assigned", "")
     qs = _search(qs, q, ["course_code", "venue__name"])
     if act:
         qs = qs.filter(activity_type=act)
@@ -1410,17 +1498,27 @@ def session_list(request):
         qs = qs.filter(semester_id=sem)
     if ven:
         qs = qs.filter(venue__name=ven)
-    if start_from:
-        qs = qs.filter(end_time__gte=start_from)
-    if start_to:
-        qs = qs.filter(start_time__lte=start_to)
+    # "unassigned" is the working view for allocation: the small-group sessions
+    # the allocator can place groups into that nobody is in yet.
+    if assigned in ("yes", "no"):
+        qs = qs.filter(session_groups__isnull=(assigned == "no"))
+        if assigned == "no":
+            qs = qs.filter(activity_type__in=ALLOCATED_ACTIVITY_TYPES)
     items, page, pages, total = _paginate(request, qs)
+    unassigned_count = Session.objects.filter(
+        activity_type__in=ALLOCATED_ACTIVITY_TYPES, session_groups__isnull=True
+    ).count()
+    _annotate_sessions(
+        items, set(StudentGroup.objects.values_list("code", flat=True))
+    )
     legacy_sessions = legacy_workshop_sessions()
     ctx = {
         "items": items,
         "columns": SESS_COLS,
         "detail_fields": SESS_FIELDS,
         "q": q,
+        "assigned": assigned,
+        "unassigned_count": unassigned_count,
         "filters": _filters(
             request,
             [
@@ -1452,8 +1550,12 @@ def session_list(request):
                         (v.name, v.name) for v in Venue.objects.all()
                     ],
                 },
-                {"name": "start_from", "label": "Start From", "type": "time"},
-                {"name": "start_to", "label": "Start To", "type": "time"},
+                {
+                    "name": "assigned",
+                    "label": "Groups",
+                    "type": "select",
+                    "options": [("yes", "Has groups"), ("no", "Unassigned")],
+                },
             ],
         ),
         "query": _query(
@@ -1464,12 +1566,15 @@ def session_list(request):
                 "day",
                 "semester",
                 "venue",
-                "start_from",
-                "start_to",
+                "assigned",
             ],
         ),
+        "active_filter_count": sum(bool(value) for value in (act, day, sem, ven, assigned)),
+        "advanced_filters_open": any((act, day, sem, ven, assigned)),
+        "filters_collapsible": True,
         "page_title": "Master Timetable",
         "list_url": "/sessions/",
+        "assignment_url": "/allocation/",
         "create_url": "/sessions/create/",
         "clear_all_url": "/sessions/clear-all/",
         "edit_name": "session-edit",
@@ -1590,6 +1695,11 @@ def session_detail(request, pk):
     )
     groups = SessionGroup.objects.filter(session=item).select_related("group__programme")
     all_groups = StudentGroup.objects.select_related("programme").all()
+    # The list annotates these too, so the same field reads the same way in
+    # both places.
+    _annotate_sessions(
+        [item], set(StudentGroup.objects.values_list("code", flat=True))
+    )
     ctx = {
         "item": item,
         "detail_fields": SESS_FIELDS,
@@ -2187,18 +2297,20 @@ PC_COLS = [
     {"key": "programme", "label": "Programme"},
     {"key": "course_code", "label": "Course Code"},
     {"key": "course_name", "label": "Course Name"},
+    {"key": "required_activities", "label": "Required Activities"},
     {"key": "semester", "label": "Semester"},
 ]
 PC_FIELDS = [
     {"label": "Programme", "key": "programme"},
     {"label": "Course Code", "key": "course_code"},
     {"label": "Course Name", "key": "course_name"},
+    {"label": "Required Activities", "key": "required_activities"},
     {"label": "Semester", "key": "semester"},
 ]
 
 
 def course_list(request):
-    qs = ProgrammeCourse.objects.select_related("programme").all()
+    qs = ProgrammeCourse.objects.select_related("programme", "course").all()
     q = request.GET.get("q", "")
     prog = request.GET.get("programme", "")
     sem = request.GET.get("semester", "")
@@ -2360,6 +2472,730 @@ def course_clear_all(request):
 
 
 # ──────────────────────────────────────────────
+# Courses (shared course records + requirements)
+# ──────────────────────────────────────────────
+
+CR_COLS = [
+    {"key": "code", "label": "Code"},
+    {"key": "name", "label": "Name"},
+    {"key": "requirements_label", "label": "Required Activities"},
+    {"key": "programme_count", "label": "Programmes"},
+]
+CR_FIELDS = [
+    {"label": "Code", "key": "code"},
+    {"label": "Name", "key": "name"},
+    {"label": "Required Activities", "key": "requirements_label"},
+    {"label": "Programmes", "key": "programme_count"},
+    {"label": "Programmes studying this course", "key": "programme_list"},
+]
+
+
+def _course_requirements_label(course):
+    return course.activities_label() or "Not configured"
+
+
+def _course_programmes(course):
+    rows = (
+        ProgrammeCourse.objects.filter(course=course)
+        .select_related("programme")
+        .order_by("programme__code", "semester")
+    )
+    return rows
+
+
+def course_requirement_list(request):
+    qs = Course.objects.prefetch_related("activity_requirements").all()
+    q = request.GET.get("q", "")
+    configured = request.GET.get("configured", "")
+    qs = _search(qs, q, ["code", "name"])
+    rows = [_course_row(course) for course in qs]
+    if configured == "no":
+        rows = [row for row in rows if not row.has_requirements()]
+    elif configured == "yes":
+        rows = [row for row in rows if row.has_requirements()]
+    page = max(int(request.GET.get("page", 1)), 1)
+    per_page = 50
+    total = len(rows)
+    pages = max((total + per_page - 1) // per_page, 1)
+    page = min(page, pages)
+    items = rows[(page - 1) * per_page : page * per_page]
+    missing = sum(1 for row in rows if not row.has_requirements())
+    ctx = {
+        "items": items,
+        "columns": CR_COLS,
+        "detail_fields": CR_FIELDS,
+        "q": q,
+        "filters": _filters(
+            request,
+            [
+                {
+                    "name": "configured",
+                    "label": "Requirements",
+                    "type": "select",
+                    "options": [("yes", "Configured"), ("no", "Not configured")],
+                },
+            ],
+        ),
+        "query": _query(request, ["q", "configured"]),
+        "page_title": "Courses",
+        "list_url": "/course-requirements/",
+        "create_url": "/course-requirements/create/",
+        "clear_all_url": "/course-requirements/clear-all/",
+        "edit_name": "course-requirement-edit",
+        "delete_name": "course-requirement-delete",
+        "detail_name": "course-requirement-detail",
+        "page": page,
+        "pages": pages,
+        "total": total,
+        "missing_count": missing,
+        "missing_examples": [
+            row.code for row in rows if not row.has_requirements()
+        ][:12],
+    }
+    if _htmx(request):
+        return render(request, "core/_table_and_cards.html", ctx)
+    return render(request, "core/list.html", ctx)
+
+
+def _course_row(course):
+    """The course, with the display values the shared table partial reads.
+
+    The list partial resolves columns with the ``get_attr`` filter, so the
+    computed values are attached to the model instance rather than returned in
+    a dict — otherwise every cell would render blank.
+    """
+    programmes = list(_course_programmes(course))
+    course.requirements_label = _course_requirements_label(course)
+    course.programme_count = len({row.programme_id for row in programmes})
+    course.programme_list = ", ".join(
+        f"{row.programme.code} (S{row.semester})" for row in programmes
+    ) or "—"
+    if not course.name:
+        course.name = "—"
+    course._programme_rows = programmes
+    return course
+
+
+def course_requirement_detail(request, pk):
+    item = get_object_or_404(
+        Course.objects.prefetch_related("activity_requirements"), pk=pk
+    )
+    item = _course_row(item)
+    ctx = {
+        "item": item,
+        "detail_fields": CR_FIELDS,
+        "page_title": str(item),
+        "edit_url": f"/course-requirements/{pk}/edit/",
+        "delete_url": f"/course-requirements/{pk}/delete/",
+        "back_url": "/course-requirements/",
+        "programme_rows": item._programme_rows,
+        "name_variants": item.name_conflicts(),
+    }
+    if _htmx(request):
+        return render(request, "core/_course_requirement_detail.html", ctx)
+    return render(request, "core/course_requirement_detail.html", ctx)
+
+
+def _course_form_context(request, form, formset, title, action, course=None):
+    return {
+        "form": form,
+        "formset": formset,
+        "title": title,
+        "action": action,
+        "course": course,
+        "no_data": "core/_formset_no_data.html",
+    }
+
+
+def course_requirement_create(request):
+    if request.method == "POST":
+        form = CourseForm(request.POST)
+        formset = CourseRequirementFormSet(request.POST)
+        if form.is_valid() and formset.is_valid():
+            course = form.save()
+            formset.instance = course
+            formset.save()
+            _log(
+                LogAction.CREATE,
+                f"Created Course {course} "
+                f"(required: {course.activities_label() or 'none'})",
+                "Course",
+                str(course),
+            )
+            return _write_response(
+                request, "close-modal,refresh-table", "course-requirement-list"
+            )
+    else:
+        form = CourseForm()
+        formset = CourseRequirementFormSet()
+    return render(
+        request,
+        "core/course_form.html",
+        _course_form_context(
+            request, form, formset, "Create Course", "/course-requirements/create/"
+        ),
+    )
+
+
+def course_requirement_edit(request, pk):
+    item = get_object_or_404(Course, pk=pk)
+    if request.method == "POST":
+        form = CourseForm(request.POST, instance=item)
+        formset = CourseRequirementFormSet(request.POST, instance=item)
+        if form.is_valid() and formset.is_valid():
+            course = form.save()
+            formset.save()
+            # The formset wrote the requirement rows behind the model's back,
+            # so re-read them before describing the result in the log.
+            course = Course.objects.prefetch_related(
+                "activity_requirements"
+            ).get(pk=course.pk)
+            _log(
+                LogAction.UPDATE,
+                f"Updated Course {course} "
+                f"(required: {course.activities_label() or 'none'})",
+                "Course",
+                str(course),
+            )
+            return _write_response(
+                request,
+                "close-modal,refresh-table,refresh-detail",
+                "course-requirement-list",
+            )
+    else:
+        form = CourseForm(instance=item)
+        formset = CourseRequirementFormSet(instance=item)
+    return render(
+        request,
+        "core/course_form.html",
+        _course_form_context(
+            request,
+            form,
+            formset,
+            f"Edit {item}",
+            f"/course-requirements/{pk}/edit/",
+            course=item,
+        ),
+    )
+
+
+def course_requirement_delete(request, pk):
+    item = get_object_or_404(Course, pk=pk)
+    if request.method == "POST":
+        label = str(item)
+        # A course is shared, so it is not deleted out from under the
+        # programmes that study it. Remove the links explicitly first, then the
+        # course itself — PROTECT would otherwise refuse the delete.
+        linked = ProgrammeCourse.objects.filter(course=item).count()
+        ProgrammeCourse.objects.filter(course=item).delete()
+        item.delete()
+        if linked:
+            _log(
+                LogAction.DELETE,
+                f"Deleted Course {label} and its {linked} programme link(s)",
+                "Course",
+                label,
+            )
+        else:
+            _log(LogAction.DELETE, f"Deleted Course {label}", "Course", label)
+        return _write_response(
+            request, "close-modal,refresh-table", "course-requirement-list"
+        )
+    return render(
+        request,
+        "core/delete.html",
+        _delete_context(
+            request,
+            item,
+            "/course-requirements/",
+            f"/course-requirements/{pk}/delete/",
+        ),
+    )
+
+
+def course_requirement_clear_all(request):
+    """Delete every shared course and its programme links.
+
+    Sessions keep their own ``course_code`` text, so timetables and exports are
+    untouched; only the requirement data goes.
+    """
+    return _clear_all(
+        request,
+        model=Course,
+        list_url="/course-requirements/",
+        clear_url="/course-requirements/clear-all/",
+        page_title="Courses",
+        primary_label="Courses",
+        log_resource="Course",
+        redirect_name="course-requirement-list",
+        related_count=(
+            (ProgrammeCourse.objects.all(), "Programme course links"),
+            (
+                CourseActivityRequirement.objects.all(),
+                "Activity requirements",
+            ),
+        ),
+        kept_note=(
+            "Programmes, student groups, sessions, semesters and venues are "
+            "kept; the sessions keep their course code text."
+        ),
+    )
+
+
+# ──────────────────────────────────────────────
+# Group Allocation (seminar / tutorial / practical)
+# ──────────────────────────────────────────────
+
+ALLOCATION_SCOPES = [
+    (AllocationScope.ALL, "All configured activities"),
+    (AllocationScope.SEMINAR, "Seminar"),
+    (AllocationScope.TUTORIAL, "Tutorial"),
+    (AllocationScope.PRACTICAL, "Practical"),
+]
+
+
+def _allocation_base_context(request, semester=None, scope=AllocationScope.ALL, run=None):
+    semesters = list(Semester.objects.all())
+    return {
+        "page_title": "Group Allocation",
+        "semesters": semesters,
+        "semester": semester,
+        "scope": scope,
+        "scopes": ALLOCATION_SCOPES,
+        "runs": AllocationRun.objects.select_related("semester")[:10],
+        "run": run,
+        "plan": run.plan() if run is not None else None,
+        "allocation_url": "/allocation/",
+        "groups_url": "/allocation/groups/",
+        "preview_url": "/allocation/preview/",
+        "apply_url": "/allocation/apply/",
+        "revert_url": "/allocation/revert/",
+        "assign_url": "/allocation/assign/",
+        "unassign_url": "/allocation/unassign/",
+        "back_url": "/allocation/",
+        "students_per_group": STUDENTS_PER_GROUP,
+    }
+
+
+def _selected_semester(request):
+    """The semester the coordinator is working on (never guessed silently)."""
+    semesters = list(Semester.objects.all())
+    if not semesters:
+        return None
+    raw = request.POST.get("semester") or request.GET.get("semester") or ""
+    if raw:
+        return next((s for s in semesters if str(s.pk) == str(raw)), None)
+    return semesters[0]
+
+
+def _selected_scope(request):
+    raw = (request.POST.get("scope") or request.GET.get("scope") or "").strip()
+    return raw if raw in dict(ALLOCATION_SCOPES) else AllocationScope.ALL
+
+
+def allocation_page(request):
+    """The coordinator page: pick a semester, review, apply, revert."""
+    semester = _selected_semester(request)
+    scope = _selected_scope(request)
+    run = None
+    run_id = request.GET.get("run", "")
+    if run_id:
+        run = AllocationRun.objects.filter(pk=run_id).first()
+        if run is not None:
+            semester = run.semester
+            scope = run.scope
+    ctx = _allocation_base_context(request, semester=semester, scope=scope, run=run)
+    ctx["groups"] = (
+        list(
+            StudentGroup.objects.filter(
+                programme__programme_courses__semester=semester.semester
+            )
+            .select_related("programme")
+            .distinct()
+        )
+        if semester
+        else []
+    )
+    ctx["sessions"] = (
+        list(
+            Session.objects.filter(
+                semester=semester, activity_type__in=ALLOCATED_ACTIVITY_TYPES
+            )
+            .select_related("venue")
+            .order_by("course_code", "day", "start_time")[:400]
+        )
+        if semester
+        else []
+    )
+    ctx["no_semesters"] = not Semester.objects.exists()
+    ctx["message"] = request.GET.get("msg", "")
+    ctx["error"] = request.GET.get("err", "")
+    return render(request, "core/allocation.html", ctx)
+
+
+def allocation_groups(request):
+    """A progress board: every group against the requirements of its courses."""
+    semester = _selected_semester(request)
+    scope = _selected_scope(request)
+    groups = (
+        list(
+            StudentGroup.objects.filter(
+                programme__programme_courses__semester=semester.semester
+            )
+            .select_related("programme")
+            .distinct()
+        )
+        if semester
+        else []
+    )
+    statuses = group_statuses(semester, scope, groups) if semester else {}
+    rows = []
+    for group in groups:
+        status = statuses.get(group.pk)
+        if status is None:
+            status = GroupStatus(group=group, semester=semester)
+        status.detail_url = reverse("allocation-group", args=[group.pk])
+        rows.append(status)
+    # Most finished first, then most work left, then a stable name order. The
+    # first key is "is NOT complete" so that finished groups sort to the top --
+    # a coordinator opening this page is looking for what is left to do, but
+    # the ones that are done are the ones they want to confirm.
+    rows.sort(
+        key=lambda s: (
+            s.state != "complete",
+            -s.outstanding,
+            s.group.programme.code,
+            s.group.code,
+        )
+    )
+    return render(
+        request,
+        "core/allocation_groups.html",
+        {
+            **_allocation_base_context(request, semester=semester, scope=scope),
+            "rows": rows,
+            "complete": sum(1 for r in rows if r.is_complete),
+            "partial": sum(1 for r in rows if 0 < r.met < r.total),
+            "unassigned": sum(1 for r in rows if r.total and not r.met),
+            "nothing": sum(1 for r in rows if r.has_nothing_to_do),
+            "outstanding": sum(r.outstanding for r in rows),
+        },
+    )
+
+
+def _group_panel_context(request, group, semester, scope):
+    """Everything the requirement panel needs, and nothing else.
+
+    Shared by the page and by the mutation endpoints, so a placement made by
+    hand renders exactly the markup a fresh page load would -- the two can never
+    disagree about whether a group is done.
+    """
+    return {
+        **_allocation_base_context(request, semester=semester, scope=scope),
+        "page_title": f"Group Progress — {group.code}",
+        "group": group,
+        "status": (
+            group_statuses(semester, scope, [group]).get(group.pk)
+            if semester
+            else None
+        ),
+    }
+
+
+def allocation_group_detail(request, pk):
+    """One group: what each of its requirements still needs, and where it could go.
+
+    Every session listed is judged by the same validator the allocator uses, and
+    the assign button posts to the same ``allocation-assign`` endpoint, so a
+    manual placement made from here is one the engine would also have accepted.
+    """
+    group = get_object_or_404(
+        StudentGroup.objects.select_related("programme"), pk=pk
+    )
+    semester = _selected_semester(request)
+    scope = _selected_scope(request)
+    return render(
+        request,
+        "core/allocation_group.html",
+        {
+            **_group_panel_context(request, group, semester, scope),
+            "back_url": reverse("allocation-groups"),
+            "panel_url": reverse("allocation-group-panel", args=[group.pk]),
+        },
+    )
+
+
+def allocation_group_panel(request, pk):
+    """The requirement list on its own, so a placement updates in place.
+
+    A manual assign/remove answers with this panel instead of a message, which
+    is what stops the page claiming a requirement is "not yet placed" after the
+    coordinator has just placed it.
+    """
+    group = get_object_or_404(
+        StudentGroup.objects.select_related("programme"), pk=pk
+    )
+    return render(
+        request,
+        "core/_allocation_group_panel.html",
+        _group_panel_context(
+            request, group, _selected_semester(request), _selected_scope(request)
+        ),
+    )
+
+
+def _allocation_panel_response(request, group, session=None):
+    """The response a mutating endpoint sends back to the group page.
+
+    Only when the caller asked for it (``panel=1``): the allocation page's own
+    manual-assign form has no panel to replace and still gets the message.
+
+    The semester comes from the request when the form sent one, because the
+    panel must re-render the view the coordinator is looking at. Without that,
+    the endpoint would fall back to the latest semester -- and quietly redraw
+    the list against a different set of sessions than the one on screen. When
+    the caller sent nothing at all, the session being placed names the semester
+    outright, so use that rather than picking one.
+    """
+    if not request.POST.get("panel") or group is None:
+        return None
+    if request.POST.get("semester"):
+        semester = _selected_semester(request)
+    else:
+        semester = getattr(session, "semester", None) or _selected_semester(request)
+    if not _htmx(request):
+        # A plain form post has no htmx to swap the response into, so send the
+        # coordinator back to the page rather than showing them bare markup.
+        return redirect(
+            f"{reverse('allocation-group', args=[group.pk])}?"
+            f"{urlencode({'semester': semester.pk if semester else ''})}"
+        )
+    return render(
+        request,
+        "core/_allocation_group_panel.html",
+        _group_panel_context(
+            request,
+            group,
+            semester,
+            request.POST.get("scope") or _selected_scope(request),
+        ),
+    )
+
+
+def allocation_preview(request):
+    """Compute a plan and show it. Nothing is written to the timetable."""
+    if request.method != "POST":
+        return redirect("allocation-page")
+    semester = _selected_semester(request)
+    if semester is None:
+        return redirect("allocation-page")
+    scope = _selected_scope(request)
+    plan = plan_allocation(semester, scope)
+    run = save_plan(plan)
+    _log(
+        LogAction.ASSIGN,
+        f"Group allocation preview for {semester} ({scope}): "
+        f"{plan.added} to add, {plan.moved} to move, {plan.retained} kept, "
+        f"{plan.unresolved_count} unresolved",
+        "Group Allocation",
+        str(run),
+    )
+    ctx = _allocation_base_context(request, semester=semester, scope=scope, run=run)
+    # The template reads one shape everywhere: the stored snapshot, which is
+    # exactly what a later Apply or Revert works from.
+    ctx["plan"] = run.plan()
+    if _htmx(request):
+        response = render(request, "core/_allocation_plan.html", ctx)
+        response["HX-Trigger"] = json.dumps(
+            {"allocation-toast": {"message": "Allocation plan ready"}}
+        )
+        return response
+    return render(request, "core/allocation.html", ctx)
+
+
+def allocation_apply(request):
+    """Write a previewed plan in one transaction."""
+    if request.method != "POST":
+        return redirect("allocation-page")
+    run = AllocationRun.objects.filter(
+        pk=request.POST.get("run", "")
+    ).first()
+    if run is None:
+        return redirect("allocation-page")
+    result = apply_run(run)
+    if result.get("ok"):
+        _log(
+            LogAction.ASSIGN,
+            f"Applied group allocation run: {result['added']} assignment(s) "
+            f"added, {result['removed']} removed, {run.unresolved} "
+            f"unresolved",
+            "Group Allocation",
+            str(run),
+        )
+    return _allocation_action_response(request, run, result)
+
+
+def allocation_revert(request):
+    """Undo an applied run, refusing when anything was edited since."""
+    if request.method != "POST":
+        return redirect("allocation-page")
+    run = AllocationRun.objects.filter(pk=request.POST.get("run", "")).first()
+    if run is None:
+        return redirect("allocation-page")
+    result = revert_run(run)
+    if result.get("ok"):
+        _log(
+            LogAction.REMOVE,
+            f"Reverted group allocation run: {result['removed']} assignment(s) "
+            f"removed, {result['restored']} restored",
+            "Group Allocation",
+            str(run),
+        )
+    return _allocation_action_response(request, run, result)
+
+
+def _allocation_action_response(request, run, result):
+    """Render the plan panel with the outcome of apply/revert."""
+    message = result.get("message", "")
+    if _htmx(request):
+        ctx = {
+            "page_title": "Group Allocation",
+            "run": run,
+            "plan": run.plan(),
+            "result": result,
+            "message": message,
+            "apply_url": "/allocation/apply/",
+            "revert_url": "/allocation/revert/",
+        }
+        # The panel replaces #allocation-plan, so the plan markup must not wrap
+        # itself in another element with that id.
+        response = render(request, "core/_allocation_result.html", ctx)
+        response["HX-Trigger"] = json.dumps(
+            {
+                "allocation-toast": {
+                    "message": message,
+                    "type": "success" if result.get("ok") else "error",
+                }
+            }
+        )
+        return response
+    params = {"run": run.pk, "msg" if result.get("ok") else "err": message}
+    return redirect(f"{reverse('allocation-page')}?{urlencode(params)}")
+
+
+def allocation_assign(request):
+    """Manual assignment, validated by exactly the same rules as a run."""
+    if request.method != "POST":
+        return redirect("allocation-page")
+    group = StudentGroup.objects.filter(
+        pk=request.POST.get("group", "")
+    ).select_related("programme").first()
+    session = (
+        Session.objects.filter(pk=request.POST.get("session", ""))
+        .select_related("venue", "semester")
+        .first()
+    )
+    linked, problems = manual_assign(group, session)
+    if linked:
+        _log(
+            LogAction.ASSIGN,
+            f"Manually assigned {group} to session "
+            f"{session.course_code} {session.get_activity_type_display()}",
+            "Session",
+            str(session),
+        )
+        message = f"{group} assigned to {session}."
+    else:
+        message = "Assignment refused."
+    ctx = {
+        "page_title": "Group Allocation",
+        "message": message,
+        "problems": problems,
+        "group": group,
+        "session": session,
+        "result": {"ok": linked},
+        "plan": None,
+        "run": None,
+    }
+    panel = _allocation_panel_response(request, group, session=session)
+    if panel is not None:
+        panel["HX-Trigger"] = json.dumps(
+            {
+                "allocation-toast": {
+                    "message": message,
+                    "type": "success" if linked else "error",
+                }
+            }
+        )
+        return panel
+    if _htmx(request):
+        response = render(request, "core/_allocation_message.html", ctx)
+        response["HX-Trigger"] = json.dumps(
+            {
+                "allocation-toast": {
+                    "message": message,
+                    "type": "success" if linked else "error",
+                }
+            }
+        )
+        return response
+    semester = _selected_semester(request)
+    return redirect(
+        f"{reverse('allocation-page')}?"
+        f"{urlencode({'semester': semester.pk if semester else '', 'msg' if linked else 'err': message})}"
+    )
+
+
+def allocation_unassign(request):
+    """Remove a link by hand. Always allowed — removing cannot overfill."""
+    if request.method != "POST":
+        return redirect("allocation-page")
+    group = StudentGroup.objects.filter(pk=request.POST.get("group", "")).first()
+    session = Session.objects.filter(pk=request.POST.get("session", "")).first()
+    removed = 0
+    if group and session:
+        removed = manual_unassign(group, session)
+        if removed:
+            _log(
+                LogAction.REMOVE,
+                f"Manually removed {group} from session "
+                f"{session.course_code} {session.get_activity_type_display()}",
+                "Session",
+                str(session),
+            )
+    message = (
+        f"{group} removed from {session}."
+        if removed
+        else "That group was not linked to that session."
+    )
+    ctx = {
+        "page_title": "Group Allocation",
+        "message": message,
+        "problems": [],
+        "result": {"ok": bool(removed)},
+        "plan": None,
+        "run": None,
+    }
+    panel = _allocation_panel_response(request, group, session=session)
+    if panel is not None:
+        panel["HX-Trigger"] = json.dumps(
+            {"allocation-toast": {"message": message, "type": "info"}}
+        )
+        return panel
+    if _htmx(request):
+        response = render(request, "core/_allocation_message.html", ctx)
+        response["HX-Trigger"] = json.dumps(
+            {"allocation-toast": {"message": message, "type": "info"}}
+        )
+        return response
+    semester = _selected_semester(request)
+    return redirect(
+        f"{reverse('allocation-page')}?"
+        f"{urlencode({'semester': semester.pk if semester else '', 'msg': message})}"
+    )
+
+
+# ──────────────────────────────────────────────
 # Import Views
 # ──────────────────────────────────────────────
 
@@ -2446,12 +3282,25 @@ IMPORT_TYPES = {
     },
     "programme-courses": {
         "title": "Programme Courses",
-        "columns": "programme_code, course_code, course_name, semester",
+        "columns": (
+            "programme_code, course_code, course_name, semester, "
+            "Required Activities (optional)"
+        ),
         "hint": (
             "Aliases accepted ('programme'/'program', 'course_code'/'course', "
             "'course_name'/'course'). A programme name (e.g. 'BSc. in Chemical and "
             "Processing Engineering') is recognised and the missing programme is "
-            "created automatically."
+            "created automatically. "
+            "REQUIRED ACTIVITIES (optional): the heading 'Required Activities' "
+            "(also 'Allocation Requirements', 'Activities Required', ...) sets "
+            "each course's shared seminar/tutorial/practical requirements. "
+            "Accepted values: 'Seminar; Tutorial; Practical', '2 practicals', "
+            "'Practical (2)', 'Tutorial | Practical', 'One seminar, 2 "
+            "practicals' — separate with ; , / | + & or a new line. Leave blank "
+            "for 'no allocation required'. Separate count columns ('Tutorial "
+            "Count', 'Number of Practicals') work too. Anything unrecognised is "
+            "reported per row, never ignored. Workbooks without the column still "
+            "import; those courses are flagged during allocation review."
         ),
         "fn": import_programme_courses_from_excel,
     },
@@ -2465,12 +3314,21 @@ IMPORT_TYPES = {
         "title": "Master Timetable",
         "columns": "course_code, activity_type, day, start_time, end_time, venue, group",
         "semester": "required",
+        "derive_requirements": (
+            "Set course requirements from these sessions"
+        ),
         "hint": (
             "Readable aliases accepted ('course', 'type', 'start', 'end', 'room', "
             "'groups', ...). Comma-separated course codes are split into separate "
             "sessions. Choose the academic Semester this timetable belongs to above — "
             "it is never auto-detected. LECTURE sessions are automatically linked to "
-            "every programme group that studies the course."
+            "every programme group that studies the course. Tick 'Set course "
+            "requirements from these sessions' to also fill in each course's "
+            "required activities: a course with tutorial sessions gets Tutorial, "
+            "one with tutorials and practicals gets both. Only an activity that "
+            "has a session is set, a course that already has a requirement is "
+            "never overwritten, and courses with no small-group session are "
+            "reported so you can decide about them."
         ),
         "fn": import_master_timetable_from_excel,
     },
@@ -2563,10 +3421,16 @@ def import_upload(request, import_type):
                 else:
                     uploaded.seek(0)
                     source = uploaded
+                # Extra keyword arguments only for the importers that declare
+                # them, so one import path serves them all.
+                kwargs = {}
                 if semester_id is not None:
-                    result = info["fn"](source, semester_id=semester_id)
-                else:
-                    result = info["fn"](source)
+                    kwargs["semester_id"] = semester_id
+                if info.get("derive_requirements"):
+                    kwargs["derive_requirements"] = bool(
+                        request.POST.get("derive_requirements")
+                    )
+                result = info["fn"](source, **kwargs)
             except Exception as exc:
                 result.errors.append(str(exc))
             # A complete summary is always saved so users can review this
@@ -2610,6 +3474,7 @@ def import_upload(request, import_type):
             "columns": info["columns"],
             "hint": info.get("hint", ""),
             "form": form,
+            "derive_requirements": info.get("derive_requirements", ""),
             "semester_choice": semester_choice,
             "semesters": semesters,
             "active_semester": active_semester,
@@ -2639,6 +3504,7 @@ def import_upload(request, import_type):
             "import_title": info["title"],
             "columns": info["columns"],
             "hint": info.get("hint", ""),
+            "derive_requirements": info.get("derive_requirements", ""),
             "semester_choice": semester_choice,
             "semesters": semesters,
             "active_semester": active_semester,

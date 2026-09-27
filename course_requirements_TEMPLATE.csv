@@ -1,0 +1,74 @@
+course_code,Required Activities,HOW_MANY_GROUPS_NEED_IT,WHY_THIS_VALUE
+AR111,Practical,0,timetable has: PRACTICAL
+AR112,Practical,0,timetable has: PRACTICAL
+AR121,Practical,0,timetable has: PRACTICAL
+AR122,,0,NO tutorial/seminar/practical exists - fill in or delete this row
+AR131,Tutorial,0,timetable has: TUTORIAL
+AR132,,0,NO tutorial/seminar/practical exists - fill in or delete this row
+AR151,,0,NO tutorial/seminar/practical exists - fill in or delete this row
+AR152,,0,NO tutorial/seminar/practical exists - fill in or delete this row
+CL111,Seminar,16,timetable has: SEMINAR
+CP102,Tutorial,2,timetable has: TUTORIAL
+CP105,Tutorial,2,timetable has: TUTORIAL
+CP111,,2,NO tutorial/seminar/practical exists - fill in or delete this row
+CP112,,2,NO tutorial/seminar/practical exists - fill in or delete this row
+DS112,,2,NO tutorial/seminar/practical exists - fill in or delete this row
+DS113,,2,NO tutorial/seminar/practical exists - fill in or delete this row
+DS114,,14,NO tutorial/seminar/practical exists - fill in or delete this row
+DS115,,14,NO tutorial/seminar/practical exists - fill in or delete this row
+EC116,Seminar,0,timetable has: SEMINAR
+EE131,Seminar; Tutorial,4,"timetable has: SEMINAR, TUTORIAL"
+EE151,,8,NO tutorial/seminar/practical exists - fill in or delete this row
+EE153,Tutorial; Practical,2,"timetable has: TUTORIAL, PRACTICAL"
+EE171,Tutorial; Practical,16,"timetable has: TUTORIAL, PRACTICAL"
+EE172,Practical,6,timetable has: PRACTICAL
+GT111,,0,NO tutorial/seminar/practical exists - fill in or delete this row
+GT112,Practical,0,timetable has: PRACTICAL
+GT115,,0,NO tutorial/seminar/practical exists - fill in or delete this row
+GT156,Practical,0,timetable has: PRACTICAL
+GT163,,0,NO tutorial/seminar/practical exists - fill in or delete this row
+GT173,,0,NO tutorial/seminar/practical exists - fill in or delete this row
+IE120,Tutorial,2,timetable has: TUTORIAL
+ME101,Tutorial,16,timetable has: TUTORIAL
+ME103,Tutorial; Practical,7,"timetable has: TUTORIAL, PRACTICAL"
+ME106,Tutorial,6,timetable has: TUTORIAL
+MT161,Tutorial,15,timetable has: TUTORIAL
+MT171,Tutorial,15,timetable has: TUTORIAL
+QS122,,0,NO tutorial/seminar/practical exists - fill in or delete this row
+QS125,Tutorial,0,timetable has: TUTORIAL
+QS132,,0,NO tutorial/seminar/practical exists - fill in or delete this row
+QS151,,0,NO tutorial/seminar/practical exists - fill in or delete this row
+QS176,Tutorial,0,timetable has: TUTORIAL
+SC101,,0,NO tutorial/seminar/practical exists - fill in or delete this row
+SC102,Tutorial; Practical,7,"timetable has: TUTORIAL, PRACTICAL"
+SC112,Practical,7,timetable has: PRACTICAL
+SC113,,0,NO tutorial/seminar/practical exists - fill in or delete this row
+SC121,Tutorial,15,timetable has: TUTORIAL
+SC122,Tutorial,7,timetable has: TUTORIAL
+SC131,Tutorial,7,timetable has: TUTORIAL
+SC155,,0,NO tutorial/seminar/practical exists - fill in or delete this row
+SC161,Tutorial,0,timetable has: TUTORIAL
+TR111,Tutorial,7,timetable has: TUTORIAL
+TR112,Practical,7,timetable has: PRACTICAL
+TR168,,0,NO tutorial/seminar/practical exists - fill in or delete this row
+TW,,7,NO tutorial/seminar/practical exists - fill in or delete this row
+TW104,,7,NO tutorial/seminar/practical exists - fill in or delete this row
+TW107,,2,NO tutorial/seminar/practical exists - fill in or delete this row
+TW108,,7,NO tutorial/seminar/practical exists - fill in or delete this row
+TW113,,9,NO tutorial/seminar/practical exists - fill in or delete this row
+TW119,,0,NO tutorial/seminar/practical exists - fill in or delete this row
+TW125,,6,NO tutorial/seminar/practical exists - fill in or delete this row
+TW133,,9,NO tutorial/seminar/practical exists - fill in or delete this row
+TW134,,4,NO tutorial/seminar/practical exists - fill in or delete this row
+TW139,,4,NO tutorial/seminar/practical exists - fill in or delete this row
+TW140,,0,NO tutorial/seminar/practical exists - fill in or delete this row
+TW145,,0,NO tutorial/seminar/practical exists - fill in or delete this row
+TW151,,11,NO tutorial/seminar/practical exists - fill in or delete this row
+TX101,Practical,1,timetable has: PRACTICAL
+TX103,Tutorial,1,timetable has: TUTORIAL
+TX104,,1,NO tutorial/seminar/practical exists - fill in or delete this row
+TX105,Practical,1,timetable has: PRACTICAL
+TX106,,1,NO tutorial/seminar/practical exists - fill in or delete this row
+TX107,Practical,1,timetable has: PRACTICAL
+TX108,Tutorial,1,timetable has: TUTORIAL
+TX109,,1,NO tutorial/seminar/practical exists - fill in or delete this row

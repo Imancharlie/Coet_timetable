@@ -69,6 +69,24 @@
                         {{ field }}
                     </div>
                     {% endfor %}
+                    {% if derive_requirements %}
+                    <label class="flex items-start gap-3 bg-emerald-50 border border-emerald-200 rounded-lg p-3 cursor-pointer">
+                        <input type="checkbox" name="derive_requirements" value="1" checked
+                               class="mt-0.5 h-4 w-4 text-emerald-600 border-gray-300 rounded focus:ring-emerald-500">
+                        <span class="min-w-0">
+                            <span class="block text-sm font-medium text-emerald-900">{{ derive_requirements }}</span>
+                            <span class="block text-xs text-emerald-700 mt-0.5">
+                                A course with tutorial sessions gets
+                                <strong>Tutorial</strong>; one with tutorials and
+                                practicals gets <strong>both</strong>. Only an
+                                activity that has a session is set, a course that
+                                already has a requirement is never overwritten,
+                                and courses with no small-group session are
+                                reported so you can decide about them.
+                            </span>
+                        </span>
+                    </label>
+                    {% endif %}
                 </div>
 
                 <div class="mt-6 flex flex-wrap gap-3">

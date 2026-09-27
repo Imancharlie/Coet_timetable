@@ -1,0 +1,9 @@
+{% extends "student_portal/base.html" %}
+{% block title %}Report Received · CoET{% endblock %}
+{% block content %}<section class="card">
+    <h1>Report received</h1>
+    <p class="muted">Your clash report has been sent to the coordinator for review. Keep this reference if you need to follow up:</p>
+    <p class="ref">{{ report.reference }}</p>
+    <p class="notice">Submitting a report does not change the timetable. The coordinator will review it and decide what action is needed.</p>
+    <div class="actions"><a class="button" href="/">Back to timetable portal</a><a class="button secondary" href="{% url 'collision-report' %}">Report another clash</a></div>
+</section>{% endblock %}

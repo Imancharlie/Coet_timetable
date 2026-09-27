@@ -24,6 +24,23 @@
     <style>
         [x-cloak] { display: none !important; }
 
+        /* Shared CoET palette: slate blue structure, soft gray surfaces, green accents. */
+        :root { --coet-ink:#172b3b; --coet-blue:#315d83; --coet-blue-dark:#244b6b; --coet-blue-pale:#eaf1f6; --coet-green:#16836f; --coet-green-dark:#126956; --coet-canvas:#f2f5f7; --coet-line:#d8e1e7; }
+        body { background:var(--coet-canvas); color:var(--coet-ink); }
+        body .bg-gray-50 { background-color:var(--coet-canvas); }
+        body .bg-slate-900 { background-color:var(--coet-blue-dark); }
+        body .bg-slate-800 { background-color:#315d83; }
+        body [class~="hover:bg-slate-800/60"]:hover { background-color:#315d83; }
+        body .bg-blue-600 { background-color:var(--coet-blue); }
+        body [class~="hover:bg-blue-700"]:hover { background-color:var(--coet-blue-dark); }
+        body .bg-emerald-600 { background-color:var(--coet-green); }
+        body [class~="hover:bg-emerald-700"]:hover { background-color:var(--coet-green-dark); }
+        body .text-blue-700, body .text-blue-600 { color:var(--coet-blue); }
+        body .text-emerald-700, body .text-emerald-600, body .text-emerald-500, body .text-emerald-400 { color:var(--coet-green-dark); }
+        body .border-gray-200 { border-color:var(--coet-line); }
+        body input:focus, body select:focus, body textarea:focus { --tw-ring-color:#9fc5d8; border-color:var(--coet-blue); }
+        body [class~="focus:ring-blue-500"]:focus, body [class~="focus-visible:ring-blue-500"]:focus-visible { --tw-ring-color:#9fc5d8; }
+
         /* htmx loading indicator: hidden until a request is in flight */
         .htmx-indicator { opacity: 0; pointer-events: none; transition: opacity 0.15s ease; }
         .htmx-indicator.htmx-request, .htmx-request .htmx-indicator { opacity: 1; pointer-events: auto; }
@@ -104,6 +121,9 @@
         @media (max-width: 640px) {
             #toast-container { left: 1rem; right: 1rem; }
         }
+
+        .mobile-bottom-nav { padding-bottom: max(.35rem, env(safe-area-inset-bottom)); }
+        @media (min-width: 1024px) { .mobile-bottom-nav { display:none; } }
 
         html { scroll-behavior: smooth; }
 
@@ -224,6 +244,13 @@ function showToast(message, type) {
 document.body.addEventListener('import-toast', function (evt) {
     var detail = (evt.detail) || {};
     showToast(detail.message || 'Import done', detail.type || 'success');
+});
+
+// The group-allocation page reports plan/apply/revert/manual outcomes the same
+// way, so a coordinator gets the same feedback wherever the action was taken.
+document.body.addEventListener('allocation-toast', function (evt) {
+    var detail = (evt.detail) || {};
+    showToast(detail.message || 'Allocation updated', detail.type || 'success');
 });
 
 // Dismissable result panel for the "Assign Lecture Groups" action. The close
@@ -351,11 +378,21 @@ document.body.addEventListener('htmx:sendError', function () {
                 <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
             </button>
             <h1 class="text-base font-semibold text-gray-800 truncate">{{ page_title|default:"Dashboard" }}</h1>
-            <div class="ml-auto text-xs text-gray-400 hidden sm:block">CoET — University of Dar es Salaam</div>
+            <div class="ml-auto flex items-center gap-3">
+                <div class="text-xs text-gray-400 hidden sm:block">CoET — University of Dar es Salaam</div>
+                {% if request.user.is_authenticated %}
+                <form method="post" action="{% url 'staff-logout' %}" class="shrink-0">
+                    {% csrf_token %}
+                    <button type="submit" class="rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-blue-500">
+                        Sign out{% if request.user.first_name %} · {{ request.user.first_name }}{% endif %}
+                    </button>
+                </form>
+                {% endif %}
+            </div>
         </header>
 
         <!-- Page content -->
-        <main class="flex-1 p-4 lg:p-6">
+        <main class="flex-1 p-4 pb-24 lg:p-6">
             {% block content %}{% endblock %}
         </main>
     </div>
@@ -368,6 +405,25 @@ document.body.addEventListener('htmx:sendError', function () {
         <span x-text="tooltip"></span>
     </div>
 </div>
+
+{% nav_section as mobile_nav %}
+<nav class="mobile-bottom-nav fixed inset-x-0 bottom-0 z-30 grid grid-cols-5 border-t border-slate-200 bg-white/95 backdrop-blur lg:hidden" aria-label="Mobile navigation">
+    <a href="{% url 'dashboard' %}" class="flex min-w-0 flex-col items-center justify-center gap-1 px-1 py-2 text-[10px] font-semibold {% if mobile_nav == 'dashboard' %}text-[#244b6b]{% else %}text-slate-500{% endif %}" {% if mobile_nav == 'dashboard' %}aria-current="page"{% endif %}>
+        <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10.5 12 3l9 7.5M5.5 9v11h13V9M9 20v-6h6v6"/></svg><span>Home</span>
+    </a>
+    <a href="{% url 'import-hub' %}" class="flex min-w-0 flex-col items-center justify-center gap-1 px-1 py-2 text-[10px] font-semibold {% if mobile_nav == 'imports' %}text-[#244b6b]{% else %}text-slate-500{% endif %}" {% if mobile_nav == 'imports' %}aria-current="page"{% endif %}>
+        <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 16V4m0 0L7 9m5-5 5 5M5 15v4a2 2 0 002 2h10a2 2 0 002-2v-4"/></svg><span>Import</span>
+    </a>
+    <a href="{% url 'allocation-page' %}" class="flex min-w-0 flex-col items-center justify-center gap-1 px-1 py-2 text-[10px] font-semibold {% if mobile_nav == 'allocation' %}text-[#244b6b]{% else %}text-slate-500{% endif %}" {% if mobile_nav == 'allocation' %}aria-current="page"{% endif %}>
+        <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 18h6v-2a3 3 0 00-4.5-2.6M16 18H8m8 0v-2a4 4 0 00-8 0v2m0 0H2v-2a3 3 0 014.5-2.6M15 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg><span>Allocation</span>
+    </a>
+    <a href="{% url 'allocation-groups' %}" class="flex min-w-0 flex-col items-center justify-center gap-1 px-1 py-2 text-[10px] font-semibold {% if mobile_nav == 'allocation-progress' %}text-[#244b6b]{% else %}text-slate-500{% endif %}" {% if mobile_nav == 'allocation-progress' %}aria-current="page"{% endif %}>
+        <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 19V5m0 14h17M8 15l3-4 3 2 5-7"/></svg><span>Group progress</span>
+    </a>
+    <a href="{% url 'timetable' %}" class="flex min-w-0 flex-col items-center justify-center gap-1 px-1 py-2 text-[10px] font-semibold {% if mobile_nav == 'timetable' %}text-[#244b6b]{% else %}text-slate-500{% endif %}" {% if mobile_nav == 'timetable' %}aria-current="page"{% endif %}>
+        <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 5a2 2 0 012-2h12a2 2 0 012 2v14a2 2 0 01-2 2H6a2 2 0 01-2-2V5zM8 3v4m8-4v4M4 11h16M8 15h.01M12 15h.01M16 15h.01"/></svg><span>Timetable</span>
+    </a>
+</nav>
 
 <!-- Slide-over detail panel -->
 <div x-show="slideOpen" x-cloak style="display:none"

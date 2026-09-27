@@ -16,6 +16,12 @@ class Command(BaseCommand):
         "data is reported instead of guessed at, and 'ALL' group rows are "
         "expanded through the ProgrammeCourse mapping. LECTURE sessions are "
         "automatically linked to every programme group that studies the course.\n"
+        "With --derive-requirements the sessions just imported also set each "
+        "course's required activities: a course with tutorial sessions gets "
+        "Tutorial, one with tutorials and practicals gets both. Only an "
+        "activity that has a session is set, a course that already has a "
+        "requirement is never overwritten, and courses with no small-group "
+        "session are reported rather than assumed to need nothing.\n"
     )
 
     def add_arguments(self, parser):
@@ -31,12 +37,23 @@ class Command(BaseCommand):
             action="store_true",
             help="Reconcile and report without writing anything to the database",
         )
+        parser.add_argument(
+            "--derive-requirements",
+            dest="derive_requirements",
+            action="store_true",
+            help=(
+                "Also set each course's required activities from the sessions "
+                "being imported. Only an activity that has a session is set, "
+                "and an existing requirement is never overwritten."
+            ),
+        )
 
     def handle(self, *args, **options):
         result = import_master_timetable_from_excel(
             options["file"],
             semester_id=options["semester"],
             dry_run=options["dry_run"],
+            derive_requirements=options["derive_requirements"],
         )
         if options["dry_run"]:
             self.stdout.write("DRY RUN — no records were written.\n")

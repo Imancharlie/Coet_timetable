@@ -1,0 +1,15 @@
+{% extends "student_portal/base.html" %}
+{% block title %}Staff Sign In · CoET{% endblock %}
+{% block content %}<section class="card" style="max-width:30rem;margin:2vh auto">
+    <h1>Staff sign in</h1>
+    <p class="muted">Sign in to manage timetables, allocations, and student reports.</p>
+    {% if request.GET.expired %}<div class="notice" role="status">You were signed out after a period of inactivity. Please sign in again.</div>{% endif %}
+    {% if form.non_field_errors %}<div class="error" role="alert">Username or password is incorrect. Try again.</div>{% endif %}
+    <form method="post">{% csrf_token %}
+        <input type="hidden" name="next" value="{{ next }}">
+        <div class="field"><label for="id_username">Username</label><input class="field-control" type="text" name="username" id="id_username" autocomplete="username" required autofocus></div>
+        <div class="field"><label for="id_password">Password</label><input class="field-control" type="password" name="password" id="id_password" autocomplete="current-password" required></div>
+        <button class="button" type="submit">Sign in</button>
+    </form>
+    <p style="margin:1rem 0 0;text-align:center;font-size:.85rem"><a href="/">Return to student portal</a></p>
+</section>{% endblock %}

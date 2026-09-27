@@ -1,0 +1,90 @@
+{% extends "student_portal/base.html" %}
+{% block title %}Student Timetable · CoET{% endblock %}
+{% block content %}
+<section class="hero" aria-labelledby="portal-title">
+    <div class="hero-copy">
+        <p class="eyebrow">University of Dar es Salaam · CoET</p>
+        <h1 id="portal-title">Your timetable, ready when you are.</h1>
+        <p class="muted">Choose your programme and group to view the latest semester timetable. Download a clear PDF for your studies.</p>
+        <div class="hero-links"><a class="button secondary" href="{% url 'collision-report' %}">Report a timetable clash</a></div>
+    </div>
+    <figure class="hero-image">
+        <img src="{% static 'student_portal/hero-coet.png' %}" alt="The College of Engineering and Technology at the University of Dar es Salaam" fetchpriority="high">
+        <figcaption>College of Engineering and Technology · UDSM</figcaption>
+    </figure>
+</section>
+<section class="card" id="timetable">
+    <p class="section-kicker">Student services</p>
+    <h1>Download a timetable</h1>
+    {% if current_semester %}
+    <form method="get" action="{% url 'student-timetable-pdf' %}">
+        <input type="hidden" name="scope" value="group">
+        <input type="hidden" name="programme" id="programme-id">
+        <div class="field"><label for="programme">Programme</label>
+            <select id="programme" class="field-control" required>
+                <option value="">Select programme</option>
+                {% for programme in programmes %}<option value="{{ programme.pk }}" data-group-count="{{ programme.student_groups.all|length }}">{{ programme.code }} — {{ programme.name }}</option>{% endfor %}
+            </select>
+        </div>
+        <div class="field"><label for="group">Group or programme</label>
+            <select id="group" name="group" class="field-control" required disabled>
+                <option value="">Select a programme first</option>
+                {% for programme in programmes %}{% for group in programme.student_groups.all %}
+                <option value="{{ group.pk }}" data-programme="{{ programme.pk }}">{{ programme.code }} {{ group.code }}</option>
+                {% endfor %}{% endfor %}
+            </select>
+            <p id="group-note" class="small-note" hidden></p>
+        </div>
+        <div class="field"><label for="semester">Semester / academic year</label>
+            <select id="semester" name="semester" class="field-control" required>
+                {% for semester in semesters %}<option value="{{ semester.pk }}" {% if semester.pk == current_semester.pk %}selected{% endif %}>{{ semester.academic_year }} · Semester {{ semester.semester }}{% if semester.pk == current_semester.pk %} (Current){% endif %}</option>{% endfor %}
+            </select>
+        </div>
+        <div class="field"><label for="year">Year of study</label>
+            <select id="year" name="year" class="field-control">{% for year in year_options %}<option value="{{ year }}">Year {{ year }}</option>{% endfor %}</select>
+        </div>
+        <button id="download-button" class="button" type="submit" disabled>Download PDF</button>
+    </form>
+    <script>
+    (()=>{
+        const programme=document.getElementById('programme');
+        const programmeId=document.getElementById('programme-id');
+        const group=document.getElementById('group');
+        const note=document.getElementById('group-note');
+        const download=document.getElementById('download-button');
+        const groups=[...group.querySelectorAll('option[data-programme]')];
+        programme.addEventListener('change',()=>{
+            group.value=''; programmeId.value=programme.value; note.hidden=true; note.textContent='';
+            download.disabled=true;
+            const placeholder=group.options[0];
+            group.replaceChildren(placeholder);
+            group.disabled=!programme.value;
+            const selected=programme.options[programme.selectedIndex];
+            const count=Number(selected?.dataset.groupCount||0);
+            group.options[0].textContent=programme.value?'Choose a group or all groups':'Select a programme first';
+            if(!programme.value)return;
+            if(count===0){
+                group.disabled=true;
+                group.options[0].textContent='No groups registered';
+                note.textContent='No groups are registered for this programme. Ask the coordinator to add its groups.';
+                note.hidden=false;
+                return;
+            }
+            group.add(new Option('All groups — whole programme','all'));
+            groups.filter(option=>option.dataset.programme===programme.value).forEach(option=>group.add(option));
+        });
+        group.addEventListener('change',()=>{download.disabled=!group.value;});
+    })();
+    </script>
+    {% else %}<div class="notice">Timetables are not available yet.</div>{% endif %}
+</section>
+{% if current_semester %}
+<section class="card">
+    <h2>All programmes</h2>
+    <form method="get" action="{% url 'student-timetable-pdf' %}">
+        <input type="hidden" name="scope" value="all">
+        <button class="button secondary" type="submit">Download the complete timetable · {{ current_semester.academic_year }}, Semester {{ current_semester.semester }}</button>
+    </form>
+</section>
+{% endif %}
+{% endblock %}

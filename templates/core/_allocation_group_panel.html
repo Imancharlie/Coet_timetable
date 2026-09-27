@@ -1,0 +1,130 @@
+﻿{% comment %}
+The requirement list for one group, as a swappable panel.
+
+The assign / remove buttons post back to the same mutation endpoints and the
+response is this very panel, so a placement made by hand is reflected on screen
+at once -- the coordinator never has to reload to find out whether it took.
+Rendered on its own by ``allocation_group_panel`` and included by
+``allocation_group.html``; keep them from drifting by including, not copying.
+{% endcomment %}
+{% load core_tags %}
+
+    <div id="allocation-requirements" class="space-y-4">
+    {% if status and not status.has_nothing_to_do %}
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 px-4 py-3
+                flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div class="flex items-center gap-2 min-w-[11rem] flex-1">
+            <div class="flex-1 h-2.5 rounded-full bg-gray-200 overflow-hidden">
+                <div class="h-full {% if status.is_complete %}bg-emerald-500{% else %}bg-amber-500{% endif %}"
+                     style="width: {{ status.percent }}%"></div>
+            </div>
+            <span class="text-sm font-semibold text-gray-800 whitespace-nowrap">
+                {{ status.met }}/{{ status.total }}
+            </span>
+        </div>
+        {% if status.is_complete %}
+        <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-100 text-emerald-700">
+            Complete &mdash; every requirement is placed
+        </span>
+        {% else %}
+        <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-amber-100 text-amber-800">
+            {{ status.outstanding }} still to place
+        </span>
+        {% endif %}
+    </div>
+    {% endif %}
+    {% if not status or not status.entries %}
+    <div class="rounded-xl border border-gray-200 bg-white p-6 text-center text-gray-400 text-sm">
+        This group has no seminar, tutorial or practical requirement for
+        {{ semester|default:"this semester" }}.
+    </div>
+    {% endif %}
+
+    {% if status and status.unconfigured_courses %}
+    <div class="rounded-xl border border-amber-300 bg-amber-50 p-4">
+        <p class="text-sm font-semibold text-amber-800">
+            Some of this group's courses have no required activities configured
+        </p>
+        <ul class="mt-1.5 space-y-0.5">
+            {% for entry in status.unconfigured_courses %}
+            <li class="text-xs text-amber-700">
+                &bull; {{ entry.code }} ({{ entry.name }}) &mdash; nothing was required of this group for it
+            </li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+
+    {% for entry in status.entries %}
+    <div class="bg-white rounded-xl shadow-sm border {% if entry.is_met %}border-emerald-200{% else %}border-amber-200{% endif %} p-4">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div class="min-w-0">
+                <h3 class="text-sm font-semibold text-gray-800">
+                    {{ entry.requirement.course.code }} &mdash; {{ entry.activity_label }}
+                    {% if entry.requirement.ordinal > 1 %}<span class="text-gray-400">#{{ entry.requirement.ordinal }}</span>{% endif %}
+                </h3>
+                <p class="text-xs text-gray-500">{{ entry.requirement.course.name }}</p>
+            </div>
+            {% if entry.is_met %}
+            <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-100 text-emerald-700 shrink-0">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+                Assigned
+            </span>
+            {% else %}
+            <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-amber-100 text-amber-800 shrink-0">
+                Not yet placed
+            </span>
+            {% endif %}
+        </div>
+
+        {% if entry.is_met %}
+        <div class="mt-3 rounded-lg bg-emerald-50 border border-emerald-200 px-3 py-2.5
+                    flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <p class="text-sm text-emerald-900 min-w-0">
+                {{ entry.assigned.get_day_display }} {{ entry.assigned.start_time|time_short }}-{{ entry.assigned.end_time|time_short }}
+                {% if entry.assigned.venue %}&middot; {{ entry.assigned.venue.name }}{% else %}&middot; no venue{% endif %}
+            </p>
+            <form method="post" action="{{ unassign_url }}"
+                  hx-post="{{ unassign_url }}" hx-target="#allocation-requirements" hx-swap="outerHTML"
+                  hx-disabled-elt="this" class="shrink-0">
+                {% csrf_token %}
+                {% include "core/_allocation_view_fields.html" %}
+                <input type="hidden" name="group" value="{{ group.pk }}">
+                <input type="hidden" name="session" value="{{ entry.assigned.pk }}">
+                <button type="submit" class="px-3 py-1.5 text-xs font-medium text-red-700 bg-white border border-red-300 hover:bg-red-50 rounded-lg transition">
+                    Remove
+                </button>
+            </form>
+        </div>
+        {% if entry.options %}
+        <div class="mt-3" x-data="{ open: false }">
+            <button type="button" @click="open = !open"
+                    class="inline-flex items-center gap-1 text-xs font-medium text-blue-700 hover:text-blue-900">
+                <span x-text="open ? '&#9652;' : '&#9656;'"></span>
+                <span x-text="open ? 'Hide the other sessions' : 'Move it: see the other sessions'"></span>
+            </button>
+            <div x-show="open" x-cloak class="mt-2">
+                {% include "core/_allocation_options.html" with options=entry.options %}
+            </div>
+        </div>
+        {% endif %}
+        {% else %}
+        <p class="mt-2 text-xs text-gray-500">
+            {% if entry.options %}
+            {{ entry.free_options|length }} of {{ entry.options|length }}
+            session{{ entry.options|length|pluralize }} this group is free for and fits.
+            {% else %}
+            No {{ entry.activity_label|lower }} session exists for
+            {{ entry.requirement.course.code }} in {{ semester }}.
+            {% endif %}
+        </p>
+
+        {% if entry.options %}
+        <div class="mt-3">
+            {% include "core/_allocation_options.html" with options=entry.options %}
+        </div>
+        {% endif %}
+        {% endif %}
+    </div>
+    {% endfor %}
+    </div>

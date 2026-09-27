@@ -11,6 +11,10 @@ from django.db.models.deletion import Collector, ProtectedError
 
 PLURAL_LABELS = {
     "ActivityLog": "Activity log entries",
+    "AllocationChange": "Allocation-run changes",
+    "AllocationRun": "Allocation runs",
+    "Course": "Courses",
+    "CourseActivityRequirement": "Activity requirements",
     "Programme": "Programmes",
     "ProgrammeCourse": "Programme courses",
     "Semester": "Semesters",

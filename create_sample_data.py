@@ -36,6 +36,10 @@ pd.DataFrame(
 ).to_excel(OUT / "student_groups.xlsx", index=False)
 
 # --- Programme Courses ---
+# "Required Activities" is the optional column that sets each course's shared
+# seminar/tutorial/practical requirements. Drop it and the import still works —
+# those courses are then reported as "requirement not configured" during
+# allocation review.
 pd.DataFrame(
     {"programme_code": ["CE", "CE", "CE", "EE", "EE", "ME", "ME", "IE"],
      "course_code": ["MT161", "TG201", "ST101", "MT161", "EE101", "MT161", "ME101", "IE101"],
@@ -47,7 +51,15 @@ pd.DataFrame(
                      "Mathematics 1",
                      "Mechanical Engineering 1",
                      "Industrial Engineering 1"],
-     "semester": [1, 1, 2, 1, 1, 1, 1, 1]}
+     "semester": [1, 1, 2, 1, 1, 1, 1, 1],
+     "Required Activities": ["Seminar; Tutorial; Practical",
+                             "Tutorial; Practical",
+                             "Seminar",
+                             "Seminar; Tutorial; Practical",
+                             "Seminar; Tutorial",
+                             "Seminar; Tutorial; Practical",
+                             "Seminar; Practical",
+                             "Seminar"]}
 ).to_excel(OUT / "programme_courses.xlsx", index=False)
 
 # --- Venues ---

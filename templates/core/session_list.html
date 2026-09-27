@@ -1,6 +1,22 @@
 {% extends "core/list.html" %}
 
 {% block list_actions %}
+{% if unassigned_count %}
+<div class="flex items-start gap-3 mb-4 rounded-xl border border-blue-200 bg-blue-50 p-4">
+    <svg class="w-5 h-5 shrink-0 text-blue-600 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+    <div class="flex-1 min-w-0">
+        <p class="text-sm font-semibold text-blue-800">
+            {{ unassigned_count }} seminar / tutorial / practical session{{ unassigned_count|pluralize }}
+            {{ unassigned_count|pluralize:"has,have" }} no group assigned
+        </p>
+        <p class="text-xs text-blue-700 mt-0.5">
+            Run the group allocator to place groups into them, or assign them
+            one at a time by opening a session.
+            <a href="{{ assignment_url }}?assigned=no" class="underline font-medium">Show only the unassigned ones</a>.
+        </p>
+    </div>
+</div>
+{% endif %}
 {% if legacy_sessions_count %}
 <div class="flex items-start gap-3 mb-4 rounded-xl border border-amber-300 bg-amber-50 p-4">
     <span class="text-2xl">&#9888;&#65039;</span>

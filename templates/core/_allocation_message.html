@@ -1,0 +1,29 @@
+{% if message %}
+<div class="mb-3 rounded-lg border px-4 py-3 text-sm
+    {% if result.ok %}border-emerald-300 bg-emerald-50 text-emerald-800
+    {% else %}border-red-300 bg-red-50 text-red-700{% endif %}">
+    {{ message }}
+</div>
+{% endif %}
+
+{% if problems %}
+<div class="mb-3 rounded-lg border border-red-300 bg-red-50 px-4 py-3">
+    <p class="text-sm font-semibold text-red-700">Assignment refused</p>
+    <ul class="mt-1.5 space-y-1">
+        {% for problem in problems %}
+        <li class="text-xs text-red-700">&bull; {{ problem.message }}</li>
+        {% endfor %}
+    </ul>
+</div>
+{% endif %}
+
+{% if result.conflicts %}
+<div class="mb-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3">
+    <p class="text-sm font-semibold text-amber-800">Revert blocked by later edits</p>
+    <ul class="mt-1.5 space-y-1">
+        {% for conflict in result.conflicts %}
+        <li class="text-xs text-amber-800">&bull; {{ conflict }}</li>
+        {% endfor %}
+    </ul>
+</div>
+{% endif %}

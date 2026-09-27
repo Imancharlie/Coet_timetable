@@ -1,6 +1,6 @@
 from django import template
 
-from core.models import ActivityLog
+from core.models import ALLOCATED_ACTIVITY_TYPES, ActivityLog, ActivityType
 
 register = template.Library()
 
@@ -56,6 +56,26 @@ def get_item(mapping, key):
         return None
 
 
+@register.filter
+def group_by_activity(rows):
+    """Group a plan's assignment dicts by activity, in priority order.
+
+    Returns ``[(label, rows), ...]`` ordered Seminar, Tutorial, Practical, so
+    the review table reads in the same order the allocator searched in.
+    """
+    buckets: dict = {}
+    for row in rows or []:
+        buckets.setdefault(row.get("activity", ""), []).append(row)
+    ordered = []
+    for activity in ALLOCATED_ACTIVITY_TYPES:
+        label = ActivityType(activity).label
+        if label in buckets:
+            ordered.append((label, buckets.pop(label)))
+    # Anything unexpected still gets shown rather than silently dropped.
+    ordered.extend(sorted(buckets.items()))
+    return ordered
+
+
 _NAV_SECTIONS = {
     "programme": "programmes",
     "group": "groups",
@@ -65,6 +85,12 @@ _NAV_SECTIONS = {
     "workshop": "workshops",
     "td": "td",
     "course": "courses",
+    # More specific than "allocation", and it must come first: the loop below
+    # returns on the first prefix that matches, so the generic entry would
+    # otherwise swallow these and light up the allocator link instead.
+    "allocation-groups": "allocation-progress",
+    "allocation-group": "allocation-progress",
+    "allocation": "allocation",
     "import": "imports",
     "export": "exports",
     "timetable": "timetable",

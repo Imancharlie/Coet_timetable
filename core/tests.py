@@ -1,3 +1,4 @@
+import io
 import os
 import json
 import re
@@ -9,9 +10,32 @@ from unittest import mock
 import pandas as pd
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db.models.deletion import ProtectedError
 from django.test import Client, TestCase
 from openpyxl import Workbook
 
+from core.forms import ProgrammeCourseForm
+from core.group_allocation import (
+    apply_run,
+    AvailabilityIndex,
+    build_requirements,
+    capacity_status,
+    check_availability,
+    derive_requirements_from_sessions,
+    find_requirement_count_columns,
+    find_requirements_column,
+    format_requirements,
+    group_statuses,
+    manual_assign,
+    manual_unassign,
+    parse_requirements,
+    plan_allocation,
+    required_capacity,
+    revert_run,
+    save_plan,
+    validate_assignment,
+    validate_manual_assignment,
+)
 from core.importers import (
     import_master_timetable_from_excel,
     import_programme_courses_from_excel,
@@ -24,6 +48,11 @@ from core.importers import (
 from core.models import (
     ActivityLog,
     ActivityType,
+    AllocationChange,
+    AllocationRun,
+    AllocationStatus,
+    Course,
+    CourseActivityRequirement,
     ImportHistory,
     LogAction,
     Programme,
@@ -36,6 +65,7 @@ from core.models import (
     TimePeriod,
     Venue,
     WorkshopAllocation,
+    normalise_course_code,
 )
 from core.timetable_grid import (
     FILL_COLORS,
@@ -48,6 +78,7 @@ from core.timetable_grid import (
 )
 from core.timetable_pdf import (
     _build_day_flowables,
+    _collect_group_entries_and_rotations,
     _compact_group_codes,
     _entry_lines,
     _entry_parts,
@@ -2908,15 +2939,436 @@ class WorkshopCellDisplayTests(TestCase):
         self.assertGreater(len(pdf), 1000)
 
 
-class WorkshopRotationTests(TestCase):
-    """Rotating workshops merge into one cell plus a Workshop Rotation Key.
+def _pdf_page_streams(pdf):
+    """Decode each PDF page's content stream without needing pypdf.
 
-    A slot (group + day + time period) holding two or more different workshop
-    identities is a weekly rotation: the shared cell lists all names and the
-    key maps each contiguous week block to a workshop. Different-time sessions
-    on the same day stay separate. Programme affinity (workshop name in the
-    programme name) orders the names without hard-coding.
+    reportlab writes page content as ASCII85 + Flate, so the words a test wants
+    to assert on are not visible in the raw bytes.
     """
+    import base64
+    import zlib
+
+    streams = []
+    for match in re.finditer(rb"stream\r?\n", pdf):
+        start = match.end()
+        end = pdf.find(b"endstream", start)
+        if end == -1:
+            continue
+        raw = pdf[start:end].strip()
+        for decode in (
+            lambda b: zlib.decompress(b),
+            lambda b: zlib.decompress(base64.a85decode(b, adobe=True)),
+            lambda b: b,
+        ):
+            try:
+                streams.append(decode(raw))
+                break
+            except Exception:
+                continue
+    return streams
+
+
+def _pdf_text(pdf):
+    """Every page's decoded content stream, joined, as latin-1 text."""
+    return b"\n".join(_pdf_page_streams(pdf)).decode("latin-1")
+
+
+def _drawn_text_y(text, needle):
+    """The ``y`` a string was drawn at, from reportlab's ``Tm`` operator.
+
+    reportlab emits ``1 0 0 1 <x> <y> Tm`` immediately before the text it
+    places, so this is the real vertical position on the page -- which is the
+    only honest way to assert that a footer is at the *bottom* rather than
+    merely present somewhere on the sheet.
+    """
+    pattern = re.escape(needle).replace("\\ ", "\\s*\\)?\\s*")
+    for match in re.finditer(r"1 0 0 1 (-?[\d.]+) (-?[\d.]+) Tm\s*\(" + pattern,
+                             text):
+        return float(match.group(2))
+    return None
+
+
+class WorkshopRotationKeyTableTests(TestCase):
+    """The rotation key is three columns and one row per week block.
+
+    A row has to read as a sentence -- *in weeks 1-7 this group attends this
+    workshop* -- so the key is transposed out of the old "one row per group, one
+    column per week" shape.
+    """
+
+    def setUp(self):
+        self.sem = Semester.objects.create(academic_year="2026/2027", semester=1)
+        self.prog = Programme.objects.create(
+            code="EE", name="BSc. in Electrical Engineering"
+        )
+        self.c1 = StudentGroup.objects.create(programme=self.prog, code="C1")
+        self.c2 = StudentGroup.objects.create(programme=self.prog, code="C2")
+        self.c3 = StudentGroup.objects.create(programme=self.prog, code="C3")
+
+    def _workshop(self, name, group, day="THURSDAY", period="MORNING",
+                  start=None, end=None, week=None):
+        return WorkshopAllocation.objects.create(
+            semester=self.sem,
+            course_code=name,
+            workshop=name,
+            group_code=group,
+            day=day,
+            time_period=period,
+            start_time=start,
+            end_time=end,
+            week_start=week[0] if week else None,
+            week_end=week[1] if week else None,
+            venue="",
+        )
+
+    def _pdf(self, group=None):
+        from io import BytesIO
+
+        buf = BytesIO()
+        if group is not None:
+            render_group_timetable(group, self.sem, 1, out=buf)
+        else:
+            render_programme_timetable(self.prog, self.sem, 1, out=buf)
+        return _pdf_text(buf.getvalue())
+
+    def _key_rows(self, text):
+        """The key's body rows as ``(weeks, group, workshop)`` triples.
+
+        reportlab draws table cell text as ``(string) Tj`` lines, so the row
+        contents can be read off in order once the header is skipped.
+        """
+        head, sep, body = text.partition("WORKSHOP ROTATION KEY")
+        self.assertTrue(sep, "no rotation key in the PDF")
+        cells = re.findall(r"\(((?:[^()\\]|\\.)*)\)\s*Tj", body)
+        cells = [c for c in cells if c.strip()]
+        self.assertEqual(cells[:3], ["Weeks", "Group", "Workshop"], cells[:3])
+        rows = cells[3:]
+        return [tuple(rows[i : i + 3]) for i in range(0, len(rows) - 2, 3)]
+
+    def test_the_key_has_exactly_three_columns(self):
+        self._workshop("Carpentry", "C1")
+        self._workshop("Electrical", "C1")
+        text = self._pdf(self.c1)
+        header = re.findall(r"\(((?:[^()\\]|\\.)*)\)\s*Tj", text)
+        self.assertIn("Weeks", header)
+        self.assertIn("Group", header)
+        self.assertIn("Workshop", header)
+        # The columns that used to be there must be gone.
+        for dropped in ("Programme", "Day", "Course/Session"):
+            self.assertNotIn(dropped, header)
+
+    def test_a_two_way_rotation_is_two_readable_rows(self):
+        self._workshop("Carpentry", "C1")
+        self._workshop("Electrical", "C1")
+        self.assertEqual(
+            self._key_rows(self._pdf(self.c1)),
+            [
+                ("Week 1-7", "C1", "Electrical"),
+                ("Week 8-14", "C1", "Carpentry"),
+            ],
+        )
+
+    def test_a_three_way_rotation_orders_by_week_not_by_text(self):
+        """"Week 15-21" sorts before "Week 8-14" as a string.
+
+        A rotation long enough to reach a two-digit week is the only place that
+        shows, and it is exactly the case that would silently print out of
+        order.
+        """
+        self._workshop("Welding", "C1")
+        self._workshop("Electrical", "C1")
+        self._workshop("M/Tools", "C1")
+        rows = self._key_rows(self._pdf(self.c1))
+        self.assertEqual(
+            rows,
+            [
+                ("Week 1-7", "C1", "Electrical"),
+                ("Week 8-14", "C1", "M/Tools"),
+                ("Week 15-21", "C1", "Welding"),
+            ],
+        )
+    def test_each_group_gets_its_own_rows(self):
+        """A different schedule earns its own row -- that is the useful case."""
+        self._workshop("Carpentry", "C1")
+        self._workshop("Electrical", "C1")
+        self._workshop("Welding", "C2")
+        self._workshop("Building", "C2")
+        rows = self._key_rows(self._pdf())
+        self.assertEqual(
+            rows,
+            [
+                ("Week 1-7", "C2", "Building"),
+                ("Week 1-7", "C1", "Electrical"),
+                ("Week 8-14", "C1", "Carpentry"),
+                ("Week 8-14", "C2", "Welding"),
+            ],
+        )
+
+    def test_groups_on_the_same_schedule_share_one_row(self):
+        """Not one row per group. Printing C1's weeks and then C2's says the
+        same thing twice over; the Group column lists who follows the schedule."""
+        for group in ("C1", "C2", "C3"):
+            self._workshop("Carpentry", group)
+            self._workshop("Electrical", group)
+        rows = self._key_rows(self._pdf())
+        self.assertEqual(
+            rows,
+            [
+                ("Week 1-7", "C1, C2, C3", "Electrical"),
+                ("Week 8-14", "C1, C2, C3", "Carpentry"),
+            ],
+        )
+
+    def test_a_repeated_programme_prefix_is_collapsed_in_the_group_column(self):
+        for code in ("EE C1", "EE C2", "CE A1"):
+            StudentGroup.objects.create(programme=self.prog, code=code)
+            self._workshop("Carpentry", code)
+            self._workshop("Electrical", code)
+        rows = self._key_rows(self._pdf())
+        self.assertEqual(
+            rows,
+            [
+                ("Week 1-7", "EE C1, C2, CE A1", "Electrical"),
+                ("Week 8-14", "EE C1, C2, CE A1", "Carpentry"),
+            ],
+        )
+
+    def test_explicit_week_ranges_are_kept_verbatim(self):
+        self._workshop("Carpentry", "C1", start=time(10, 0), end=time(14, 0),
+                       week=(3, 8))
+        self._workshop("Electrical", "C1", start=time(10, 0), end=time(14, 0),
+                       week=(9, 14))
+        self.assertEqual(
+            self._key_rows(self._pdf(self.c1)),
+            [
+                ("Week 3-8", "C1", "Carpentry"),
+                ("Week 9-14", "C1", "Electrical"),
+            ],
+        )
+
+    def test_the_cell_no_longer_repeats_the_week_range_on_a_group_sheet(self):
+        """The range came off a cell that cannot act on it.
+
+        A folded workshop cell states the type, the time and the groups; the
+        workshop *names* only ever appear in the key below, because the export
+        drops the course detail to stop it swamping the box. A week range beside
+        that is therefore unreadable noise -- and the key prints the mapping
+        properly, one row per block.
+        """
+        self._workshop("Carpentry", "C1", start=time(10, 0), end=time(14, 0),
+                       week=(1, 7))
+        self._workshop("Electrical", "C1", start=time(10, 0), end=time(14, 0),
+                       week=(8, 14))
+        text = self._pdf(self.c1)
+        cell = text.partition("WORKSHOP ROTATION KEY")[0]
+        self.assertIn("Workshop", cell)
+        self.assertNotIn("Wk 1-7", cell)
+        self.assertNotIn("Wk 8-14", cell)
+        # ...and the key is now the single place the mapping is stated.
+        self.assertEqual(
+            self._key_rows(text),
+            [
+                ("Week 1-7", "C1", "Carpentry"),
+                ("Week 8-14", "C1", "Electrical"),
+            ],
+        )
+
+    def test_a_programme_sheet_keeps_the_range_as_a_disambiguator(self):
+        """There the range is sometimes the only thing telling two entries apart.
+
+        Two groups doing the *same* workshop in the same slot but in different
+        week blocks collapse to one cell. Without the range the two rows print
+        identically and nobody can tell which group is in which week.
+        """
+        for group, start, end in (("C1", 1, 7), ("C2", 8, 14)):
+            WorkshopAllocation.objects.create(
+                semester=self.sem,
+                course_code="Carpentry",
+                workshop="Carpentry",
+                group_code=group,
+                day="THURSDAY",
+                time_period="MORNING",
+                week_start=start,
+                week_end=end,
+                venue="",
+            )
+        text = self._pdf()
+        self.assertIn("Wk 1-7", text)
+        self.assertIn("Wk 8-14", text)
+
+    def test_the_two_week_ranges_are_not_folded_into_one_wrong_cell(self):
+        """Folding them would keep only the first range and claim both groups.
+
+        C1 is in weeks 1-7 and C2 in weeks 8-14. Merged into one cell reading
+        "ALL groups, weeks 1-7", the sheet would be wrong about C2 -- and
+        neither group rotates here, so this is a cell question, not a key one.
+        """
+        for group, start, end in (("C1", 1, 7), ("C2", 8, 14)):
+            WorkshopAllocation.objects.create(
+                semester=self.sem,
+                course_code="Carpentry",
+                workshop="Carpentry",
+                group_code=group,
+                day="THURSDAY",
+                time_period="MORNING",
+                week_start=start,
+                week_end=end,
+                venue="",
+            )
+        cell = self._pdf().partition("WORKSHOP ROTATION KEY")[0]
+        # Both ranges must survive, and neither may sit beside an "ALL" that
+        # would claim a group it does not cover.
+        self.assertIn("Wk 1-7", cell)
+        self.assertIn("Wk 8-14", cell)
+        self.assertNotIn("ALL \\267 Wk 1-7", cell)
+        self.assertNotIn("Wk 1-7 \\267 ALL", cell)
+
+
+class GridExportFooterTests(TestCase):
+    """The two grid sheets carry the master timetable's footer, on every page.
+
+    It used to be a flowable appended to the element list, so it printed wherever
+    the content happened to end -- near the top of page one for a short
+    timetable -- and never appeared on any other page.
+    """
+
+    def setUp(self):
+        self.sem = Semester.objects.create(academic_year="2026/2027", semester=1)
+        self.prog = Programme.objects.create(
+            code="EE", name="BSc. in Electrical Engineering"
+        )
+        self.c1 = StudentGroup.objects.create(programme=self.prog, code="C1")
+        self.c2 = StudentGroup.objects.create(programme=self.prog, code="C2")
+        self.venue = Venue.objects.create(name="R217", capacity=200)
+
+    def _sessions(self, n=9):
+        from datetime import time as _t
+
+        for i in range(n):
+            Session.objects.create(
+                semester=self.sem,
+                course_code="EE150",
+                activity_type=ActivityType.TUTORIAL,
+                day="MONDAY",
+                start_time=_t(7 + (i % 12), 0),
+                end_time=_t(8 + (i % 12), 0),
+                venue=self.venue,
+            )
+
+    def _group_pdf(self, **kwargs):
+        from io import BytesIO
+
+        buf = BytesIO()
+        render_group_timetable(self.c1, self.sem, 1, out=buf, **kwargs)
+        return buf.getvalue()
+
+    def _programme_pdf(self, **kwargs):
+        from io import BytesIO
+
+        buf = BytesIO()
+        render_programme_timetable(self.prog, self.sem, 1, out=buf, **kwargs)
+        return buf.getvalue()
+
+    def test_the_group_sheet_names_the_portal_the_date_and_the_page(self):
+        import datetime as _dt
+
+        self._sessions()
+        text = _pdf_text(self._group_pdf())
+        self.assertIn("Generated from", text)
+        self.assertIn("CoET Timetable Portal", text)
+        self.assertIn(_dt.date.today().strftime("%d %B %Y"), text)
+        self.assertIn("(Page 1)", text)
+
+    def test_the_programme_sheet_carries_the_same_footer(self):
+        import datetime as _dt
+
+        self._sessions()
+        text = _pdf_text(self._programme_pdf())
+        for fragment in (
+            "Generated from",
+            "CoET Timetable Portal",
+            _dt.date.today().strftime("%d %B %Y"),
+            "(Page 1)",
+        ):
+            self.assertIn(fragment, text)
+
+    def test_the_footer_sits_at_the_bottom_of_the_page(self):
+        """Not merely present -- down in the margin, where a footer belongs.
+
+        A4 portrait is 842pt tall, so anything above ~60pt is body text. This is
+        the assertion that catches the old flowable placement, which put the
+        line immediately under the table.
+        """
+        self._sessions()
+        text = _pdf_text(self._group_pdf())
+        y = _drawn_text_y(text, "Generated from")
+        self.assertIsNotNone(y, "footer text not found in the content stream")
+        self.assertLess(y, 60, f"footer drawn at y={y}, which is not the bottom")
+        self.assertGreater(y, 0, "footer drawn off the bottom of the page")
+
+    def test_the_footer_repeats_on_every_page(self):
+        """A long rotation key forces a second page, and the footer must be on it.
+
+        The old version was a flowable, so it could only ever be on one page --
+        and on a short sheet, near the top of the first.
+        """
+        for n in range(30):
+            code = f"X{n:02d}"
+            StudentGroup.objects.create(programme=self.prog, code=code)
+            # Two workshops per group, so each one really is a rotation and
+            # really earns key rows, and a week range unique to that group so
+            # the rows cannot collapse together into a page-fitting handful.
+            for offset, name in ((1, f"Shop{n:02d}"), (8, f"Shop{(n + 1) % 30:02d}")):
+                WorkshopAllocation.objects.create(
+                    semester=self.sem,
+                    course_code=name,
+                    workshop=name,
+                    group_code=code,
+                    day="THURSDAY",
+                    time_period="MORNING",
+                    week_start=n * 7 + offset,
+                    week_end=n * 7 + offset + 6,
+                    venue="",
+                )
+        self._sessions()
+        pdf = self._programme_pdf()
+        pages = len(re.findall(rb"/Type\s*/Page[^s]", pdf))
+        self.assertGreater(pages, 1, "this fixture must span more than one page")
+        text = _pdf_text(pdf)
+        self.assertEqual(text.count("Generated from"), pages)
+        for number in range(1, pages + 1):
+            self.assertIn(f"(Page {number})", text)
+
+    def test_the_portal_name_links_back_to_the_site_on_both_sheets(self):
+        for pdf in (
+            self._group_pdf(portal_url="http://example.test/"),
+            self._programme_pdf(portal_url="http://example.test/"),
+        ):
+            self.assertEqual(
+                pdf.count(b"/URI (http://example.test/)"),
+                len(re.findall(rb"/Type\s*/Page[^s]", pdf)),
+            )
+
+    def test_no_sheet_still_carries_the_old_floating_line(self):
+        self._sessions()
+        for pdf in (self._group_pdf(), self._programme_pdf()):
+            self.assertNotIn("Prepared for personal use", _pdf_text(pdf))
+
+    def test_the_export_views_hand_the_renderer_their_own_address(self):
+        for url in (
+            f"/export/groups/{self.c1.pk}/timetable.pdf/",
+            f"/export/programmes/{self.prog.pk}/timetable.pdf/",
+        ):
+            resp = self.client.get(
+                url,
+                {"semester": self.sem.pk, "year": "1"},
+                HTTP_HOST="timetable.test",
+            )
+            self.assertEqual(resp.status_code, 200, url)
+            self.assertIn(b"/URI (http://timetable.test/)", resp.content)
+
+
+class WorkshopRotationTests(TestCase):
 
     def setUp(self):
         self.sem = Semester.objects.create(academic_year="2026/2027", semester=1)
@@ -6390,3 +6842,3058 @@ end_time=time(13, 0),
         resp = self.client.get("/sessions/")
         self.assertEqual(resp.status_code, 200)
         self.assertContains(resp, "standard workshop session times")
+
+
+# --------------------------------------------------------------------------
+# Shared courses, required activities and group allocation
+# --------------------------------------------------------------------------
+
+
+# Shared courses and required activities
+# --------------------------------------------------------------------------
+
+
+class CourseCodeNormalisationTests(TestCase):
+    def test_trims_and_uppercases(self):
+        self.assertEqual(normalise_course_code("  mt161 "), "MT161")
+        self.assertEqual(normalise_course_code("Mt 161"), "MT 161")
+        self.assertEqual(normalise_course_code(None), "")
+
+    def test_code_is_normalised_on_save(self):
+        course = Course.objects.create(code="  ee131 ", name="Electronics")
+        self.assertEqual(course.code, "EE131")
+        self.assertEqual(Course.objects.get(pk=course.pk).code, "EE131")
+
+
+class SharedCourseModelTests(TestCase):
+    def test_blank_requirements_means_no_allocation_needed(self):
+        course = Course.objects.create(code="MT161", name="Mathematics 1")
+        self.assertEqual(course.requirements, ())
+        self.assertEqual(course.required_activities(), ())
+        self.assertFalse(course.has_requirements())
+        self.assertEqual(course.activities_label(), "")
+
+    def test_requirements_support_a_combination(self):
+        course = Course.objects.create(code="TG201", name="Technical Drawing 1")
+        course.set_requirements({"TUTORIAL": 1, "PRACTICAL": 1})
+        self.assertEqual(
+            course.required_activities(), ("TUTORIAL", "PRACTICAL")
+        )
+        self.assertEqual(course.activities_label(), "Tutorial; Practical")
+
+    def test_requirements_are_returned_in_priority_order(self):
+        course = Course.objects.create(code="CL111")
+        course.set_requirements({"PRACTICAL": 1, "SEMINAR": 1, "TUTORIAL": 1})
+        self.assertEqual(
+            course.required_activities(),
+            ("SEMINAR", "TUTORIAL", "PRACTICAL"),
+        )
+
+    def test_requirements_carry_a_count(self):
+        course = Course.objects.create(code="ME101")
+        course.set_requirements({"PRACTICAL": 2})
+        self.assertEqual(course.required_count("PRACTICAL"), 2)
+        self.assertEqual(course.activities_label(), "2x Practical")
+
+    def test_lectures_and_workshops_are_never_requirements(self):
+        course = Course.objects.create(code="XX100")
+        course.set_requirements({"LECTURE": 1, "WORKSHOP": 1, "SEMINAR": 1})
+        self.assertEqual(course.required_activities(), ("SEMINAR",))
+
+    def test_set_requirements_replaces_rather_than_accumulates(self):
+        course = Course.objects.create(code="XX100")
+        course.set_requirements({"TUTORIAL": 1, "PRACTICAL": 1})
+        course.set_requirements({"SEMINAR": 1})
+        self.assertEqual(course.required_activities(), ("SEMINAR",))
+
+    def test_requirement_row_rejects_a_lecture(self):
+        course = Course.objects.create(code="XX100")
+        row = CourseActivityRequirement(
+            course=course, activity_type="LECTURE", count=1
+        )
+        with self.assertRaises(ValidationError):
+            row.clean()
+
+    def test_name_conflicts_are_kept_for_review(self):
+        course = Course.objects.create(
+            code="CL111",
+            name="Communication Skills for Engineers",
+            name_variants=json.dumps(["Communication Skills for Engineering"]),
+        )
+        self.assertEqual(
+            course.name_conflicts(), ["Communication Skills for Engineering"]
+        )
+
+
+class ProgrammeCourseLinkTests(TestCase):
+    def setUp(self):
+        self.prog = Programme.objects.create(code="CE", name="Civil Engineering")
+        self.course = Course.objects.create(code="MT161", name="Mathematics 1")
+
+    def test_code_and_name_mirror_the_shared_course(self):
+        link = ProgrammeCourse.objects.create(
+            programme=self.prog, course=self.course, semester=1
+        )
+        self.assertEqual(link.course_code, "MT161")
+        self.assertEqual(link.course_name, "Mathematics 1")
+
+    def test_renaming_the_shared_course_updates_every_link(self):
+        ProgrammeCourse.objects.create(
+            programme=self.prog, course=self.course, semester=1
+        )
+        Programme.objects.create(code="ME", name="Mechanical")
+        me = Programme.objects.get(code="ME")
+        ProgrammeCourse.objects.create(
+            programme=me, course=self.course, semester=1
+        )
+        self.course.name = "Mathematics I"
+        self.course.save()
+        link = ProgrammeCourse.objects.get(programme=self.prog)
+        link.refresh_from_db()
+        self.assertEqual(link.course_name, "Mathematics I")
+        self.assertEqual(
+            ProgrammeCourse.objects.filter(course_name="Mathematics I").count(), 2
+        )
+
+    def test_a_shared_course_cannot_be_deleted_out_from_under_a_programme(self):
+        ProgrammeCourse.objects.create(
+            programme=self.prog, course=self.course, semester=1
+        )
+        with self.assertRaises(ProtectedError):
+            self.course.delete()
+
+    def test_form_only_exposes_the_shared_course(self):
+        form = ProgrammeCourseForm(
+            data={
+                "programme": self.prog.pk,
+                "course": self.course.pk,
+                "semester": 1,
+            }
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertNotIn("course_code", form.fields)
+        self.assertNotIn("course_name", form.fields)
+
+    def test_form_rejects_a_duplicate_programme_course_semester(self):
+        ProgrammeCourse.objects.create(
+            programme=self.prog, course=self.course, semester=1
+        )
+        form = ProgrammeCourseForm(
+            data={
+                "programme": self.prog.pk,
+                "course": self.course.pk,
+                "semester": 1,
+            }
+        )
+        self.assertFalse(form.is_valid())
+        self.assertIn("semester", form.errors)
+
+
+class RequiredActivitiesParsingTests(TestCase):
+    def test_blank_means_no_requirement(self):
+        self.assertEqual(parse_requirements(""), ({}, []))
+        self.assertEqual(parse_requirements(None), ({}, []))
+
+    def test_every_spelling_of_no_requirement(self):
+        for text in (
+            "-", "--", "N/A", "n/a", "NA", "none", "None", "nil", "no",
+            "not required", "None required", "no requirements",
+            "not applicable", "no allocation", "No allocation required",
+            "TBC", "  ",
+        ):
+            counts, problems = parse_requirements(text)
+            self.assertEqual((counts, problems), ({}, []), text)
+
+    def test_single_activity(self):
+        self.assertEqual(parse_requirements("Tutorial"), ({"TUTORIAL": 1}, []))
+
+    def test_combinations_with_every_separator(self):
+        for text in (
+            "Tutorial; Practical",
+            "Tutorial, Practical",
+            "Tutorial + Practical",
+            "Tutorial and Practical",
+            "Seminar & Tutorial",
+            "Tutorial | Practical",
+            "Seminar / Practical",
+            "Seminar\nPractical",
+            "Seminar\r\nPractical",
+            "• Tutorial; • Practical",
+        ):
+            counts, problems = parse_requirements(text)
+            self.assertEqual(problems, [], text)
+            self.assertEqual(len(counts), 2, text)
+
+    def test_an_unseparated_pair_is_still_two_activities(self):
+        # A cell pasted out of a table often loses its separators.
+        for text in ("Seminar Tutorial", "Practical Seminar", "TUTORIAL SEMINAR"):
+            counts, problems = parse_requirements(text)
+            self.assertEqual(problems, [], text)
+            self.assertEqual(len(counts), 2, text)
+
+    def test_run_together_words_are_reported_rather_than_guessed(self):
+        # "TutorialTutorial" is not a real spreadsheet value, and guessing at it
+        # is the one thing that must not happen.
+        counts, problems = parse_requirements("TutorialTutorial")
+        self.assertEqual(counts, {})
+        self.assertEqual(len(problems), 1)
+
+    def test_case_and_plural_variants(self):
+        counts, problems = parse_requirements("tutorials; PRACTICALS")
+        self.assertEqual(problems, [])
+        self.assertEqual(counts, {"TUTORIAL": 1, "PRACTICAL": 1})
+
+    def test_abbreviations(self):
+        for text, expected in (
+            ("Tut", {"TUTORIAL": 1}),
+            ("Prac", {"PRACTICAL": 1}),
+            ("Pract", {"PRACTICAL": 1}),
+            ("Sem", {"SEMINAR": 1}),
+        ):
+            counts, problems = parse_requirements(text)
+            self.assertEqual(problems, [], text)
+            self.assertEqual(counts, expected, text)
+
+    def test_every_way_of_writing_a_count(self):
+        """A count that is read as 1 is a silently mis-allocated course."""
+        for text in (
+            "2 practicals",
+            "2 x Practical",
+            "2x Practical",
+            "Practical x2",
+            "Practical (2)",
+            "Practical [2]",
+            "Practical 2",
+            "2 times practicals",
+        ):
+            counts, problems = parse_requirements(text)
+            self.assertEqual(problems, [], text)
+            self.assertEqual(counts, {"PRACTICAL": 2}, text)
+
+    def test_a_count_can_appear_after_a_noun_phrase(self):
+        counts, problems = parse_requirements("Tutorials per week: 2")
+        self.assertEqual(problems, [])
+        self.assertEqual(counts, {"TUTORIAL": 2})
+
+    def test_spelled_out_numbers(self):
+        counts, problems = parse_requirements("Two practicals")
+        self.assertEqual(problems, [])
+        self.assertEqual(counts, {"PRACTICAL": 2})
+
+    def test_count_with_a_combination(self):
+        counts, problems = parse_requirements("One seminar; 2 practicals")
+        self.assertEqual(problems, [])
+        self.assertEqual(counts, {"SEMINAR": 1, "PRACTICAL": 2})
+
+    def test_counted_combination_round_trips_through_the_importer_format(self):
+        counts, _ = parse_requirements("Seminar (1); Practical (2)")
+        self.assertEqual(counts, {"SEMINAR": 1, "PRACTICAL": 2})
+        self.assertEqual(
+            format_requirements(counts), "Seminar; 2x Practical"
+        )
+
+    def test_repeated_word_adds_up(self):
+        counts, _ = parse_requirements("Tutorial; Tutorial")
+        self.assertEqual(counts, {"TUTORIAL": 2})
+
+    def test_html_escaped_separators_from_a_web_paste(self):
+        counts, problems = parse_requirements("Tutorial &amp; Practical")
+        self.assertEqual(problems, [])
+        self.assertEqual(counts, {"TUTORIAL": 1, "PRACTICAL": 1})
+
+    def test_unicode_dashes_do_not_break_a_count(self):
+        counts, problems = parse_requirements("Practical – 2")
+        self.assertEqual(problems, [])
+        self.assertEqual(counts, {"PRACTICAL": 2})
+
+    def test_unknown_words_are_reported_not_dropped(self):
+        counts, problems = parse_requirements("Tutorial; Fieldwork")
+        self.assertEqual(counts, {"TUTORIAL": 1})
+        self.assertEqual(len(problems), 1)
+        self.assertIn("Fieldwork", problems[0])
+
+    def test_a_lecture_or_workshop_is_never_a_requirement(self):
+        for text in ("Lecture", "Workshop", "Workshop Training"):
+            counts, problems = parse_requirements(text)
+            self.assertEqual(counts, {}, text)
+            self.assertEqual(len(problems), 1, text)
+
+    def test_semester_is_not_read_as_a_seminar(self):
+        counts, problems = parse_requirements("Semester 2")
+        self.assertEqual(counts, {})
+        self.assertEqual(len(problems), 1)
+
+    def test_format_round_trip(self):
+        for mapping in (
+            {"SEMINAR": 1},
+            {"TUTORIAL": 1, "PRACTICAL": 1},
+            {"PRACTICAL": 2},
+            {"SEMINAR": 1, "TUTORIAL": 1, "PRACTICAL": 1},
+            {"TUTORIAL": 2, "PRACTICAL": 3},
+        ):
+            label = format_requirements(mapping)
+            counts, problems = parse_requirements(label)
+            self.assertEqual(problems, [], label)
+            self.assertEqual(counts, mapping, label)
+
+    def test_format_of_nothing_is_blank(self):
+        self.assertEqual(format_requirements({}), "")
+
+
+class RequirementsColumnDetectionTests(TestCase):
+    BASE = ["Programme", "Course Code", "Course Name", "Semester"]
+
+    def test_documented_headings_are_found(self):
+        for header in (
+            "Required Activities",
+            "Required_Activities",
+            "REQUIREDACTIVITIES",
+            "Required  Activities",
+            "Allocation Requirements",
+            "Alloc Requirements",
+            "Activities Required",
+            "Required Activity Types",
+            "Required Sessions",
+            "Required Classes",
+        ):
+            column, unrecognised = find_requirements_column(self.BASE + [header])
+            self.assertEqual(column, header)
+            self.assertEqual(unrecognised, [], header)
+
+    def test_an_unlisted_but_sensible_heading_is_still_found(self):
+        for header in (
+            "Allocated Activities",
+            "Required contact hours",
+            "Weird: Req. Activities Col",
+        ):
+            column, _ = find_requirements_column(self.BASE + [header])
+            self.assertEqual(column, header)
+
+    def test_other_columns_are_never_mistaken_for_it(self):
+        for header in ("Semester", "Course Name", "Programme", "Course Code"):
+            column, unrecognised = find_requirements_column(self.BASE + [header])
+            self.assertIsNone(column, header)
+            self.assertEqual(unrecognised, [], header)
+
+    def test_semester_does_not_look_like_a_requirement_column(self):
+        # "Semester" contains "sem"; word boundaries keep it out of the report.
+        _, unrecognised = find_requirements_column(
+            self.BASE + ["Required Activities"]
+        )
+        self.assertEqual(unrecognised, [])
+
+    def test_a_workbook_with_no_requirements_column_is_not_an_error(self):
+        column, unrecognised = find_requirements_column(self.BASE)
+        self.assertIsNone(column)
+        self.assertEqual(unrecognised, [])
+
+    def test_an_unrecognised_requirements_heading_is_reported(self):
+        # The whole point: never silently import nothing.
+        column, unrecognised = find_requirements_column(
+            self.BASE + ["Semesterly Required Stuff"]
+        )
+        self.assertIsNone(column)
+        self.assertEqual(unrecognised, ["Semesterly Required Stuff"])
+
+    def test_an_explicit_header_wins(self):
+        column, _ = find_requirements_column(
+            self.BASE + ["Allocated Activities"], explicit="Allocated Activities"
+        )
+        self.assertEqual(column, "Allocated Activities")
+
+    def test_an_explicit_header_is_matched_loosely(self):
+        column, _ = find_requirements_column(
+            self.BASE + ["Allocated Activities"], explicit="allocated_activities"
+        )
+        self.assertEqual(column, "Allocated Activities")
+
+    def test_an_explicit_header_that_is_absent_returns_nothing(self):
+        column, unrecognised = find_requirements_column(
+            self.BASE, explicit="Does Not Exist"
+        )
+        self.assertIsNone(column)
+        self.assertEqual(unrecognised, [])
+
+    def test_dedicated_count_columns_are_found(self):
+        found = find_requirement_count_columns(
+            self.BASE
+            + ["Required Activities", "Tutorial Count", "Number of Practicals"],
+            exclude=["Required Activities"],
+        )
+        self.assertEqual(
+            found,
+            {ActivityType.TUTORIAL: "Tutorial Count",
+             ActivityType.PRACTICAL: "Number of Practicals"},
+        )
+
+    def test_the_combined_column_is_never_read_as_a_count_column(self):
+        found = find_requirement_count_columns(
+            self.BASE + ["Required Activities"], exclude=["Required Activities"]
+        )
+        self.assertEqual(found, {})
+
+    def test_count_column_words(self):
+        found = find_requirement_count_columns(
+            self.BASE + ["Tutorials per week", "Practical sessions"]
+        )
+        self.assertEqual(
+            found,
+            {ActivityType.TUTORIAL: "Tutorials per week",
+             ActivityType.PRACTICAL: "Practical sessions"},
+        )
+
+
+class ProgrammeCoursesImportRequirementsTests(ImporterTestCase):
+    COLS = [
+        "programme_code",
+        "course_code",
+        "course_name",
+        "semester",
+        "Required Activities",
+    ]
+
+    def test_import_populates_the_shared_course(self):
+        self._seed()
+        path = make_xlsx(
+            [["CE", "MT161", "Mathematics 1", 1, "Seminar; Tutorial"]],
+            self.COLS,
+        )
+        result = import_programme_courses_from_excel(path)
+        self.assertFalse(result.errors, result.errors)
+        course = Course.objects.get(code="MT161")
+        self.assertEqual(course.name, "Mathematics 1")
+        self.assertEqual(
+            course.required_activities(), ("SEMINAR", "TUTORIAL")
+        )
+        self.assertIn("MT161", result.courses_updated)
+
+    def test_course_is_created_when_missing(self):
+        self._seed()
+        path = make_xlsx(
+            [["CE", "ZZ999", "Brand New", 1, "Practical"]], self.COLS
+        )
+        import_programme_courses_from_excel(path)
+        course = Course.objects.get(code="ZZ999")
+        self.assertEqual(course.required_activities(), ("PRACTICAL",))
+
+    def test_counted_requirements_are_kept(self):
+        self._seed()
+        path = make_xlsx(
+            [["CE", "ZZ999", "Brand New", 1, "2 practicals"]], self.COLS
+        )
+        import_programme_courses_from_excel(path)
+        self.assertEqual(
+            Course.objects.get(code="ZZ999").required_count("PRACTICAL"), 2
+        )
+
+    def test_column_aliases_are_accepted(self):
+        self._seed()
+        for header in (
+            "required activities",
+            "Required_Activities",
+            "allocation requirements",
+            "Activities Required",
+        ):
+            path = make_xlsx(
+                [["CE", "MT161", "Mathematics 1", 1, "Seminar"]],
+                ["programme_code", "course_code", "course_name", "semester", header],
+            )
+            import_programme_courses_from_excel(path)
+            self.assertTrue(
+                Course.objects.get(code="MT161").has_requirements(), header
+            )
+            Course.objects.get(code="MT161").set_requirements({})
+
+    def test_older_workbook_without_the_column_still_imports(self):
+        self._seed()
+        path = make_xlsx(
+            [["CE", "MT161", "Mathematics 1", 1]],
+            ["programme_code", "course_code", "course_name", "semester"],
+        )
+        result = import_programme_courses_from_excel(path)
+        self.assertFalse(result.errors, result.errors)
+        self.assertEqual(result.created + result.updated, 1)
+        self.assertFalse(Course.objects.get(code="MT161").has_requirements())
+
+    def test_invalid_activity_value_is_reported_and_sets_nothing(self):
+        self._seed()
+        path = make_xlsx(
+            [["CE", "MT161", "Mathematics 1", 1, "Tutorial; Fieldwork"]],
+            self.COLS,
+        )
+        result = import_programme_courses_from_excel(path)
+        self.assertEqual(len(result.invalid_requirements), 1)
+        self.assertIn("Fieldwork", result.invalid_requirements[0])
+        # The course still exists and the programme link is still written.
+        self.assertFalse(Course.objects.get(code="MT161").has_requirements())
+        self.assertTrue(ProgrammeCourse.objects.filter(course_code="MT161").exists())
+
+    def test_conflicting_names_in_one_workbook_are_reported(self):
+        self._seed()
+        path = make_xlsx(
+            [
+                ["CE", "MT161", "Mathematics 1", 1, "Tutorial"],
+                ["ME", "MT161", "Mathematics One", 1, "Tutorial"],
+            ],
+            self.COLS,
+        )
+        result = import_programme_courses_from_excel(path)
+        self.assertEqual(len(result.conflicts), 1)
+        self.assertIn("conflicting names", result.conflicts[0])
+        # Both programmes still get their link.
+        self.assertEqual(ProgrammeCourse.objects.filter(course_code="MT161").count(), 2)
+
+    def test_conflicting_requirements_in_one_workbook_are_reported(self):
+        self._seed()
+        path = make_xlsx(
+            [
+                ["CE", "MT161", "Mathematics 1", 1, "Tutorial"],
+                ["ME", "MT161", "Mathematics 1", 1, "Practical"],
+            ],
+            self.COLS,
+        )
+        result = import_programme_courses_from_excel(path)
+        self.assertEqual(len(result.conflicts), 1)
+        self.assertIn("conflicting required activities", result.conflicts[0])
+
+    def test_a_conflicted_name_is_not_silently_replaced_on_reimport(self):
+        self._seed()
+        path = make_xlsx(
+            [
+                ["CE", "MT161", "Mathematics 1", 1, "Tutorial"],
+                ["ME", "MT161", "Mathematics One", 1, "Tutorial"],
+            ],
+            self.COLS,
+        )
+        import_programme_courses_from_excel(path)
+        course = Course.objects.get(code="MT161")
+        self.assertEqual(course.name, "Mathematics 1")
+        self.assertIn("Mathematics One", course.name_conflicts())
+        # Re-importing the same file changes nothing at all.
+        before = (course.name, tuple(course.name_conflicts()))
+        import_programme_courses_from_excel(path)
+        course.refresh_from_db()
+        self.assertEqual(
+            (course.name, tuple(course.name_conflicts())), before
+        )
+
+    def test_requirements_are_written_once_per_course_not_per_row(self):
+        self._seed()
+        path = make_xlsx(
+            [
+                ["CE", "MT161", "Mathematics 1", 1, "Tutorial; Practical"],
+                ["ME", "MT161", "Mathematics 1", 1, ""],
+            ],
+            self.COLS,
+        )
+        import_programme_courses_from_excel(path)
+        self.assertEqual(
+            Course.objects.get(code="MT161").required_activities(),
+            ("TUTORIAL", "PRACTICAL"),
+        )
+
+    def test_a_blank_requirements_column_never_wipes_requirements(self):
+        self._seed()
+        course = Course.objects.get(code="MT161")
+        course.set_requirements({"TUTORIAL": 1})
+        path = make_xlsx(
+            [["CE", "MT161", "Mathematics 1", 1, ""]], self.COLS
+        )
+        import_programme_courses_from_excel(path)
+        self.assertEqual(
+            Course.objects.get(code="MT161").required_activities(), ("TUTORIAL",)
+        )
+
+    def test_import_is_idempotent(self):
+        self._seed()
+        path = make_xlsx(
+            [["CE", "MT161", "Mathematics 1", 1, "Seminar"]], self.COLS
+        )
+        import_programme_courses_from_excel(path)
+        second = import_programme_courses_from_excel(path)
+        self.assertEqual(second.created, 0)
+        self.assertEqual(
+            ProgrammeCourse.objects.filter(course_code="MT161").count(), 2
+        )
+
+    def test_course_codes_are_normalised_on_import(self):
+        self._seed()
+        path = make_xlsx(
+            [["CE", "  mt161 ", "Mathematics 1", 1, "Tutorial"]], self.COLS
+        )
+        import_programme_courses_from_excel(path)
+        self.assertTrue(Course.objects.filter(code="MT161").exists())
+        self.assertFalse(Course.objects.filter(code="  mt161 ").exists())
+
+    def test_issue_lists_reach_the_import_snapshot(self):
+        self._seed()
+        path = make_xlsx(
+            [["CE", "MT161", "Mathematics 1", 1, "Nonsense"]], self.COLS
+        )
+        snapshot = import_programme_courses_from_excel(path).snapshot()
+        self.assertEqual(len(snapshot["invalid_requirements"]), 1)
+        self.assertIn("courses_created", snapshot)
+        self.assertIn("courses_updated", snapshot)
+        self.assertIn("course_requirements", snapshot)
+        self.assertEqual(snapshot["requirements_column"], "Required Activities")
+
+    def test_the_column_used_is_reported(self):
+        self._seed()
+        path = make_xlsx(
+            [["CE", "MT161", "Mathematics 1", 1, "Tutorial"]],
+            ["programme_code", "course_code", "course_name", "semester",
+             "Allocated Activities"],
+        )
+        result = import_programme_courses_from_excel(path)
+        self.assertEqual(result.requirements_column, "Allocated Activities")
+        self.assertEqual(
+            Course.objects.get(code="MT161").required_activities(), ("TUTORIAL",)
+        )
+
+    def test_the_parsed_requirements_are_reported_per_row(self):
+        self._seed()
+        path = make_xlsx(
+            [
+                ["CE", "MT161", "Mathematics 1", 1, "Seminar; Tutorial"],
+                ["CE", "ZZ999", "Counted", 1, "2 practicals"],
+                ["CE", "YY888", "None needed", 1, "-"],
+            ],
+            self.COLS,
+        )
+        result = import_programme_courses_from_excel(path)
+        parsed = {row["code"]: row["requirements"] for row in result.course_requirements}
+        self.assertEqual(parsed["MT161"], "Seminar; Tutorial")
+        self.assertEqual(parsed["ZZ999"], "2x Practical")
+        self.assertEqual(parsed["YY888"], "(none)")
+
+    def test_an_explicit_column_can_be_named(self):
+        self._seed()
+        path = make_xlsx(
+            [["CE", "MT161", "Mathematics 1", 1, "Tutorial"]],
+            ["programme_code", "course_code", "course_name", "semester",
+             "Column X"],
+        )
+        result = import_programme_courses_from_excel(
+            path, requirements_column="Column X"
+        )
+        self.assertFalse(result.errors, result.errors)
+        self.assertEqual(result.requirements_column, "Column X")
+        self.assertEqual(
+            Course.objects.get(code="MT161").required_activities(), ("TUTORIAL",)
+        )
+
+    def test_an_explicit_column_that_does_not_exist_is_a_clear_error(self):
+        self._seed()
+        path = make_xlsx(
+            [["CE", "MT161", "Mathematics 1", 1, "Tutorial"]], self.COLS
+        )
+        result = import_programme_courses_from_excel(
+            path, requirements_column="Nope"
+        )
+        self.assertEqual(len(result.errors), 1)
+        self.assertIn("'Nope' not found", result.errors[0])
+        self.assertIn("Required Activities", result.errors[0])
+
+    def test_an_unrecognised_requirements_heading_is_reported_not_ignored(self):
+        self._seed()
+        path = make_xlsx(
+            [["CE", "MT161", "Mathematics 1", 1, "Tutorial"]],
+            ["programme_code", "course_code", "course_name", "semester",
+             "Semesterly Required Stuff"],
+        )
+        result = import_programme_courses_from_excel(path)
+        self.assertTrue(
+            any("was not recognised" in e for e in result.errors), result.errors
+        )
+        self.assertTrue(
+            any("Semesterly Required Stuff" in e for e in result.errors)
+        )
+        self.assertTrue(
+            any("--requirements-column" in e for e in result.errors)
+        )
+
+    def test_a_workbook_with_no_requirements_column_warns(self):
+        self._seed()
+        path = make_xlsx(
+            [["CE", "MT161", "Mathematics 1", 1]],
+            ["programme_code", "course_code", "course_name", "semester"],
+        )
+        result = import_programme_courses_from_excel(path)
+        self.assertFalse(result.errors, result.errors)
+        self.assertTrue(
+            any("no seminar/tutorial/practical requirement" in w for w in result.warnings)
+        )
+
+    def test_dedicated_count_columns_are_imported(self):
+        self._seed()
+        path = make_xlsx(
+            [["CE", "MT161", "Mathematics 1", 1, "Seminar", 2]],
+            self.COLS + ["Tutorial Count"],
+        )
+        result = import_programme_courses_from_excel(path)
+        self.assertFalse(result.errors, result.errors)
+        self.assertEqual(
+            result.requirement_count_columns,
+            {"TUTORIAL": "Tutorial Count"},
+        )
+        course = Course.objects.get(code="MT161")
+        self.assertEqual(course.required_activities(), ("SEMINAR", "TUTORIAL"))
+        self.assertEqual(course.required_count("TUTORIAL"), 2)
+
+    def test_a_count_column_adds_to_the_combined_cell(self):
+        self._seed()
+        path = make_xlsx(
+            [["CE", "MT161", "Mathematics 1", 1, "Tutorial", 1]],
+            self.COLS + ["Number of Practicals"],
+        )
+        result = import_programme_courses_from_excel(path)
+        self.assertFalse(result.errors, result.errors)
+        course = Course.objects.get(code="MT161")
+        self.assertEqual(course.required_activities(), ("TUTORIAL", "PRACTICAL"))
+        self.assertEqual(course.required_count("PRACTICAL"), 1)
+
+    def test_a_count_column_that_is_not_a_number_is_reported(self):
+        self._seed()
+        path = make_xlsx(
+            [["CE", "MT161", "Mathematics 1", 1, "", "two"]],
+            self.COLS + ["Tutorial Count"],
+        )
+        result = import_programme_courses_from_excel(path)
+        self.assertEqual(len(result.invalid_requirements), 1)
+        self.assertIn("not a whole number", result.invalid_requirements[0])
+        self.assertFalse(Course.objects.get(code="MT161").has_requirements())
+
+    def test_a_blank_count_column_is_simply_no_opinion(self):
+        self._seed()
+        path = make_xlsx(
+            [["CE", "MT161", "Mathematics 1", 1, "Seminar", ""]],
+            self.COLS + ["Tutorial Count"],
+        )
+        result = import_programme_courses_from_excel(path)
+        self.assertFalse(result.invalid_requirements, result.invalid_requirements)
+        self.assertEqual(
+            Course.objects.get(code="MT161").required_activities(), ("SEMINAR",)
+        )
+
+    def test_counts_survive_a_real_import(self):
+        self._seed()
+        path = make_xlsx(
+            [["CE", "MT161", "Mathematics 1", 1, "Seminar (1); Practical (2)"]],
+            self.COLS,
+        )
+        result = import_programme_courses_from_excel(path)
+        self.assertFalse(result.errors, result.errors)
+        self.assertEqual(result.invalid_requirements, [])
+        course = Course.objects.get(code="MT161")
+        self.assertEqual(course.required_activities(), ("SEMINAR", "PRACTICAL"))
+        self.assertEqual(course.required_count("PRACTICAL"), 2)
+
+
+# --------------------------------------------------------------------------
+# Group allocation
+# --------------------------------------------------------------------------
+
+
+STUDENTS_PER_GROUP = 30
+
+
+class AllocationTestCase(TestCase):
+    """Two programmes, four groups, one course that requires a tutorial.
+
+    ``GH1`` seats 200 (all four groups), ``LH1`` seats 90 (three groups),
+    ``NB102`` seats 30 (one group) and ``GAP`` records no capacity at all, so
+    every capacity outcome — all fit, some fit, none fit, unknown — is one
+    argument away.
+    """
+
+    def _seed(self, *, semester_number=1, requirements=None):
+        self.semester = Semester.objects.create(
+            academic_year="2026/2027", semester=semester_number
+        )
+        self.other_semester = Semester.objects.create(
+            academic_year="2026/2027", semester=2
+        )
+        self.ce = Programme.objects.create(code="CE", name="Civil Engineering")
+        self.me = Programme.objects.create(code="ME", name="Mechanical Engineering")
+        self.a1 = StudentGroup.objects.create(programme=self.ce, code="A1")
+        self.a2 = StudentGroup.objects.create(programme=self.ce, code="A2")
+        self.d1 = StudentGroup.objects.create(programme=self.me, code="D1")
+        self.d2 = StudentGroup.objects.create(programme=self.me, code="D2")
+        self.maths = Course.objects.create(code="MT161", name="Mathematics 1")
+        for programme in (self.ce, self.me):
+            ProgrammeCourse.objects.create(
+                programme=programme, course=self.maths, semester=semester_number
+            )
+        self.maths.set_requirements(requirements or {"TUTORIAL": 1})
+        self.hall = Venue.objects.create(name="GH1", capacity=200)
+        self.big = Venue.objects.create(name="LH1", capacity=90)
+        self.small = Venue.objects.create(name="NB102", capacity=30)
+        self.no_capacity = Venue.objects.create(name="GAP", capacity=0)
+        return self.semester
+
+    @staticmethod
+    def _at(value):
+        """``9`` -> 09:00, ``(9, 30)`` -> 09:30. Keeps the tests readable."""
+        if isinstance(value, tuple):
+            return time(*value)
+        return time(value, 0)
+
+    def _session(self, course_code, activity, day, start, end, venue=None):
+        return Session.objects.create(
+            semester=self.semester,
+            course_code=course_code,
+            activity_type=activity,
+            day=day,
+            start_time=self._at(start),
+            end_time=self._at(end),
+            venue=venue,
+        )
+
+    def _tutorial(self, day, start, end, venue=None, course="MT161"):
+        return self._session(
+            course, ActivityType.TUTORIAL, day, start, end, venue
+        )
+
+
+class RequirementBuildingTests(AllocationTestCase):
+    def test_every_group_gets_a_requirement_per_configured_activity(self):
+        self._seed(requirements={"TUTORIAL": 1, "PRACTICAL": 1})
+        requirements, _ = build_requirements(self.semester, "ALL")
+        self.assertEqual(len(requirements), 8)  # 4 groups x 2 activities
+        self.assertEqual(
+            {r.activity_type for r in requirements},
+            {ActivityType.TUTORIAL, ActivityType.PRACTICAL},
+        )
+
+    def test_a_counted_requirement_makes_one_requirement_per_count(self):
+        self._seed(requirements={"PRACTICAL": 2})
+        requirements, _ = build_requirements(self.semester, "ALL")
+        self.assertEqual(len(requirements), 8)
+        self.assertEqual(sorted(r.ordinal for r in requirements[:2]), [1, 2])
+
+    def test_activities_run_in_priority_order(self):
+        self._seed(requirements={"PRACTICAL": 1, "SEMINAR": 1, "TUTORIAL": 1})
+        requirements, _ = build_requirements(self.semester, "ALL")
+        order = []
+        for requirement in requirements:
+            if requirement.activity_type not in order:
+                order.append(requirement.activity_type)
+        self.assertEqual(
+            order, [ActivityType.SEMINAR, ActivityType.TUTORIAL, ActivityType.PRACTICAL]
+        )
+
+    def test_the_most_constrained_requirement_is_searched_first(self):
+        self._seed()
+        self._tutorial("MONDAY", 8, 9)
+        self._tutorial("TUESDAY", 8, 9)
+        self._tutorial("WEDNESDAY", 8, 9)
+        # ME101 has exactly one session, so it must come first.
+        drawing = Course.objects.create(code="ME101", name="Technical Drawing 1")
+        for programme in (self.ce, self.me):
+            ProgrammeCourse.objects.create(
+                programme=programme, course=drawing, semester=1
+            )
+        drawing.set_requirements({"TUTORIAL": 1})
+        self._tutorial("THURSDAY", 8, 9, course="ME101")
+        requirements, _ = build_requirements(self.semester, "ALL")
+        self.assertEqual(requirements[0].course.code, "ME101")
+
+    def test_a_course_with_blank_requirements_is_reported_not_allocated(self):
+        self._seed()
+        other = Course.objects.create(code="ZZ999", name="Unconfigured")
+        for programme in (self.ce, self.me):
+            ProgrammeCourse.objects.create(
+                programme=programme, course=other, semester=1
+            )
+        requirements, unconfigured = build_requirements(self.semester, "ALL")
+        self.assertNotIn("ZZ999", {r.course.code for r in requirements})
+        self.assertEqual([e["code"] for e in unconfigured], ["ZZ999"])
+        self.assertEqual(unconfigured[0]["group_count"], 4)
+
+    def test_the_scope_limits_which_activities_are_built(self):
+        self._seed(requirements={"TUTORIAL": 1, "PRACTICAL": 1})
+        requirements, _ = build_requirements(self.semester, "TUTORIAL")
+        self.assertEqual(
+            {r.activity_type for r in requirements}, {ActivityType.TUTORIAL}
+        )
+
+    def test_groups_of_other_semesters_are_left_out(self):
+        self._seed()
+        other = Course.objects.create(code="MT171", name="Calculus")
+        for programme in (self.ce, self.me):
+            ProgrammeCourse.objects.create(
+                programme=programme, course=other, semester=2
+            )
+        other.set_requirements({"TUTORIAL": 1})
+        requirements, _ = build_requirements(self.semester, "ALL")
+        self.assertNotIn("MT171", {r.course.code for r in requirements})
+
+
+class ValidatorTests(AllocationTestCase):
+    def test_a_group_studying_the_course_may_attend_its_required_activity(self):
+        self._seed()
+        session = self._tutorial("MONDAY", 8, 9, self.big)
+        index = AvailabilityIndex(self.semester)
+        self.assertEqual(
+            validate_assignment(self.a1, self.maths, session, self.semester, index), []
+        )
+
+    def test_a_group_that_does_not_study_the_course_is_refused(self):
+        self._seed()
+        outsider = Course.objects.create(code="EE131", name="Electronics")
+        session = self._tutorial("MONDAY", 8, 9, self.big, course="EE131")
+        index = AvailabilityIndex(self.semester)
+        problems = validate_assignment(
+            self.a1, outsider, session, self.semester, index
+        )
+        self.assertIn("group-not-studying", [p.code for p in problems])
+
+    def test_an_activity_the_course_does_not_require_is_refused(self):
+        self._seed()
+        practical = self._session(
+            "MT161", ActivityType.PRACTICAL, "MONDAY", 8, 9, self.big
+        )
+        index = AvailabilityIndex(self.semester)
+        problems = validate_assignment(
+            self.a1, self.maths, practical, self.semester, index
+        )
+        self.assertIn("activity-not-required", [p.code for p in problems])
+
+    def test_a_workshop_session_is_never_allocatable(self):
+        self._seed()
+        workshop = self._session(
+            "MT161", ActivityType.WORKSHOP, "MONDAY", 9, 13, self.big
+        )
+        index = AvailabilityIndex(self.semester)
+        problems = validate_assignment(
+            self.a1, self.maths, workshop, self.semester, index
+        )
+        self.assertIn("not-allocatable", [p.code for p in problems])
+
+    def test_a_session_in_another_semester_is_refused(self):
+        self._seed()
+        # A course the group genuinely studies, but in semester 2 only.
+        other = Course.objects.create(code="MT171", name="Calculus")
+        for programme in (self.ce, self.me):
+            ProgrammeCourse.objects.create(
+                programme=programme, course=other, semester=2
+            )
+        session = Session.objects.create(
+            semester=self.other_semester,
+            course_code="MT171",
+            activity_type=ActivityType.TUTORIAL,
+            day="MONDAY",
+            start_time=time(8, 0),
+            end_time=time(9, 0),
+            venue=self.big,
+        )
+        index = AvailabilityIndex(self.other_semester)
+        problems = validate_assignment(
+            self.a1, other, session, self.semester, index
+        )
+        self.assertIn("wrong-semester", [p.code for p in problems])
+
+    def test_an_overlapping_lecture_blocks_the_candidate(self):
+        self._seed()
+        lecture = self._session(
+            "MT161", ActivityType.LECTURE, "MONDAY", 8, 10, self.big
+        )
+        SessionGroup.objects.create(session=lecture, group=self.a1)
+        tutorial = self._tutorial("MONDAY", 9, 10, self.big)
+        index = AvailabilityIndex(self.semester)
+        problems = validate_assignment(
+            self.a1, self.maths, tutorial, self.semester, index
+        )
+        self.assertIn("clash", [p.code for p in problems])
+
+    def test_adjacent_sessions_do_not_clash(self):
+        self._seed()
+        lecture = self._session(
+            "MT161", ActivityType.LECTURE, "MONDAY", 8, 9, self.big
+        )
+        SessionGroup.objects.create(session=lecture, group=self.a1)
+        tutorial = self._tutorial("MONDAY", 9, 10, self.big)
+        index = AvailabilityIndex(self.semester)
+        self.assertEqual(
+            validate_assignment(
+                self.a1, self.maths, tutorial, self.semester, index
+            ),
+            [],
+        )
+
+    def test_a_workshop_period_resolves_into_standard_hours(self):
+        self._seed()
+        WorkshopAllocation.objects.create(
+            semester=self.semester,
+            course_code="WT107",
+            group_code="A1",
+            day="MONDAY",
+            time_period="MORNING",
+            venue="TW101",
+        )
+        index = AvailabilityIndex(self.semester)
+        clashes = index.conflicts_excluding(
+            self.a1.pk, "MONDAY", time(10, 0), time(11, 0), None
+        )
+        self.assertEqual(len(clashes), 1)
+        self.assertEqual(clashes[0].start, time(9, 0))
+        self.assertEqual(clashes[0].end, time(13, 0))
+
+    def test_a_workshop_outside_its_standard_hours_does_not_clash(self):
+        self._seed()
+        WorkshopAllocation.objects.create(
+            semester=self.semester,
+            course_code="WT107",
+            group_code="A1",
+            day="MONDAY",
+            time_period="MORNING",
+            venue="TW101",
+        )
+        index = AvailabilityIndex(self.semester)
+        self.assertEqual(
+            index.conflicts_excluding(
+                self.a1.pk, "MONDAY", time(14, 0), time(15, 0), None
+            ),
+            [],
+        )
+
+    def test_a_workshop_with_no_resolvable_time_blocks_the_whole_day(self):
+        self._seed()
+        WorkshopAllocation.objects.create(
+            semester=self.semester,
+            course_code="WT107",
+            group_code="A1",
+            day="MONDAY",
+            venue="TW101",
+        )
+        index = AvailabilityIndex(self.semester)
+        self.assertEqual(len(index.unverifiable), 1)
+        clashes = index.conflicts_excluding(
+            self.a1.pk, "MONDAY", time(8, 0), time(9, 0), None
+        )
+        self.assertEqual([c.kind for c in clashes], ["unverifiable"])
+
+    def test_a_clash_message_never_leaks_an_internal_session_marker(self):
+        # The BusyBlock detail carries a "#<pk>:" prefix so the index can
+        # recognise a session's own blocks. It must not reach the review panel.
+        self._seed()
+        lecture = self._session(
+            "MT161", ActivityType.LECTURE, "MONDAY", 8, 10, self.hall
+        )
+        SessionGroup.objects.create(session=lecture, group=self.a1)
+        tutorial = self._tutorial("MONDAY", 9, 10, self.hall)
+        index = AvailabilityIndex(self.semester)
+        problems = check_availability(self.a1, tutorial, index)
+        self.assertEqual([p.code for p in problems], ["clash"])
+        self.assertNotIn(f"#{lecture.pk}:", problems[0].message)
+        self.assertNotIn("#", problems[0].message)
+        self.assertIn("MT161", problems[0].message)
+
+    def test_an_unverifiable_workshop_message_says_what_to_do(self):
+        self._seed()
+        WorkshopAllocation.objects.create(
+            semester=self.semester,
+            course_code="WT107",
+            group_code="A1",
+            day="MONDAY",
+            venue="TW101",
+        )
+        tutorial = self._tutorial("MONDAY", 8, 9, self.hall)
+        index = AvailabilityIndex(self.semester)
+        problems = check_availability(self.a1, tutorial, index)
+        self.assertEqual([p.code for p in problems], ["unverifiable-workshop"])
+        self.assertIn("cannot be verified", problems[0].message)
+
+    def test_a_technical_drawing_blocks_the_candidate(self):
+        self._seed()
+        TechnicalDrawingAllocation.objects.create(
+            semester=self.semester,
+            course_code="TG201",
+            group_code="A1",
+            day="MONDAY",
+            start_time=time(8, 0),
+            end_time=time(11, 0),
+            venue="TW101",
+        )
+        index = AvailabilityIndex(self.semester)
+        self.assertEqual(
+            len(
+                index.conflicts_excluding(
+                    self.a1.pk, "MONDAY", time(10, 0), time(10, 30), None
+                )
+            ),
+            1,
+        )
+
+    def test_a_technical_drawing_of_the_same_course_is_not_a_clash(self):
+        """The reported case: ME101 technical drawing 10:00-13:00 vs the ME101
+        tutorial 10:00-12:55, both in S112.
+
+        ``fold_same_sessions`` already draws those two as ONE block on every
+        export -- the allocation stands in for the session. Calling the group
+        "busy" therefore refuses a session that is not a second commitment at
+        all, and the group could never be placed.
+        """
+        self._seed()
+        TechnicalDrawingAllocation.objects.create(
+            semester=self.semester,
+            course_code="ME101",
+            group_code="A1",
+            day="TUESDAY",
+            start_time=time(10, 0),
+            end_time=time(13, 0),
+            venue="S112",
+        )
+        tutorial = self._session(
+            "ME101", ActivityType.TUTORIAL, "TUESDAY", 10, (12, 55), self.hall
+        )
+        index = AvailabilityIndex(self.semester)
+        self.assertEqual(check_availability(self.a1, tutorial, index), [])
+
+    def test_the_same_course_is_matched_through_normalised_codes(self):
+        self._seed()
+        TechnicalDrawingAllocation.objects.create(
+            semester=self.semester,
+            course_code="  me101 ",  # as an import may well leave it
+            group_code="A1",
+            day="TUESDAY",
+            start_time=time(10, 0),
+            end_time=time(13, 0),
+            venue="S112",
+        )
+        tutorial = self._session(
+            "ME101", ActivityType.TUTORIAL, "TUESDAY", 10, (12, 55), self.hall
+        )
+        self.assertEqual(
+            check_availability(self.a1, tutorial, AvailabilityIndex(self.semester)),
+            [],
+        )
+
+    def test_a_technical_drawing_of_another_course_still_blocks(self):
+        """The exemption is per course, not blanket: a TD201 drawing in the same
+        slot really is a different class from the ME101 tutorial."""
+        self._seed()
+        TechnicalDrawingAllocation.objects.create(
+            semester=self.semester,
+            course_code="TG201",
+            group_code="A1",
+            day="TUESDAY",
+            start_time=time(10, 0),
+            end_time=time(13, 0),
+            venue="TW101",
+        )
+        tutorial = self._session(
+            "ME101", ActivityType.TUTORIAL, "TUESDAY", 10, (12, 55), self.hall
+        )
+        problems = check_availability(
+            self.a1, tutorial, AvailabilityIndex(self.semester)
+        )
+        self.assertEqual([p.code for p in problems], ["clash"])
+        self.assertIn("Technical drawing TG201", problems[0].message)
+
+    def test_a_workshop_still_blocks_even_a_matching_course_name(self):
+        """A workshop is its own class. The export folds a *placeholder* session
+        into a workshop slot, but a real taught session is drawn alongside it --
+        so a group in a workshop is genuinely busy for a tutorial."""
+        self._seed()
+        WorkshopAllocation.objects.create(
+            semester=self.semester,
+            course_code="WT107",
+            workshop="Carpentry",
+            group_code="A1",
+            day="TUESDAY",
+            start_time=time(9, 0),
+            end_time=time(13, 0),
+            venue="TW101",
+        )
+        tutorial = self._session(
+            "ME101", ActivityType.TUTORIAL, "TUESDAY", 10, (12, 55), self.hall
+        )
+        problems = check_availability(
+            self.a1, tutorial, AvailabilityIndex(self.semester)
+        )
+        self.assertEqual([p.code for p in problems], ["clash"])
+        self.assertIn("Workshop Carpentry", problems[0].message)
+
+    def test_a_same_course_drawing_on_another_day_is_irrelevant(self):
+        self._seed()
+        TechnicalDrawingAllocation.objects.create(
+            semester=self.semester,
+            course_code="ME101",
+            group_code="A1",
+            day="WEDNESDAY",
+            start_time=time(10, 0),
+            end_time=time(13, 0),
+            venue="S112",
+        )
+        tutorial = self._session(
+            "ME101", ActivityType.TUTORIAL, "TUESDAY", 10, (12, 55), self.hall
+        )
+        self.assertEqual(
+            check_availability(self.a1, tutorial, AvailabilityIndex(self.semester)),
+            [],
+        )
+
+    def test_a_group_can_actually_be_placed_over_its_own_drawing(self):
+        """End to end: the exemption has to survive the whole validator, or the
+        fix is cosmetic."""
+        self._seed()
+        drawing = Course.objects.create(code="ME101", name="Technical Drawing 1")
+        for programme in (self.ce, self.me):
+            ProgrammeCourse.objects.create(
+                programme=programme, course=drawing, semester=1
+            )
+        drawing.set_requirements({"TUTORIAL": 1})
+        TechnicalDrawingAllocation.objects.create(
+            semester=self.semester,
+            course_code="ME101",
+            group_code="A1",
+            day="TUESDAY",
+            start_time=time(10, 0),
+            end_time=time(13, 0),
+            venue="S112",
+        )
+        tutorial = self._session(
+            "ME101", ActivityType.TUTORIAL, "TUESDAY", 10, (12, 55), self.hall
+        )
+        problems = validate_assignment(
+            self.a1,
+            drawing,
+            tutorial,
+            self.semester,
+            AvailabilityIndex(self.semester),
+        )
+        self.assertEqual(problems, [])
+        linked, problems = manual_assign(self.a1, tutorial)
+        self.assertTrue(linked, [p.message for p in problems])
+
+    def test_a_workshop_only_blocks_the_groups_carrying_its_code(self):
+        self._seed()
+        WorkshopAllocation.objects.create(
+            semester=self.semester,
+            course_code="WT107",
+            group_code="A1",
+            day="MONDAY",
+            time_period="MORNING",
+            venue="TW101",
+        )
+        index = AvailabilityIndex(self.semester)
+        self.assertTrue(
+            index.conflicts_excluding(
+                self.a1.pk, "MONDAY", time(10, 0), time(10, 30), None
+            )
+        )
+        self.assertFalse(
+            index.conflicts_excluding(
+                self.a2.pk, "MONDAY", time(10, 0), time(10, 30), None
+            )
+        )
+
+    def test_a_group_already_in_the_session_does_not_clash_with_itself(self):
+        self._seed()
+        tutorial = self._tutorial("MONDAY", 8, 9, self.big)
+        SessionGroup.objects.create(session=tutorial, group=self.a1)
+        index = AvailabilityIndex(self.semester)
+        self.assertEqual(
+            validate_assignment(
+                self.a1, self.maths, tutorial, self.semester, index
+            ),
+            [],
+        )
+
+    def test_capacity_uses_thirty_students_per_group(self):
+        session = Session(
+            activity_type=ActivityType.TUTORIAL,
+            day="MONDAY",
+            start_time=time(8, 0),
+            end_time=time(9, 0),
+            venue=Venue(name="V", capacity=90),
+        )
+        self.assertEqual(required_capacity(3), 90)
+        status, _ = capacity_status(session, 3)
+        self.assertEqual(status, "ok")
+        status, message = capacity_status(session, 4)
+        self.assertEqual(status, "over-capacity")
+        self.assertIn("120", message)
+
+    def test_a_missing_venue_never_passes(self):
+        self._seed()
+        session = self._tutorial("MONDAY", 8, 9, venue=None)
+        index = AvailabilityIndex(self.semester)
+        problems = validate_assignment(
+            self.a1, self.maths, session, self.semester, index
+        )
+        self.assertIn("capacity-no-venue", [p.code for p in problems])
+
+    def test_a_zero_capacity_venue_never_passes(self):
+        self._seed()
+        session = self._tutorial("MONDAY", 8, 9, self.no_capacity)
+        index = AvailabilityIndex(self.semester)
+        problems = validate_assignment(
+            self.a1, self.maths, session, self.semester, index
+        )
+        codes = [p.code for p in problems]
+        self.assertIn("capacity-unknown-capacity", codes)
+        self.assertIn("Set the capacity", " ".join(p.message for p in problems))
+
+    def test_a_seminar_gets_no_special_minimum_capacity(self):
+        self._seed(requirements={"SEMINAR": 1})
+        # One group of 30 fits exactly in a 30-seat room.
+        session = self._session(
+            "MT161", ActivityType.SEMINAR, "MONDAY", 8, 9, self.small
+        )
+        index = AvailabilityIndex(self.semester)
+        self.assertEqual(
+            validate_assignment(
+                self.a1, self.maths, session, self.semester, index
+            ),
+            [],
+        )
+
+    def test_a_backwards_session_time_is_reported_not_accepted(self):
+        self._seed()
+        session = self._tutorial("MONDAY", 10, 9, self.big)
+        index = AvailabilityIndex(self.semester)
+        problems = validate_assignment(
+            self.a1, self.maths, session, self.semester, index
+        )
+        self.assertIn("backwards-time", [p.code for p in problems])
+
+    def test_an_unknown_activity_type_is_reported(self):
+        self._seed()
+        session = self._session("MT161", "UNSPECIFIED", "MONDAY", 8, 9, self.big)
+        index = AvailabilityIndex(self.semester)
+        problems = validate_assignment(
+            self.a1, self.maths, session, self.semester, index
+        )
+        self.assertIn("unknown-activity", [p.code for p in problems])
+
+
+class AllocationEngineTests(AllocationTestCase):
+    def test_a_group_is_assigned_to_an_eligible_session(self):
+        self._seed()
+        tutorial = self._tutorial("MONDAY", 8, 9, self.hall)
+        plan = plan_allocation(self.semester, "ALL")
+        self.assertEqual(plan.added, 4)
+        self.assertEqual(plan.unresolved_count, 0)
+        for assignment in plan.assignments:
+            self.assertEqual(assignment.session.pk, tutorial.pk)
+
+    def test_a_configured_activity_with_no_session_is_unresolved(self):
+        self._seed()
+        plan = plan_allocation(self.semester, "ALL")
+        self.assertEqual(plan.added, 0)
+        self.assertEqual(plan.unresolved_count, 4)
+        for item in plan.unresolved:
+            self.assertIn("No tutorial session exists", item.reasons[0])
+
+    def test_nothing_is_written_by_planning(self):
+        self._seed()
+        self._tutorial("MONDAY", 8, 9, self.hall)
+        self.assertEqual(SessionGroup.objects.count(), 0)
+        plan_allocation(self.semester, "ALL")
+        self.assertEqual(SessionGroup.objects.count(), 0)
+
+    def test_capacity_limits_how_many_groups_share_a_session(self):
+        self._seed()
+        # 30 seats: exactly one group fits.
+        self._tutorial("MONDAY", 8, 9, self.small)
+        plan = plan_allocation(self.semester, "ALL")
+        self.assertEqual(plan.added, 1)
+        self.assertEqual(plan.unresolved_count, 3)
+        self.assertIn("seats 30", " ".join(plan.unresolved[0].reasons))
+
+    def test_a_session_with_no_venue_leaves_the_requirement_unresolved(self):
+        self._seed()
+        self._tutorial("MONDAY", 8, 9, venue=None)
+        plan = plan_allocation(self.semester, "ALL")
+        self.assertEqual(plan.added, 0)
+        self.assertEqual(plan.unresolved_count, 4)
+        self.assertIn("No venue is set", " ".join(plan.unresolved[0].reasons))
+
+    def test_a_zero_capacity_venue_leaves_the_requirement_unresolved(self):
+        self._seed()
+        self._tutorial("MONDAY", 8, 9, self.no_capacity)
+        plan = plan_allocation(self.semester, "ALL")
+        self.assertEqual(plan.added, 0)
+        self.assertIn(
+            "Set the capacity of GAP", " ".join(plan.unresolved[0].reasons)
+        )
+
+    def test_groups_are_spread_across_sessions_to_fit_capacity(self):
+        self._seed()
+        self._tutorial("MONDAY", 8, 9, self.small)  # 1 group
+        self._tutorial("TUESDAY", 8, 9, self.big)  # 3 groups
+        plan = plan_allocation(self.semester, "ALL")
+        self.assertEqual(plan.unresolved_count, 0)
+        by_session = {}
+        for assignment in plan.assignments:
+            by_session.setdefault(assignment.session.day, []).append(
+                assignment.requirement.group.code
+            )
+        self.assertEqual(len(by_session["MONDAY"]), 1)
+        self.assertEqual(len(by_session["TUESDAY"]), 3)
+
+    def test_a_timetable_clash_moves_the_group_to_another_session(self):
+        self._seed()
+        monday = self._tutorial("MONDAY", 8, 9, self.big)
+        self._tutorial("TUESDAY", 8, 9, self.big)
+        lecture = self._session(
+            "MT161", ActivityType.LECTURE, "MONDAY", 8, 10, self.big
+        )
+        SessionGroup.objects.create(session=lecture, group=self.a1)
+        plan = plan_allocation(self.semester, "ALL")
+        self.assertEqual(plan.unresolved_count, 0)
+        placed = {
+            a.requirement.group.code: a.session.day for a in plan.assignments
+        }
+        self.assertEqual(placed["A1"], "TUESDAY")
+        self.assertEqual(placed["A2"], "MONDAY")
+
+    def test_existing_valid_links_are_retained(self):
+        self._seed()
+        monday = self._tutorial("MONDAY", 8, 9, self.big)
+        self._tutorial("TUESDAY", 8, 9, self.big)
+        SessionGroup.objects.create(session=monday, group=self.a1)
+        plan = plan_allocation(self.semester, "ALL")
+        retained = [a for a in plan.assignments if a.status == "retained"]
+        self.assertEqual(len(retained), 1)
+        self.assertEqual(retained[0].requirement.group.code, "A1")
+        self.assertEqual(retained[0].session.pk, monday.pk)
+
+    def test_the_engine_keeps_earlier_choices_when_they_all_fit(self):
+        self._seed(requirements={"SEMINAR": 1, "TUTORIAL": 1})
+        self._session("MT161", ActivityType.SEMINAR, "MONDAY", 8, 9, self.hall)
+        self._tutorial("MONDAY", 10, 11, self.hall)
+        self._tutorial("TUESDAY", 10, 11, self.hall)
+        seminar = Session.objects.get(
+            course_code="MT161", activity_type=ActivityType.SEMINAR
+        )
+        tutorial = Session.objects.get(
+            course_code="MT161", activity_type=ActivityType.TUTORIAL,
+            day="TUESDAY",
+        )
+        SessionGroup.objects.create(session=seminar, group=self.a1)
+        SessionGroup.objects.create(session=tutorial, group=self.a1)
+        plan = plan_allocation(self.semester, "ALL")
+        self.assertEqual(plan.unresolved_count, 0)
+        self.assertEqual(plan.moved, 0)
+        self.assertEqual(plan.retained, 2)
+        self.assertEqual(plan.added, 6)
+
+    def test_the_engine_backtracks_an_earlier_stage_for_a_later_one(self):
+        """A greedy first dive strands the practical; only backtracking saves it.
+
+        Four groups need one seminar and one practical. The two Monday rooms
+        (08:00-10:00 seminar, 10:00-12:00 practical) are the ones the
+        most-constrained-first order reaches for first, but taking both for
+        one group blocks that group's other requirement. Backtracking has to
+        reconsider the seminar choice to place all eight.
+        """
+        self._seed(requirements={"SEMINAR": 1, "PRACTICAL": 1})
+        monday = self._session(
+            "MT161", ActivityType.SEMINAR, "MONDAY", 8, 10, self.hall
+        )
+        tuesday = self._session(
+            "MT161", ActivityType.SEMINAR, "TUESDAY", 8, 10, self.hall
+        )
+        monday_p = self._session(
+            "MT161", ActivityType.PRACTICAL, "MONDAY", 10, 12, self.hall
+        )
+        self._session("MT161", ActivityType.PRACTICAL, "TUESDAY", 10, 12, self.hall)
+        # Force the first dive to take the Monday pair for A1, which is
+        # impossible: the practical then clashes with the seminar.
+        SessionGroup.objects.create(session=monday, group=self.a1)
+        plan = plan_allocation(self.semester, "ALL")
+        self.assertEqual(plan.unresolved_count, 0)
+        self.assertEqual(plan.added + plan.retained, 8)
+        self.assertEqual(plan.retained, 1)  # A1 keeps its Monday seminar
+        placed = {
+            (a.requirement.group.code, a.requirement.activity_type): a.session.pk
+            for a in plan.assignments
+        }
+        # A1 keeps its Monday seminar and takes the Tuesday practical.
+        self.assertEqual(placed[("A1", "SEMINAR")], monday.pk)
+        self.assertNotEqual(placed[("A1", "PRACTICAL")], monday_p.pk)
+        # Every other group is placed too.
+        self.assertEqual(len(placed), 8)
+        self.assertIn(tuesday.pk, set(placed.values()))
+
+    def test_a_later_stage_that_cannot_be_met_reports_the_specific_reason(self):
+        self._seed(requirements={"SEMINAR": 1, "TUTORIAL": 1})
+        self._session("MT161", ActivityType.SEMINAR, "MONDAY", 8, 9, self.hall)
+        # One tutorial room for four groups, and it holds one.
+        self._tutorial("MONDAY", 10, 11, self.small)
+        plan = plan_allocation(self.semester, "ALL")
+        self.assertEqual(plan.unresolved_count, 3)
+        self.assertIn("seats 30", " ".join(plan.unresolved[0].reasons))
+
+    def test_an_unverifiable_workshop_day_is_left_alone_and_reported(self):
+        self._seed()
+        self._tutorial("MONDAY", 8, 9, self.big)
+        self._tutorial("TUESDAY", 8, 9, self.big)
+        WorkshopAllocation.objects.create(
+            semester=self.semester,
+            course_code="WT107",
+            group_code="A1",
+            day="MONDAY",
+            venue="TW101",
+        )
+        plan = plan_allocation(self.semester, "ALL")
+        self.assertEqual(plan.unresolved_count, 0)
+        self.assertTrue(any("cannot be verified" in w for w in plan.warnings))
+        placed = {a.requirement.group.code: a.session.day for a in plan.assignments}
+        self.assertEqual(placed["A1"], "TUESDAY")
+
+    def test_reaching_the_search_limit_is_reported_not_called_impossible(self):
+        self._seed()
+        for day in ("MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY"):
+            for hour in (8, 10, 12, 14, 16):
+                self._tutorial(day, hour, hour + 1, self.hall)
+        plan = plan_allocation(self.semester, "ALL", node_limit=2)
+        self.assertTrue(plan.search_limit_hit)
+        self.assertFalse(plan.is_complete())
+        self.assertTrue(
+            any("not proof that no valid allocation exists" in w for w in plan.warnings)
+        )
+        # Nothing was written even though the search was abandoned.
+        self.assertEqual(SessionGroup.objects.count(), 0)
+
+    def test_a_full_search_within_the_budget_is_reported_as_complete(self):
+        self._seed()
+        self._tutorial("MONDAY", 8, 9, self.hall)
+        plan = plan_allocation(self.semester, "ALL")
+        self.assertFalse(plan.search_limit_hit)
+        self.assertTrue(plan.is_complete())
+
+    def test_the_plan_is_deterministic(self):
+        self._seed(requirements={"TUTORIAL": 1, "PRACTICAL": 1})
+        for day in ("MONDAY", "TUESDAY", "WEDNESDAY"):
+            self._tutorial(day, 8, 9, self.hall)
+            self._session("MT161", ActivityType.PRACTICAL, day, 10, 12, self.hall)
+        first = [
+            (a.requirement.group.code, a.requirement.activity_type, a.session.pk)
+            for a in plan_allocation(self.semester, "ALL").assignments
+        ]
+        second = [
+            (a.requirement.group.code, a.requirement.activity_type, a.session.pk)
+            for a in plan_allocation(self.semester, "ALL").assignments
+        ]
+        self.assertEqual(first, second)
+
+    def test_an_unverifiable_workshop_is_never_silently_accepted(self):
+        self._seed()
+        self._tutorial("MONDAY", 8, 9, self.hall)
+        WorkshopAllocation.objects.create(
+            semester=self.semester,
+            course_code="WT107",
+            group_code="A1",
+            day="MONDAY",
+            venue="TW101",
+        )
+        plan = plan_allocation(self.semester, "ALL")
+        self.assertEqual(plan.unresolved_count, 1)
+        self.assertIn("cannot be verified", plan.unresolved[0].reasons[0])
+
+    def test_two_groups_from_different_programmes_may_share_a_session(self):
+        self._seed()
+        self._tutorial("MONDAY", 8, 9, self.hall)
+        plan = plan_allocation(self.semester, "ALL")
+        programmes = {a.requirement.group.programme.code for a in plan.assignments}
+        self.assertEqual(programmes, {"CE", "ME"})
+        self.assertEqual(plan.session_rollup()[0]["programme_count"], 2)
+
+    def test_the_scope_restricts_the_run(self):
+        self._seed(requirements={"TUTORIAL": 1, "PRACTICAL": 1})
+        self._tutorial("MONDAY", 8, 9, self.hall)
+        self._session("MT161", ActivityType.PRACTICAL, "MONDAY", 10, 12, self.hall)
+        plan = plan_allocation(self.semester, "TUTORIAL")
+        self.assertEqual(plan.added, 4)
+        self.assertEqual(
+            {a.requirement.activity_type for a in plan.assignments},
+            {ActivityType.TUTORIAL},
+        )
+
+
+class ManualAssignmentTests(AllocationTestCase):
+    def test_a_valid_manual_assignment_is_accepted(self):
+        self._seed()
+        tutorial = self._tutorial("MONDAY", 8, 9, self.big)
+        linked, problems = manual_assign(self.a1, tutorial)
+        self.assertTrue(linked, problems)
+        self.assertTrue(
+            SessionGroup.objects.filter(session=tutorial, group=self.a1).exists()
+        )
+
+    def test_a_manual_assignment_uses_the_engine_rules(self):
+        self._seed()
+        lecture = self._session(
+            "MT161", ActivityType.LECTURE, "MONDAY", 8, 10, self.big
+        )
+        SessionGroup.objects.create(session=lecture, group=self.a1)
+        tutorial = self._tutorial("MONDAY", 9, 10, self.big)
+        linked, problems = manual_assign(self.a1, tutorial)
+        self.assertFalse(linked)
+        self.assertIn("clash", [p.code for p in problems])
+
+    def test_a_manual_assignment_respects_capacity(self):
+        self._seed()
+        tutorial = self._tutorial("MONDAY", 8, 9, self.small)
+        self.assertTrue(manual_assign(self.a1, tutorial)[0])
+        linked, problems = manual_assign(self.a2, tutorial)
+        self.assertFalse(linked)
+        self.assertIn("capacity-over-capacity", [p.code for p in problems])
+
+    def test_a_manual_assignment_refuses_a_venue_with_no_capacity(self):
+        self._seed()
+        tutorial = self._tutorial("MONDAY", 8, 9, self.no_capacity)
+        linked, problems = manual_assign(self.a1, tutorial)
+        self.assertFalse(linked)
+        self.assertIn("capacity-unknown-capacity", [p.code for p in problems])
+
+    def test_a_session_whose_course_is_unknown_is_reported(self):
+        self._seed()
+        tutorial = self._tutorial("MONDAY", 8, 9, self.big, course="ZZ999")
+        course, problems = validate_manual_assignment(self.a1, tutorial)
+        self.assertIsNone(course)
+        self.assertIn("unknown-course", [p.code for p in problems])
+
+    def test_the_course_is_matched_on_the_normalised_code(self):
+        self._seed()
+        tutorial = self._tutorial("MONDAY", 8, 9, self.big, course="  mt161 ")
+        course, problems = validate_manual_assignment(self.a1, tutorial)
+        self.assertEqual(course, self.maths)
+        self.assertEqual(problems, [])
+
+    def test_unassign_removes_the_link(self):
+        self._seed()
+        tutorial = self._tutorial("MONDAY", 8, 9, self.big)
+        manual_assign(self.a1, tutorial)
+        self.assertEqual(manual_unassign(self.a1, tutorial), 1)
+        self.assertFalse(
+            SessionGroup.objects.filter(session=tutorial, group=self.a1).exists()
+        )
+
+
+class AllocationRunTests(AllocationTestCase):
+    def _plan_and_run(self, scope="ALL"):
+        plan = plan_allocation(self.semester, scope)
+        return plan, save_plan(plan)
+
+    def _a_group_pinned_to_monday(self):
+        """A group that must be moved off Monday to its Tuesday session.
+
+        The Monday tutorial is the one the group is already linked to, and a
+        lecture overlapping it means the plan has to move it — which is what
+        produces the REMOVE half of a revert.
+        """
+        monday = self._tutorial("MONDAY", 8, 9, self.hall)
+        self._tutorial("TUESDAY", 8, 9, self.hall)
+        lecture = self._session(
+            "MT161", ActivityType.LECTURE, "MONDAY", 8, 10, self.hall
+        )
+        SessionGroup.objects.create(session=lecture, group=self.a1)
+        SessionGroup.objects.create(session=monday, group=self.a1)
+        return monday
+
+    def test_applying_a_run_creates_the_links(self):
+        self._seed()
+        self._tutorial("MONDAY", 8, 9, self.hall)
+        plan, run = self._plan_and_run()
+        result = apply_run(run)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["added"], 4)
+        self.assertEqual(SessionGroup.objects.count(), 4)
+        self.assertEqual(run.status, AllocationStatus.APPLIED)
+        self.assertIsNotNone(run.applied_at)
+
+    def test_applying_twice_is_refused(self):
+        self._seed()
+        self._tutorial("MONDAY", 8, 9, self.hall)
+        _, run = self._plan_and_run()
+        apply_run(run)
+        second = apply_run(run)
+        self.assertFalse(second["ok"])
+        self.assertEqual(SessionGroup.objects.count(), 4)
+
+    def test_valid_assignments_apply_while_items_stay_unresolved(self):
+        self._seed(requirements={"TUTORIAL": 1, "PRACTICAL": 1})
+        self._tutorial("MONDAY", 8, 9, self.hall)
+        plan, run = self._plan_and_run()
+        self.assertEqual(plan.added, 4)
+        self.assertEqual(plan.unresolved_count, 4)
+        apply_run(run)
+        self.assertEqual(SessionGroup.objects.count(), 4)
+        self.assertEqual(run.unresolved, 4)
+
+    def test_reverting_restores_the_original_state(self):
+        self._seed()
+        self._tutorial("MONDAY", 8, 9, self.hall)
+        _, run = self._plan_and_run()
+        apply_run(run)
+        result = revert_run(run)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["removed"], 4)
+        self.assertEqual(SessionGroup.objects.count(), 0)
+        self.assertEqual(run.status, AllocationStatus.REVERTED)
+
+    def test_reverting_a_move_puts_the_group_back(self):
+        self._seed()
+        self._a_group_pinned_to_monday()
+        before = set(
+            SessionGroup.objects.values_list("session_id", "group_id")
+        )
+        plan, run = self._plan_and_run()
+        self.assertEqual(plan.moved, 1)
+        apply_run(run)
+        self.assertNotEqual(
+            set(SessionGroup.objects.values_list("session_id", "group_id")), before
+        )
+        revert_run(run)
+        self.assertEqual(
+            set(SessionGroup.objects.values_list("session_id", "group_id")), before
+        )
+
+    def test_revert_is_refused_when_an_added_link_was_removed_by_hand(self):
+        self._seed()
+        self._tutorial("MONDAY", 8, 9, self.hall)
+        _, run = self._plan_and_run()
+        apply_run(run)
+        SessionGroup.objects.all().delete()
+        result = revert_run(run)
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["conflicts"])
+        self.assertIn("edited since this run was applied", result["message"])
+        self.assertEqual(AllocationRun.objects.get(pk=run.pk).status, "APPLIED")
+
+    def test_revert_is_refused_when_a_moved_group_was_linked_back(self):
+        self._seed()
+        monday = self._a_group_pinned_to_monday()
+        _, run = self._plan_and_run()
+        apply_run(run)
+        # A1 was moved off Monday; putting it back is a later manual edit.
+        SessionGroup.objects.get_or_create(session=monday, group=self.a1)
+        result = revert_run(run)
+        self.assertFalse(result["ok"])
+        self.assertTrue(
+            any("linked again" in c for c in result["conflicts"]), result
+        )
+
+    def test_only_an_applied_run_can_be_reverted(self):
+        self._seed()
+        self._tutorial("MONDAY", 8, 9, self.hall)
+        _, run = self._plan_and_run()
+        result = revert_run(run)
+        self.assertFalse(result["ok"])
+        self.assertIn("Only an applied run", result["message"])
+
+    def test_the_run_keeps_the_link_level_history(self):
+        self._seed()
+        monday = self._a_group_pinned_to_monday()
+        _, run = self._plan_and_run()
+        actions = set(run.changes.values_list("action", flat=True))
+        self.assertEqual(actions, {"ADD", "REMOVE"})
+        # The run that moved A1 off Monday records both halves of that move.
+        self.assertTrue(
+            run.changes.filter(
+                action=AllocationChange.Action.REMOVE, group=self.a1, session=monday
+            ).exists()
+        )
+        self.assertTrue(
+            run.changes.filter(
+                action=AllocationChange.Action.ADD, group=self.a1
+            ).exists()
+        )
+
+    def test_a_retained_link_is_never_recorded_as_a_change(self):
+        self._seed()
+        monday = self._tutorial("MONDAY", 8, 9, self.hall)
+        SessionGroup.objects.create(session=monday, group=self.a1)
+        _, run = self._plan_and_run()
+        self.assertFalse(
+            run.changes.filter(group=self.a1, session=monday).exists()
+        )
+        # Reverting therefore leaves that pre-existing link alone.
+        apply_run(run)
+        revert_run(run)
+        self.assertTrue(
+            SessionGroup.objects.filter(session=monday, group=self.a1).exists()
+        )
+
+    def test_the_snapshot_records_every_proposal(self):
+        self._seed()
+        self._tutorial("MONDAY", 8, 9, self.hall)
+        _, run = self._plan_and_run()
+        data = run.plan()
+        self.assertEqual(data["added"], 4)
+        self.assertEqual(len(data["assignments"]), 4)
+        entry = data["assignments"][0]
+        for key in (
+            "group", "programme", "course", "activity", "day", "time",
+            "venue", "group_count", "capacity_status", "status",
+        ):
+            self.assertIn(key, entry)
+        self.assertEqual(data["requirement_total"], 4)
+        self.assertTrue(data["complete"])
+
+    def test_the_snapshot_records_unresolved_reasons(self):
+        self._seed()
+        _, run = self._plan_and_run()
+        data = run.plan()
+        self.assertEqual(len(data["unresolved_items"]), 4)
+        self.assertTrue(data["unresolved_items"][0]["reasons"])
+        self.assertFalse(data["complete"])
+
+    def test_unresolved_reasons_are_grouped_across_every_candidate(self):
+        # Five zero-capacity sessions and one clashable one: the report must say
+        # so, not show only whichever session was tried last.
+        self._seed()
+        for hour in (8, 9, 10, 11, 12):
+            self._tutorial("MONDAY", hour, hour + 1, self.no_capacity)
+        clashable = self._tutorial("TUESDAY", 8, 9, self.hall)
+        lecture = self._session(
+            "MT161", ActivityType.LECTURE, "TUESDAY", 8, 10, self.hall
+        )
+        SessionGroup.objects.create(session=lecture, group=self.a1)
+        plan = plan_allocation(self.semester, "ALL")
+        item = next(
+            u for u in plan.unresolved if u.requirement.group.code == "A1"
+        )
+        self.assertEqual(item.sessions_considered, 6)
+        lines = " ".join(item.summary_lines())
+        # A problem that blocked several sessions says so; a one-off does not
+        # need a prefix. The "N sessions checked" line gives the total.
+        self.assertIn("5 sessions", lines)
+        self.assertIn("no capacity recorded", lines)
+        self.assertIn("already busy", lines)
+        self.assertNotIn("1 session:", lines)
+        # One message per distinct problem, however many sessions it blocked.
+        self.assertEqual(len(item.reasons), 2)
+        self.assertEqual(item.grouped["capacity-unknown-capacity"]["count"], 5)
+        self.assertEqual(item.grouped["clash"]["count"], 1)
+
+    def test_applying_is_atomic(self):
+        self._seed()
+        self._tutorial("MONDAY", 8, 9, self.big)
+        _, run = self._plan_and_run()
+        original = SessionGroup.objects.count()
+        with mock.patch(
+            "core.group_allocation.SessionGroup.objects.get_or_create",
+            side_effect=RuntimeError("boom"),
+        ):
+            with self.assertRaises(RuntimeError):
+                apply_run(run)
+        self.assertEqual(SessionGroup.objects.count(), original)
+        self.assertEqual(AllocationRun.objects.get(pk=run.pk).status, "PREVIEWED")
+
+
+class AllocationPageTests(AllocationTestCase):
+    def test_the_page_renders_with_a_semester_and_activity_scope(self):
+        self._seed()
+        self._tutorial("MONDAY", 8, 9, self.hall)
+        resp = self.client.get("/allocation/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "Group Allocation")
+        self.assertContains(resp, "Calculate Allocation")
+        self.assertContains(resp, "Seminar")
+        self.assertContains(resp, "Tutorial")
+        self.assertContains(resp, "Practical")
+
+    def test_the_sidebar_links_to_the_page(self):
+        self._seed()
+        resp = self.client.get("/allocation/")
+        self.assertContains(resp, 'href="/allocation/"')
+
+    def test_the_preview_reports_the_plan_without_writing(self):
+        self._seed()
+        self._tutorial("MONDAY", 8, 9, self.hall)
+        resp = self.client.post(
+            "/allocation/preview/",
+            {"semester": self.semester.pk, "scope": "ALL"},
+            HTTP_HX_REQUEST="true",
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "Allocation plan")
+        self.assertContains(resp, "Apply 4 assignment")
+        self.assertEqual(SessionGroup.objects.count(), 0)
+        self.assertEqual(AllocationRun.objects.count(), 1)
+
+    def test_the_preview_shows_unresolved_reasons(self):
+        self._seed()
+        resp = self.client.post(
+            "/allocation/preview/",
+            {"semester": self.semester.pk, "scope": "ALL"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "Unresolved")
+        self.assertContains(resp, "No tutorial session exists")
+
+    def test_the_preview_flags_courses_with_no_requirement(self):
+        self._seed()
+        other = Course.objects.create(code="ZZ999", name="Unconfigured")
+        ProgrammeCourse.objects.create(
+            programme=self.ce, course=other, semester=1
+        )
+        resp = self.client.post(
+            "/allocation/preview/",
+            {"semester": self.semester.pk, "scope": "ALL"},
+        )
+        self.assertContains(resp, "requirement not configured")
+        self.assertContains(resp, "ZZ999")
+
+    def test_apply_then_revert_through_the_views(self):
+        self._seed()
+        self._tutorial("MONDAY", 8, 9, self.hall)
+        run = self.client.post(
+            "/allocation/preview/",
+            {"semester": self.semester.pk, "scope": "ALL"},
+        ).context["run"]
+        self.client.post(
+            "/allocation/apply/", {"run": run.pk}, HTTP_HX_REQUEST="true"
+        )
+        self.assertEqual(SessionGroup.objects.count(), 4)
+        self.client.post(
+            "/allocation/revert/", {"run": run.pk}, HTTP_HX_REQUEST="true"
+        )
+        self.assertEqual(SessionGroup.objects.count(), 0)
+
+    def test_a_manual_assignment_is_validated_and_feedback_returned(self):
+        self._seed()
+        tutorial = self._tutorial("MONDAY", 8, 9, self.hall)
+        resp = self.client.post(
+            "/allocation/assign/",
+            {"group": self.a1.pk, "session": tutorial.pk},
+            HTTP_HX_REQUEST="true",
+        )
+        self.assertContains(resp, "assigned to")
+        self.assertTrue(
+            SessionGroup.objects.filter(session=tutorial, group=self.a1).exists()
+        )
+
+    def test_a_refused_manual_assignment_explains_itself(self):
+        self._seed()
+        tutorial = self._tutorial("MONDAY", 8, 9, self.small)
+        self.client.post(
+            "/allocation/assign/",
+            {"group": self.a1.pk, "session": tutorial.pk},
+            HTTP_HX_REQUEST="true",
+        )
+        resp = self.client.post(
+            "/allocation/assign/",
+            {"group": self.a2.pk, "session": tutorial.pk},
+            HTTP_HX_REQUEST="true",
+        )
+        self.assertContains(resp, "Assignment refused")
+        self.assertContains(resp, "seats 30")
+        self.assertFalse(
+            SessionGroup.objects.filter(session=tutorial, group=self.a2).exists()
+        )
+
+    def test_a_group_can_be_unassigned_by_hand(self):
+        self._seed()
+        tutorial = self._tutorial("MONDAY", 8, 9, self.hall)
+        manual_assign(self.a1, tutorial)
+        resp = self.client.post(
+            "/allocation/unassign/",
+            {"group": self.a1.pk, "session": tutorial.pk},
+            HTTP_HX_REQUEST="true",
+        )
+        self.assertContains(resp, "removed from")
+        self.assertFalse(
+            SessionGroup.objects.filter(session=tutorial, group=self.a1).exists()
+        )
+
+    def test_applying_logs_the_change(self):
+        self._seed()
+        self._tutorial("MONDAY", 8, 9, self.hall)
+        run = self.client.post(
+            "/allocation/preview/",
+            {"semester": self.semester.pk, "scope": "ALL"},
+        ).context["run"]
+        self.client.post("/allocation/apply/", {"run": run.pk})
+        messages = list(ActivityLog.objects.values_list("message", flat=True))
+        self.assertTrue(any("Applied group allocation run" in m for m in messages))
+        self.assertTrue(
+            ActivityLog.objects.filter(
+                action=LogAction.ASSIGN, resource="Group Allocation"
+            ).exists()
+        )
+
+    def test_reverting_logs_a_removal(self):
+        self._seed()
+        self._tutorial("MONDAY", 8, 9, self.big)
+        run = self.client.post(
+            "/allocation/preview/",
+            {"semester": self.semester.pk, "scope": "ALL"},
+        ).context["run"]
+        self.client.post("/allocation/apply/", {"run": run.pk})
+        self.client.post("/allocation/revert/", {"run": run.pk})
+        self.assertTrue(
+            ActivityLog.objects.filter(
+                action=LogAction.REMOVE, resource="Group Allocation"
+            ).exists()
+        )
+
+    def test_get_on_the_mutating_endpoints_redirects(self):
+        self._seed()
+        for url in (
+            "/allocation/preview/",
+            "/allocation/apply/",
+            "/allocation/revert/",
+            "/allocation/assign/",
+            "/allocation/unassign/",
+        ):
+            resp = self.client.get(url)
+            self.assertEqual(resp.status_code, 302, url)
+            self.assertEqual(resp.url, "/allocation/")
+
+    def test_the_page_survives_an_empty_database(self):
+        resp = self.client.get("/allocation/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "Create a semester before allocating groups")
+
+
+class GroupStatusTests(AllocationTestCase):
+    """``group_statuses`` answers "where does this group stand?" without
+    proposing anything. It must never claim a group is done when a requirement
+    is unplaced, and it must never offer a session the engine would refuse."""
+
+    def test_a_group_with_nothing_placed_is_wholly_outstanding(self):
+        self._seed()
+        self._tutorial("MONDAY", 8, 9, self.hall)
+        status = group_statuses(self.semester, "ALL", [self.a1])[self.a1.pk]
+        self.assertEqual(status.total, 1)
+        self.assertEqual(status.met, 0)
+        self.assertEqual(status.outstanding, 1)
+        self.assertEqual(status.state, "unassigned")
+        self.assertFalse(status.is_complete)
+
+    def test_a_fully_placed_group_is_complete_and_not_have_nothing_to_do(self):
+        self._seed()
+        tutorial = self._tutorial("MONDAY", 8, 9, self.hall)
+        manual_assign(self.a1, tutorial)
+        status = group_statuses(self.semester, "ALL", [self.a1])[self.a1.pk]
+        self.assertEqual((status.met, status.total), (1, 1))
+        self.assertEqual(status.percent, 100)
+        self.assertEqual(status.state, "complete")
+        self.assertTrue(status.is_complete)
+        # "complete" must mean "finished", never "nothing was ever asked".
+        self.assertFalse(status.has_nothing_to_do)
+
+    def test_a_group_whose_courses_require_nothing_is_reported_as_such(self):
+        self._seed()
+        self.maths.set_requirements({})
+        status = group_statuses(self.semester, "ALL", [self.a1])[self.a1.pk]
+        self.assertEqual(status.total, 0)
+        self.assertTrue(status.has_nothing_to_do)
+        self.assertFalse(status.is_complete)  # nothing asked is not "done"
+        self.assertEqual(status.state, "none")
+        self.assertEqual(status.percent, 0)
+
+    def test_a_partly_placed_group_counts_only_what_it_has(self):
+        self._seed(requirements={"TUTORIAL": 1, "PRACTICAL": 1})
+        tutorial = self._tutorial("MONDAY", 8, 9, self.hall)
+        manual_assign(self.a1, tutorial)
+        status = group_statuses(self.semester, "ALL", [self.a1])[self.a1.pk]
+        self.assertEqual((status.met, status.total), (1, 2))
+        self.assertEqual(status.state, "partial")
+        self.assertEqual(status.percent, 50)
+        self.assertEqual(
+            [(label, met, total) for label, met, total in status.activity_progress()],
+            [("Tutorial", 1, 1), ("Practical", 0, 1)],
+        )
+
+    def test_an_unplaced_requirement_is_matched_to_its_session(self):
+        self._seed()
+        tutorial = self._tutorial("MONDAY", 8, 9, self.hall)
+        entry = group_statuses(self.semester, "ALL", [self.a1])[self.a1.pk].entries[0]
+        self.assertIsNone(entry.assigned)
+        placed = [o for o in entry.options if o.already_assigned]
+        self.assertEqual(placed, [])
+        self.assertIn(tutorial, [o.session for o in entry.options])
+
+    def test_the_session_the_group_is_in_is_marked_assigned(self):
+        self._seed()
+        tutorial = self._tutorial("MONDAY", 8, 9, self.hall)
+        manual_assign(self.a1, tutorial)
+        entry = group_statuses(self.semester, "ALL", [self.a1])[self.a1.pk].entries[0]
+        self.assertTrue(entry.is_met)
+        self.assertEqual(entry.assigned, tutorial)
+        assigned = [o for o in entry.options if o.already_assigned]
+        self.assertEqual([o.session for o in assigned], [tutorial])
+        # The current placement is the status, not a proposal, so it is never
+        # re-judged -- it cannot come back with a "not possible".
+        self.assertTrue(assigned[0].ok)
+        self.assertEqual(assigned[0].reasons, [])
+
+    def test_a_clashing_session_is_listed_but_marked_not_free(self):
+        self._seed()
+        monday = self._tutorial("MONDAY", 8, 9, self.hall)
+        # Overlaps the one above, so the group is busy at the time.
+        clashing = self._tutorial("MONDAY", 8, (9, 30), self.hall)
+        manual_assign(self.a1, monday)
+        entry = group_statuses(
+            self.semester, "ALL", [self.a1]
+        )[self.a1.pk].entries[0]
+        blocked = {o.session.pk: o for o in entry.options if not o.ok}
+        self.assertEqual(list(blocked), [clashing.pk])
+        self.assertFalse(blocked[clashing.pk].free)
+        self.assertTrue(blocked[clashing.pk].reasons)
+        # The session the group is already in is still a valid option; nothing
+        # else is, so this requirement has nowhere left to move to.
+        self.assertEqual(
+            [o.session for o in entry.free_options if not o.already_assigned], []
+        )
+
+    def test_a_too_small_session_is_offered_as_free_but_not_ok(self):
+        """"Free" and "valid" are different questions and must be reported apart.
+
+        NB102 seats 30, so it takes exactly one group. The second group is free
+        at that time -- it simply cannot fit. Reporting one blunt "no" would
+        hide that it is a room-size problem, not a timetable clash.
+        """
+        self._seed()
+        tutorial = self._tutorial("MONDAY", 8, 9, self.small)
+        manual_assign(self.a1, tutorial)
+        only = group_statuses(
+            self.semester, "ALL", [self.a2]
+        )[self.a2.pk].entries[0].options[0]
+        self.assertTrue(only.free)  # nothing clashes
+        self.assertFalse(only.ok)  # but the room is full
+        self.assertIn("seats 30", " ".join(r.message for r in only.reasons))
+
+    def test_an_option_counts_the_group_that_would_be_added(self):
+        self._seed()
+        tutorial = self._tutorial("MONDAY", 8, 9, self.big)  # seats 90
+        manual_assign(self.a1, tutorial)
+        option = group_statuses(
+            self.semester, "ALL", [self.a2]
+        )[self.a2.pk].entries[0].options[0]
+        self.assertEqual(option.group_count, 2)
+        self.assertTrue(option.ok)
+
+    def test_the_options_are_ordered_with_the_current_placement_first(self):
+        self._seed()
+        later = self._tutorial("FRIDAY", 8, 9, self.hall)
+        earlier = self._tutorial("MONDAY", 8, 9, self.hall)
+        manual_assign(self.a1, later)
+        options = group_statuses(
+            self.semester, "ALL", [self.a1]
+        )[self.a1.pk].entries[0].options
+        self.assertEqual(options[0].session, later)
+        self.assertTrue(options[0].already_assigned)
+        self.assertEqual([o.session for o in options[1:]], [earlier])
+
+    def test_unconfigured_courses_are_attached_to_the_groups_that_study_them(self):
+        self._seed(requirements={})
+        other = Course.objects.create(code="ZZ999", name="Unconfigured")
+        ProgrammeCourse.objects.create(
+            programme=self.ce, course=other, semester=1
+        )
+        statuses = group_statuses(self.semester, "ALL", [self.a1, self.d1])
+        self.assertEqual(
+            [e["code"] for e in statuses[self.a1.pk].unconfigured_courses],
+            ["ZZ999"],
+        )
+        # D1 studies the other programme, so the same course is not its problem.
+        self.assertEqual(statuses[self.d1.pk].unconfigured_courses, [])
+
+    def test_the_scope_limits_the_activities_being_asked_about(self):
+        self._seed(requirements={"TUTORIAL": 1, "PRACTICAL": 1})
+        self._tutorial("MONDAY", 8, 9, self.hall)
+        self._session("MT161", ActivityType.PRACTICAL, "TUESDAY", 8, 9, self.hall)
+        status = group_statuses(self.semester, "TUTORIAL", [self.a1])[self.a1.pk]
+        self.assertEqual(status.total, 1)
+        self.assertEqual(status.entries[0].activity_label, "Tutorial")
+
+    def test_a_group_with_no_requirement_still_gets_a_row(self):
+        """The board must show "nothing asked of it", not quietly omit it."""
+        self._seed(requirements={})
+        self.assertIn(self.a1.pk, group_statuses(self.semester, "ALL", [self.a1]))
+
+
+class GroupProgressBoardTests(AllocationTestCase):
+    def setUp(self):
+        super().setUp()
+        self._seed(requirements={"TUTORIAL": 1, "PRACTICAL": 1})
+        self.tutorial = self._tutorial("MONDAY", 8, 9, self.hall)
+        self.practical = self._session(
+            "MT161", ActivityType.PRACTICAL, "TUESDAY", 8, 9, self.hall
+        )
+
+    def _board(self):
+        return self.client.get(
+            f"/allocation/groups/?semester={self.semester.pk}&scope=ALL"
+        )
+
+    def test_the_board_lists_every_group_with_a_progress_bar(self):
+        resp = self._board()
+        self.assertEqual(resp.status_code, 200)
+        rows = resp.context["rows"]
+        self.assertEqual({r.group.pk for r in rows}, {g.pk for g in (self.a1, self.a2, self.d1, self.d2)})
+        for row in rows:
+            self.assertEqual((row.met, row.total), (0, 2))
+            self.assertEqual(row.outstanding, 2)
+
+    def test_a_completed_group_is_counted_and_sorts_ahead(self):
+        manual_assign(self.a1, self.tutorial)
+        manual_assign(self.a1, self.practical)
+        rows = self._board().context["rows"]
+        self.assertEqual(rows[0].group, self.a1)
+        self.assertTrue(rows[0].is_complete)
+        self.assertEqual(self._board().context["complete"], 1)
+        self.assertEqual(self._board().context["outstanding"], 6)
+
+    def test_the_summary_buckets_add_up_to_the_number_of_groups(self):
+        manual_assign(self.a1, self.tutorial)  # 1/2 -> partial
+        ctx = self._board().context
+        self.assertEqual(
+            ctx["complete"] + ctx["partial"] + ctx["unassigned"] + ctx["nothing"],
+            len(ctx["rows"]),
+        )
+        self.assertEqual(ctx["partial"], 1)
+        self.assertEqual(ctx["unassigned"], 3)
+
+    def test_each_row_links_to_that_group_and_keeps_the_filters(self):
+        row = self._board().context["rows"][0]
+        self.assertEqual(row.detail_url, f"/allocation/group/{row.group.pk}/")
+        resp = self._board()
+        self.assertContains(
+            resp, f"/allocation/group/{row.group.pk}/?semester={self.semester.pk}"
+        )
+
+    def test_the_board_survives_an_empty_database(self):
+        resp = self.client.get("/allocation/groups/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.context["rows"], [])
+
+    def test_the_sidebar_lights_up_group_progress_here_and_the_allocator_elsewhere(self):
+        board = self._board()
+        nav = board.context["nav"]
+        self.assertEqual(nav, "allocation-progress")
+        self.assertContains(board, "Group Progress")
+        # The allocator link must not be the one that looks active.
+        self.assertEqual(
+            self.client.get("/allocation/").context["nav"], "allocation"
+        )
+
+
+class GroupPlacementPageTests(AllocationTestCase):
+    def setUp(self):
+        super().setUp()
+        self._seed()
+        self.monday = self._tutorial("MONDAY", 8, 9, self.hall)
+        # NB102 seats 30 -- room for exactly one group.
+        self.tuesday = self._tutorial("TUESDAY", 8, 9, self.small)
+        self.tiny = self._tutorial("WEDNESDAY", 8, 9, self.no_capacity)
+
+    def _page(self, group=None, **params):
+        group = group or self.a1
+        query = {"semester": self.semester.pk, "scope": "ALL", **params}
+        return self.client.get(
+            f"/allocation/group/{group.pk}/?", query
+        )
+
+    def test_the_page_lists_the_sessions_the_group_is_free_for(self):
+        resp = self._page()
+        self.assertEqual(resp.status_code, 200)
+        entry = resp.context["status"].entries[0]
+        free = [o.session for o in entry.free_options]
+        self.assertEqual(free, [self.monday, self.tuesday])
+        self.assertContains(resp, "Assign here")
+
+    def test_a_room_that_is_already_full_is_refused_with_its_capacity(self):
+        manual_assign(self.a1, self.tuesday)  # fills NB102's single seat
+        resp = self._page(self.a2)
+        reasons = " ".join(
+            r.message for e in resp.context["status"].entries for o in e.options
+            for r in o.reasons
+        )
+        self.assertIn("seats 30", reasons)
+        self.assertContains(resp, "not possible")
+
+    def test_a_room_with_no_recorded_capacity_is_refused_not_assumed(self):
+        resp = self._page()
+        self.assertEqual(
+            [o.ok for o in resp.context["status"].entries[0].options
+             if o.session == self.tiny],
+            [False],
+        )
+        self.assertContains(resp, "no capacity recorded")
+
+    def test_a_clash_is_reported_as_a_clash_not_as_capacity(self):
+        manual_assign(self.a1, self.monday)
+        clash = self._tutorial("MONDAY", 8, (9, 30), self.hall)
+        entry = self._page().context["status"].entries[0]
+        blocked = {o.session.pk: o for o in entry.options if not o.ok}
+        self.assertIn(clash.pk, blocked)
+        self.assertFalse(blocked[clash.pk].free)
+        self.assertIn(
+            "busy", " ".join(r.message for r in blocked[clash.pk].reasons).lower()
+        )
+
+    def test_assigning_from_the_page_creates_the_link(self):
+        resp = self.client.post(
+            "/allocation/assign/",
+            {"group": self.a1.pk, "session": self.tuesday.pk},
+            HTTP_HX_REQUEST="true",
+        )
+        self.assertContains(resp, "assigned to")
+        self.assertTrue(
+            SessionGroup.objects.filter(
+                session=self.tuesday, group=self.a1
+            ).exists()
+        )
+        # And the page now shows it as done.
+        entry = self._page().context["status"].entries[0]
+        self.assertTrue(entry.is_met)
+        self.assertEqual(entry.assigned, self.tuesday)
+
+    def test_assigning_returns_the_fresh_panel_so_the_page_needs_no_reload(self):
+        """The whole point: the response is the new status, not just a message.
+
+        Without this the coordinator clicks "Assign here", sees a toast saying
+        it worked, and is still looking at "Not yet placed" underneath.
+        """
+        resp = self.client.post(
+            "/allocation/assign/",
+            {"group": self.a1.pk, "session": self.monday.pk, "panel": "1"},
+            HTTP_HX_REQUEST="true",
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, 'id="allocation-requirements"')
+        self.assertNotContains(resp, "Not yet placed")
+        self.assertContains(resp, "Complete")  # this is the group's only one
+        self.assertIn("allocation-toast", resp["HX-Trigger"])
+
+    def test_removing_returns_the_fresh_panel_with_the_requirement_open_again(self):
+        manual_assign(self.a1, self.monday)
+        resp = self.client.post(
+            "/allocation/unassign/",
+            {"group": self.a1.pk, "session": self.monday.pk, "panel": "1"},
+            HTTP_HX_REQUEST="true",
+        )
+        self.assertContains(resp, "Not yet placed")
+        self.assertContains(resp, "1 still to place")
+        self.assertContains(resp, "0/1")
+        self.assertNotContains(resp, "Complete")
+
+    def test_the_progress_bar_comes_back_updated_with_the_panel(self):
+        self.maths.set_requirements({"TUTORIAL": 1, "PRACTICAL": 1})
+        tutorial = self._tutorial("MONDAY", 8, 9, self.hall)
+        resp = self.client.post(
+            "/allocation/assign/",
+            {"group": self.a1.pk, "session": tutorial.pk, "panel": "1"},
+            HTTP_HX_REQUEST="true",
+        )
+        self.assertContains(resp, "1/2")
+        self.assertContains(resp, "1 still to place")
+
+    def test_a_plain_post_from_the_group_page_goes_back_to_the_group_page(self):
+        resp = self.client.post(
+            "/allocation/assign/",
+            {"group": self.a1.pk, "session": self.monday.pk, "panel": "1"},
+        )
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(
+            resp.url, f"/allocation/group/{self.a1.pk}/?semester={self.semester.pk}"
+        )
+
+    def test_the_forms_carry_the_view_so_the_redraw_matches_the_page(self):
+        """Two semesters exist; the panel must come back for the one on screen.
+
+        Otherwise the list silently switches to the latest semester's sessions
+        the instant a placement is made.
+        """
+        resp = self._page()
+        self.assertContains(
+            resp, f'name="semester" value="{self.semester.pk}"'
+        )
+        self.assertContains(resp, 'name="scope" value="ALL"')
+        other = self._session(
+            "MT161", ActivityType.TUTORIAL, "THURSDAY", 14, 15, self.hall
+        )
+        other.semester = self.other_semester
+        other.save()
+        resp = self.client.post(
+            "/allocation/assign/",
+            {
+                "group": self.a1.pk,
+                "session": self.monday.pk,
+                "panel": "1",
+                "semester": self.semester.pk,
+                "scope": "ALL",
+            },
+            HTTP_HX_REQUEST="true",
+        )
+        self.assertNotContains(resp, "THURSDAY")
+        self.assertNotContains(resp, "14:00")
+
+    def test_a_panel_post_with_no_semester_uses_the_session_own(self):
+        """The session names its semester outright, so nothing is guessed."""
+        resp = self.client.post(
+            "/allocation/assign/",
+            {"group": self.a1.pk, "session": self.monday.pk, "panel": "1"},
+            HTTP_HX_REQUEST="true",
+        )
+        self.assertEqual(
+            resp.context["semester"], self.semester
+        )
+        self.assertNotContains(resp, "Not yet placed")
+
+    def test_a_post_without_the_panel_flag_still_gets_the_message_fragment(self):
+        """The allocation page's own manual form has no panel to replace."""
+        resp = self.client.post(
+            "/allocation/assign/",
+            {"group": self.a1.pk, "session": self.monday.pk},
+            HTTP_HX_REQUEST="true",
+        )
+        self.assertContains(resp, "assigned to")
+        self.assertNotContains(resp, 'id="allocation-requirements"')
+
+    def test_the_panel_is_served_on_its_own(self):
+        resp = self.client.get(
+            f"/allocation/group/{self.a1.pk}/panel/",
+            {"semester": self.semester.pk, "scope": "ALL"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, 'id="allocation-requirements"')
+        self.assertContains(resp, "Not yet placed")
+        self.assertEqual(self.client.get("/allocation/group/999999/panel/").status_code, 404)
+
+    def test_a_placed_requirement_offers_a_move_and_a_remove(self):
+        manual_assign(self.a1, self.monday)
+        resp = self._page()
+        self.assertContains(resp, "Move it: see the other sessions")
+        self.assertContains(resp, "Remove")
+        self.client.post(
+            "/allocation/unassign/",
+            {"group": self.a1.pk, "session": self.monday.pk},
+            HTTP_HX_REQUEST="true",
+        )
+        self.assertFalse(
+            SessionGroup.objects.filter(session=self.monday, group=self.a1).exists()
+        )
+        # With the link gone the requirement is outstanding again, and the page
+        # says so rather than still claiming it is done.
+        self.assertFalse(self._page().context["status"].entries[0].is_met)
+
+    def test_a_group_with_nothing_required_is_said_so(self):
+        self.maths.set_requirements({})
+        resp = self._page()
+        self.assertContains(resp, "no seminar, tutorial or practical requirement")
+        self.assertEqual(resp.context["status"].total, 0)
+
+    def test_a_group_whose_course_has_no_requirement_configured_is_flagged(self):
+        self.maths.set_requirements({})
+        resp = self._page()
+        self.assertContains(resp, "no required activities configured")
+        self.assertContains(resp, "MT161")
+
+    def test_a_group_with_no_session_at_all_is_told_so_rather_than_shown_blank(self):
+        Session.objects.all().delete()
+        resp = self._page()
+        entry = resp.context["status"].entries[0]
+        self.assertEqual(entry.options, [])
+        self.assertContains(resp, "No tutorial session exists")
+
+    def test_an_unknown_group_is_a_404(self):
+        self.assertEqual(
+            self.client.get("/allocation/group/999999/").status_code, 404
+        )
+
+    def test_the_page_survives_a_database_with_no_semester(self):
+        Semester.objects.all().delete()
+        resp = self.client.get(f"/allocation/group/{self.a1.pk}/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsNone(resp.context["semester"])
+        self.assertIsNone(resp.context["status"])
+        self.assertContains(resp, "no seminar, tutorial or practical requirement")
+
+
+class CourseRequirementPageTests(TestCase):
+    def setUp(self):
+        self.course = Course.objects.create(code="MT161", name="Mathematics 1")
+        self.prog = Programme.objects.create(code="CE", name="Civil Engineering")
+        ProgrammeCourse.objects.create(
+            programme=self.prog, course=self.course, semester=1
+        )
+
+    @staticmethod
+    def _formset_payload(rows, total=None, initial=0):
+        """POST payload for the inline requirement formset."""
+        total = len(rows) if total is None else total
+        payload = {
+            "activity_requirements-TOTAL_FORMS": str(total),
+            "activity_requirements-INITIAL_FORMS": str(initial),
+            "activity_requirements-MIN_NUM_FORMS": "0",
+            "activity_requirements-MAX_NUM_FORMS": "1000",
+        }
+        for index, row in enumerate(rows):
+            payload[f"activity_requirements-{index}-id"] = row.get("id", "")
+            payload[f"activity_requirements-{index}-activity_type"] = row["activity_type"]
+            payload[f"activity_requirements-{index}-count"] = str(row["count"])
+            payload[f"activity_requirements-{index}-DELETE"] = row.get("delete", "")
+        return payload
+
+    def test_the_list_shows_the_shared_requirements(self):
+        self.course.set_requirements({"TUTORIAL": 1, "PRACTICAL": 1})
+        resp = self.client.get("/course-requirements/")
+        self.assertContains(resp, "MT161")
+        self.assertContains(resp, "Tutorial; Practical")
+
+    def test_the_list_flags_a_course_with_no_requirement(self):
+        resp = self.client.get("/course-requirements/")
+        self.assertContains(resp, "Not configured")
+
+    def test_the_list_can_filter_to_unconfigured_courses(self):
+        self.course.set_requirements({"TUTORIAL": 1})
+        Course.objects.create(code="ZZ999", name="Unconfigured")
+        resp = self.client.get("/course-requirements/?configured=no")
+        self.assertContains(resp, "ZZ999")
+        self.assertNotContains(resp, "MT161")
+
+    def test_creating_a_course_saves_its_requirements(self):
+        resp = self.client.post(
+            "/course-requirements/create/",
+            {
+                "code": "EE131",
+                "name": "Electronics",
+                **self._formset_payload(
+                    [{"activity_type": "SEMINAR", "count": 1}]
+                ),
+            },
+        )
+        self.assertEqual(resp.status_code, 302)
+        course = Course.objects.get(code="EE131")
+        self.assertEqual(course.required_activities(), ("SEMINAR",))
+
+    def test_creating_a_course_with_no_requirements_is_allowed(self):
+        resp = self.client.post(
+            "/course-requirements/create/",
+            {
+                "code": "EE131",
+                "name": "Electronics",
+                **self._formset_payload([]),
+            },
+        )
+        self.assertEqual(resp.status_code, 302)
+        self.assertFalse(Course.objects.get(code="EE131").has_requirements())
+
+    def test_editing_a_course_replaces_its_requirements(self):
+        existing = self.course.set_requirements({"TUTORIAL": 1})
+        row = self.course.activity_requirements.get(activity_type="TUTORIAL")
+        resp = self.client.post(
+            f"/course-requirements/{self.course.pk}/edit/",
+            {
+                "code": "MT161",
+                "name": "Mathematics 1",
+                **self._formset_payload(
+                    [{"id": row.pk, "activity_type": "PRACTICAL", "count": 2}],
+                    initial=1,
+                ),
+            },
+        )
+        self.assertEqual(resp.status_code, 302)
+        self.course = Course.objects.get(pk=self.course.pk)
+        self.assertEqual(self.course.required_activities(), ("PRACTICAL",))
+        self.assertEqual(self.course.required_count("PRACTICAL"), 2)
+        self.assertTrue(existing is not None)
+
+    def test_the_requirement_form_never_offers_a_lecture(self):
+        resp = self.client.get("/course-requirements/create/")
+        self.assertContains(resp, "Tutorial")
+        self.assertNotContains(resp, ">Lecture<")
+
+    def test_the_detail_page_lists_the_programmes_and_name_variants(self):
+        self.course.name_variants = json.dumps(["Mathematics 1A"])
+        self.course.save()
+        resp = self.client.get(f"/course-requirements/{self.course.pk}/")
+        self.assertContains(resp, "CE")
+        self.assertContains(resp, "Mathematics 1A")
+        self.assertContains(resp, "other name")
+
+    def test_deleting_a_course_also_removes_its_programme_links(self):
+        resp = self.client.post(f"/course-requirements/{self.course.pk}/delete/")
+        self.assertEqual(resp.status_code, 302, getattr(resp, "context", None))
+        self.assertFalse(Course.objects.filter(code="MT161").exists())
+        self.assertEqual(ProgrammeCourse.objects.count(), 0)
+
+    def test_deleting_a_course_is_logged(self):
+        self.client.post(f"/course-requirements/{self.course.pk}/delete/")
+        self.assertTrue(
+            ActivityLog.objects.filter(
+                action=LogAction.DELETE, resource="Course"
+            ).exists()
+        )
+
+    def test_the_programme_course_list_shows_the_shared_requirements(self):
+        self.course.set_requirements({"PRACTICAL": 1})
+        resp = self.client.get("/courses/")
+        self.assertContains(resp, "Practical")
+
+    def test_the_sidebar_links_to_the_shared_courses(self):
+        resp = self.client.get("/course-requirements/")
+        self.assertContains(resp, 'href="/course-requirements/"')
+
+
+class DeriveRequirementsFromSessionsTests(TestCase):
+    """The master-timetable import can fill in requirements from what it read."""
+
+    def setUp(self):
+        self.semester = Semester.objects.create(
+            academic_year="2026/2027", semester=1
+        )
+        self.prog = Programme.objects.create(code="CE", name="Civil Engineering")
+        self.group = StudentGroup.objects.create(programme=self.prog, code="A1")
+
+    def _course(self, code, requirements=None, semester=1):
+        course = Course.objects.create(code=code, name=code)
+        ProgrammeCourse.objects.create(
+            programme=self.prog, course=course, semester=semester
+        )
+        if requirements:
+            course.set_requirements(requirements)
+        return course
+
+    def _session(self, code, activity):
+        return Session.objects.create(
+            semester=self.semester,
+            course_code=code,
+            activity_type=activity,
+            day="MONDAY",
+            start_time=time(8, 0),
+            end_time=time(9, 0),
+            venue=None,
+        )
+
+    def test_a_course_with_only_seminars_requires_a_seminar(self):
+        course = self._course("CL111")
+        self._session("CL111", ActivityType.LECTURE)
+        self._session("CL111", ActivityType.SEMINAR)
+        mapping, unresolved = derive_requirements_from_sessions(self.semester)
+        self.assertEqual(mapping[course], {"SEMINAR": 1})
+        self.assertNotIn(course, unresolved)
+
+    def test_a_course_with_tutorials_and_practicals_requires_both(self):
+        course = self._course("ME101")
+        self._session("ME101", ActivityType.LECTURE)
+        self._session("ME101", ActivityType.TUTORIAL)
+        self._session("ME101", ActivityType.PRACTICAL)
+        mapping, _ = derive_requirements_from_sessions(self.semester)
+        self.assertEqual(mapping[course], {"TUTORIAL": 1, "PRACTICAL": 1})
+
+    def test_lectures_alone_never_become_a_requirement(self):
+        course = self._course("MT171")
+        self._session("MT171", ActivityType.LECTURE)
+        mapping, unresolved = derive_requirements_from_sessions(self.semester)
+        self.assertNotIn(course, mapping)
+        self.assertIn(course, unresolved)
+
+    def test_workshops_never_become_a_requirement(self):
+        course = self._course("WT107")
+        self._session("WT107", ActivityType.WORKSHOP)
+        mapping, unresolved = derive_requirements_from_sessions(self.semester)
+        self.assertNotIn(course, mapping)
+        self.assertIn(course, unresolved)
+
+    def test_a_course_with_no_sessions_is_reported_not_assumed_empty(self):
+        course = self._course("ZZ999")
+        _, unresolved = derive_requirements_from_sessions(self.semester)
+        self.assertIn(course, unresolved)
+
+    def test_deriving_never_guesses_an_activity_with_no_session(self):
+        # A course whose tutorials are not timetabled yet must not be given a
+        # tutorial requirement nothing could satisfy.
+        course = self._course("EE131")
+        self._session("EE131", ActivityType.LECTURE)
+        mapping, _ = derive_requirements_from_sessions(self.semester)
+        self.assertNotIn(course, mapping)
+
+    def test_the_import_sets_requirements_when_asked(self):
+        self._course("CL111")
+        self._session("CL111", ActivityType.SEMINAR)
+        self._session("CL111", ActivityType.LECTURE)
+        path = make_xlsx(
+            [
+                ["CL111", "SEMINAR", "MONDAY", "08:00", "09:00", "", ""],
+                ["CL111", "LECTURE", "MONDAY", "10:00", "11:00", "", ""],
+            ],
+            MASTER_COLS,
+        )
+        result = import_master_timetable_from_excel(
+            path,
+            semester_id=self.semester.pk,
+            derive_requirements=True,
+        )
+        course = Course.objects.get(code="CL111")
+        self.assertEqual(course.required_activities(), ("SEMINAR",))
+        self.assertEqual(
+            [e["code"] for e in result.derived_requirements], ["CL111"]
+        )
+
+    def test_the_import_never_overwrites_an_existing_requirement(self):
+        course = self._course("MT161", requirements={"PRACTICAL": 2})
+        self._session("MT161", ActivityType.TUTORIAL)
+        self._session("MT161", ActivityType.LECTURE)
+        path = make_xlsx(
+            [["MT161", "TUTORIAL", "MONDAY", "08:00", "09:00", "", ""]],
+            MASTER_COLS,
+        )
+        result = import_master_timetable_from_excel(
+            path,
+            semester_id=self.semester.pk,
+            derive_requirements=True,
+        )
+        course.refresh_from_db()
+        self.assertEqual(course.required_activities(), ("PRACTICAL",))
+        self.assertEqual(course.required_count("PRACTICAL"), 2)
+        self.assertTrue(
+            any("already has" in line for line in result.derived_skipped),
+            result.derived_skipped,
+        )
+
+    def test_the_import_reports_courses_it_could_not_decide(self):
+        self._course("ZZ999")
+        self._course("CL111")
+        self._session("CL111", ActivityType.SEMINAR)
+        path = make_xlsx(
+            [["CL111", "SEMINAR", "MONDAY", "08:00", "09:00", "", ""]],
+            MASTER_COLS,
+        )
+        result = import_master_timetable_from_excel(
+            path,
+            semester_id=self.semester.pk,
+            derive_requirements=True,
+        )
+        self.assertTrue(
+            any("ZZ999" in line for line in result.derived_unresolved),
+            result.derived_unresolved,
+        )
+
+    def test_deriving_is_off_unless_asked_for(self):
+        self._course("CL111")
+        self._session("CL111", ActivityType.SEMINAR)
+        self._session("CL111", ActivityType.LECTURE)
+        path = make_xlsx(
+            [["CL111", "SEMINAR", "MONDAY", "08:00", "09:00", "", ""]],
+            MASTER_COLS,
+        )
+        import_master_timetable_from_excel(
+            path, semester_id=self.semester.pk
+        )
+        self.assertFalse(Course.objects.get(code="CL111").has_requirements())
+
+    def test_a_dry_run_never_derives(self):
+        self._course("CL111")
+        self._session("CL111", ActivityType.SEMINAR)
+        self._session("CL111", ActivityType.LECTURE)
+        path = make_xlsx(
+            [["CL111", "SEMINAR", "MONDAY", "08:00", "09:00", "", ""]],
+            MASTER_COLS,
+        )
+        result = import_master_timetable_from_excel(
+            path, semester_id=self.semester.pk, dry_run=True,
+            derive_requirements=True,
+        )
+        self.assertFalse(Course.objects.get(code="CL111").has_requirements())
+        self.assertEqual(result.derived_requirements, [])
+
+
+class AllocationShowsInTheTimetableTests(AllocationTestCase):
+    """The point of the whole feature: an applied run must be visible in the
+    master timetable, in the session detail, and in every PDF export.
+
+    Two tutorial rooms, so the four groups are *split* across them. With one
+    big room every group lands in the same session and every export correctly
+    reads ALL, which would make these assertions vacuous.
+    """
+
+    def _applied(self, scope="ALL"):
+        self._tutorial("MONDAY", 8, 9, self.hall)
+        self._tutorial("TUESDAY", 8, 9, self.hall)
+        plan = plan_allocation(self.semester, scope)
+        return plan, apply_run(save_plan(plan))
+
+    def test_the_sessions_list_shows_the_assigned_groups(self):
+        self._seed()
+        self._applied()
+        resp = self.client.get("/sessions/")
+        self.assertContains(resp, "Assigned Groups")
+        codes = {
+            code
+            for session in resp.context["items"]
+            for code in [session.assigned_groups]
+            if code != "—"
+        }
+        self.assertTrue(codes, "no session showed any assigned group")
+        # Groups really were split, so real codes (not just ALL) are listed.
+        self.assertTrue(
+            any("," in text for text in codes), codes
+        )
+
+    def test_the_sessions_list_marks_which_sessions_are_allocatable(self):
+        self._seed()
+        self._session(
+            "MT161", ActivityType.LECTURE, "MONDAY", 8, 10, self.hall
+        )
+        self._tutorial("MONDAY", 14, 15, self.hall)
+        resp = self.client.get("/sessions/")
+        self.assertIn(
+            {"label": "Allocatable", "key": "allocatable"},
+            resp.context["detail_fields"],
+        )
+        # The detail panel is what renders that field.
+        session = Session.objects.get(activity_type=ActivityType.LECTURE)
+        panel = self.client.get(
+            f"/sessions/{session.pk}/", HTTP_HX_REQUEST="true"
+        )
+        self.assertContains(panel, "Allocatable")
+        self.assertContains(panel, "No")
+        tutorial = Session.objects.get(activity_type=ActivityType.TUTORIAL)
+        self.assertContains(
+            self.client.get(f"/sessions/{tutorial.pk}/", HTTP_HX_REQUEST="true"),
+            "Yes",
+        )
+
+    def test_the_sessions_list_counts_the_unassigned_small_group_sessions(self):
+        self._seed()
+        self._tutorial("MONDAY", 8, 9, self.hall)
+        resp = self.client.get("/sessions/")
+        self.assertEqual(resp.context["unassigned_count"], 1)
+        self.assertContains(resp, "no group assigned")
+
+    def test_the_unassigned_filter_lists_only_empty_small_group_sessions(self):
+        self._seed()
+        self._tutorial("MONDAY", 8, 9, self.hall)
+        self._tutorial("TUESDAY", 8, 9, self.hall)
+        # A session nothing can be placed in: no venue means no capacity, so it
+        # stays empty whatever the allocator does.
+        blocked = self._tutorial("WEDNESDAY", 8, 9, venue=None)
+        self._session(
+            "MT161", ActivityType.LECTURE, "THURSDAY", 8, 10, self.hall
+        )
+        self._applied()
+        resp = self.client.get("/sessions/?assigned=no")
+        pks = {s.pk for s in resp.context["items"]}
+        self.assertIn(blocked.pk, pks)
+        self.assertNotIn("MONDAY", {s.day for s in resp.context["items"]})
+        lectures = Session.objects.filter(activity_type=ActivityType.LECTURE)
+        self.assertFalse(pks & set(lectures.values_list("pk", flat=True)))
+
+    def test_the_assigned_filter_lists_only_filled_sessions(self):
+        self._seed()
+        self._tutorial("MONDAY", 8, 9, self.hall)
+        self._tutorial("TUESDAY", 8, 9, self.hall)
+        self._applied()
+        resp = self.client.get("/sessions/?assigned=yes")
+        self.assertTrue(resp.context["items"])
+        for session in resp.context["items"]:
+            self.assertNotEqual(session.assigned_groups, "—")
+
+    def test_the_session_detail_page_lists_the_assigned_groups(self):
+        self._seed()
+        self._applied()
+        session = Session.objects.get(
+            activity_type=ActivityType.TUTORIAL, day="MONDAY"
+        )
+        codes = list(
+            session.session_groups.values_list("group__code", flat=True)
+        )
+        self.assertTrue(codes)
+        resp = self.client.get(f"/sessions/{session.pk}/")
+        for code in codes:
+            self.assertContains(resp, code)
+        htmx = self.client.get(
+            f"/sessions/{session.pk}/", HTTP_HX_REQUEST="true"
+        )
+        for code in codes:
+            self.assertContains(htmx, code)
+
+    def test_the_group_pdf_is_for_that_one_group(self):
+        self._seed()
+        self._applied()
+        entries = collect_group_entries(self.a1, self.semester)
+        labels = [e["label"] for e in entries if e["course_code"] == "MT161"]
+        self.assertTrue(labels)
+        self.assertIn("A1", labels[0])
+        others = [
+            g.code
+            for g in StudentGroup.objects.exclude(pk=self.a1.pk)
+        ]
+        for code in others:
+            self.assertNotIn(code, labels[0])
+
+    def test_the_programme_pdf_names_that_programmes_groups_only(self):
+        self._seed()
+        self._applied()
+        mine = set(
+            StudentGroup.objects.filter(programme=self.ce).values_list(
+                "code", flat=True
+            )
+        )
+        entries = fold_for_display(
+            collect_entries(self.ce, self.semester), mine
+        )
+        cell = next(e for e in entries if e["course_code"] == "MT161")
+        listed = {code for code in mine if code in cell["label"]}
+        self.assertTrue(listed, cell["label"])
+        theirs = set(
+            StudentGroup.objects.exclude(programme=self.ce).values_list(
+                "code", flat=True
+            )
+        )
+        self.assertFalse(
+            theirs & {c for c in cell["label"].replace("ALL", " ").split(",")},
+            cell["label"],
+        )
+
+    def test_the_all_programmes_pdf_names_every_attending_group(self):
+        self._seed()
+        self._applied()
+        all_codes = set(StudentGroup.objects.values_list("code", flat=True))
+        merged = _merge_master_entries(
+            fold_for_display(
+                collect_master_entries(self.semester), all_codes
+            ),
+            all_codes,
+        )
+        blocks = list(merged.values()) if isinstance(merged, dict) else list(merged)
+        text = " ".join(_master_cell_text([b]) for b in blocks)
+        for code in all_codes:
+            self.assertIn(code, text)
+
+    def test_the_all_programmes_pdf_export_renders_with_the_groups(self):
+        self._seed()
+        self._applied()
+        response = self.client.get(
+            f"/export/all-programmes/timetable.pdf/?semester={self.semester.pk}"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "application/pdf")
+        self.assertTrue(response.content.startswith(b"%PDF"))
+
+    def test_the_group_export_draws_no_groups_line(self):
+        # One group's own sheet: naming the group back to it — or printing
+        # "ALL" because that one group is everybody — is noise.
+        self._seed()
+        self._applied()
+        entries, _ = _collect_group_entries_and_rotations(self.a1, self.semester)
+        folded = fold_for_display(
+            entries, {self.a1.code}, show_groups=False
+        )
+        self.assertTrue(folded)
+        for entry in folded:
+            lines = [ln for ln in entry["label"].split("\n") if ln]
+            self.assertNotIn("ALL", lines, entry["label"])
+            for group in StudentGroup.objects.all():
+                self.assertNotIn(group.code, lines, entry["label"])
+        # ...and the data is still there for a caller that wants it.
+        self.assertTrue(any(e.get("groups") for e in folded))
+
+    def test_the_group_export_still_states_the_course_and_venue(self):
+        self._seed()
+        self._applied()
+        entries, _ = _collect_group_entries_and_rotations(self.a1, self.semester)
+        folded = fold_for_display(
+            entries, {self.a1.code}, show_groups=False
+        )
+        cell = next(e for e in folded if e["course_code"] == "MT161")
+        self.assertIn("MT161", cell["label"])
+        self.assertIn("Tutorial", cell["label"])
+        self.assertIn(self.hall.name, cell["label"])
+
+    def test_the_other_exports_keep_their_groups_line(self):
+        self._seed()
+        self._applied()
+        mine = {
+            g.code
+            for g in StudentGroup.objects.filter(programme=self.ce)
+        }
+        programme = fold_for_display(
+            collect_entries(self.ce, self.semester), mine, show_groups=True
+        )
+        self.assertTrue(any(e.get("groups") for e in programme))
+        all_codes = set(StudentGroup.objects.values_list("code", flat=True))
+        master = fold_for_display(
+            collect_master_entries(self.semester), all_codes, show_groups=True
+        )
+        self.assertTrue(any(e.get("groups") for e in master))
+
+    def test_a_whole_cohort_lecture_also_loses_its_all_on_a_group_export(self):
+        # CL111 lectures read ALL by design on a shared sheet; on a single
+        # group's own sheet the line is gone entirely, not merely relabelled.
+        self._seed()
+        self.maths.set_requirements({"SEMINAR": 1})
+        lecture = self._session(
+            "MT161", ActivityType.LECTURE, "MONDAY", 8, 10, self.hall
+        )
+        SessionGroup.objects.create(session=lecture, group=self.a1)
+        self._session("MT161", ActivityType.SEMINAR, "TUESDAY", 8, 9, self.hall)
+        plan = plan_allocation(self.semester, "ALL")
+        apply_run(save_plan(plan))
+        entries, _ = _collect_group_entries_and_rotations(self.a1, self.semester)
+        with_groups = fold_for_display(entries, {self.a1.code})
+        without = fold_for_display(
+            entries, {self.a1.code}, show_groups=False
+        )
+        shared = next(e for e in with_groups if e["groups"] == "ALL")
+        solo = next(e for e in without if e["course_code"] == shared["course_code"])
+        self.assertNotIn("ALL", solo["label"])
+        # The shared export is untouched.
+        self.assertIn("ALL", shared["label"])
+
+    def test_reverting_takes_the_groups_back_out_of_the_views_and_exports(self):
+        self._seed()
+        self._applied()
+        self.assertTrue(SessionGroup.objects.exists())
+        self.assertNotContains(self.client.get("/sessions/"), "A1, A2")
+        run = AllocationRun.objects.get(status=AllocationStatus.APPLIED)
+        result = revert_run(run)
+        self.assertTrue(result["ok"])
+        self.assertEqual(SessionGroup.objects.count(), 0)
+        resp = self.client.get("/sessions/")
+        self.assertContains(resp, "no group assigned")
+        self.assertEqual(
+            [
+                e
+                for e in collect_group_entries(self.a1, self.semester)
+                if e.get("groups")
+            ],
+            [],
+        )
+
+
+class AllocationAppearsInExportsTests(AllocationTestCase):
+    def test_an_applied_tutorial_shows_up_in_the_group_timetable(self):
+        self._seed()
+        self._tutorial("MONDAY", 8, 9, self.hall)
+        plan = plan_allocation(self.semester, "ALL")
+        apply_run(save_plan(plan))
+        entries = collect_group_entries(self.a1, self.semester)
+        codes = {e["course_code"] for e in entries}
+        self.assertIn("MT161", codes)
+        self.assertIn("A1", {e.get("groups", "") for e in entries})
+
+    def test_another_group_does_not_see_someone_elsses_tutorial(self):
+        self._seed()
+        # Only A1 is allocated; D1's requirement stays unresolved.
+        self._tutorial("MONDAY", 8, 9, self.small)
+        plan = plan_allocation(self.semester, "ALL")
+        apply_run(save_plan(plan))
+        self.assertIn(
+            "MT161", {e["course_code"] for e in collect_group_entries(self.a1, self.semester)}
+        )
+        self.assertNotIn(
+            "MT161",
+            {e["course_code"] for e in collect_group_entries(self.d1, self.semester)},
+        )
+
+    def test_the_group_pdf_export_includes_the_applied_session(self):
+        self._seed()
+        self._tutorial("MONDAY", 8, 9, self.big)
+        plan = plan_allocation(self.semester, "ALL")
+        apply_run(save_plan(plan))
+        out = io.BytesIO()
+        render_group_timetable(self.a1, self.semester, out=out)
+        self.assertGreater(len(out.getvalue()), 1000)

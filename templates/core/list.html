@@ -27,43 +27,50 @@
     <!-- Filter bar -->
     <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-3 sm:p-4 mb-4">
         <form method="get" action=".">
-            <div class="flex flex-col lg:flex-row gap-3">
-                <div class="flex-1 min-w-0 relative">
+            <div class="flex flex-col gap-3">
+                <div class="flex flex-col sm:flex-row gap-2 min-w-0">
+                    <div class="flex-1 min-w-0 relative">
                     <svg class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
-                    <input type="text" name="q" value="{{ q }}" placeholder="Search..."
-                           class="w-full min-w-0 pl-9 pr-3 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                    <input type="search" name="q" value="{{ q }}" placeholder="Search {{ page_title|lower }}..."
+                           class="block box-border w-full min-w-0 h-11 pl-10 pr-3 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                    </div>
+                    <div class="flex gap-2 shrink-0">
+                        <button type="submit" class="flex-1 sm:flex-none px-4 py-2.5 bg-gray-800 text-white text-sm font-medium rounded-lg hover:bg-gray-900 transition">Search</button>
+                        <a href="?" class="flex-1 sm:flex-none flex items-center justify-center px-4 py-2.5 text-sm font-medium text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 transition">Reset</a>
+                    </div>
                 </div>
-                <div class="flex flex-col sm:flex-row sm:flex-wrap lg:flex-nowrap gap-2 sm:gap-3 items-stretch sm:items-center">
-                    {% block filters %}
-                    {% for f in filters %}
-                        {% if f.type == "select" %}
-                        <select name="{{ f.name }}" class="w-full lg:w-auto min-w-0 lg:max-w-[16rem] px-3 py-2.5 border border-gray-300 rounded-lg text-sm bg-white truncate focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
-                            <option value="">All {{ f.label }}s</option>
-                            {% for v, label in f.options %}
-                            <option value="{{ v }}" {% if f.value == v %}selected{% endif %}>{{ label }}</option>
+                {% if filters %}
+                <details class="rounded-lg border border-gray-200" {% if advanced_filters_open or not filters_collapsible %}open{% endif %}>
+                    <summary class="flex min-h-10 cursor-pointer list-none items-center gap-2 px-3 text-sm font-medium text-gray-700 hover:bg-gray-50 rounded-lg">
+                        <svg class="h-4 w-4 text-gray-500 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m6 9 6 6 6-6"/></svg>
+                        {% if filters_collapsible %}More filters{% else %}Filters{% endif %}
+                        {% if active_filter_count %}<span class="inline-flex min-w-5 h-5 items-center justify-center rounded-full bg-blue-100 px-1.5 text-xs font-semibold text-blue-700">{{ active_filter_count }}</span>{% endif %}
+                    </summary>
+                    <div class="border-t border-gray-200 p-3 sm:p-4">
+                        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                            {% block filters %}
+                            {% for f in filters %}
+                                {% if f.type == "select" %}
+                                <label class="block min-w-0"><span class="mb-1 block text-xs font-medium text-gray-500">{{ f.label }}</span>
+                                    <select name="{{ f.name }}" class="block w-full min-w-0 px-3 py-2.5 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                                        <option value="">All {{ f.label }}s</option>
+                                        {% for v, label in f.options %}<option value="{{ v }}" {% if f.value == v %}selected{% endif %}>{{ label }}</option>{% endfor %}
+                                    </select>
+                                </label>
+                                {% elif f.type == "time" %}
+                                <label class="block min-w-0"><span class="mb-1 block text-xs font-medium text-gray-500">{{ f.label }}</span><input type="time" name="{{ f.name }}" value="{{ f.value }}" class="block w-full min-w-0 px-3 py-2.5 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"></label>
+                                {% elif f.type == "number" %}
+                                <label class="block min-w-0"><span class="mb-1 block text-xs font-medium text-gray-500">{{ f.label }}</span><input type="number" name="{{ f.name }}" value="{{ f.value }}" class="block w-full min-w-0 px-3 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"></label>
+                                {% else %}
+                                <label class="block min-w-0"><span class="mb-1 block text-xs font-medium text-gray-500">{{ f.label }}</span><input type="text" name="{{ f.name }}" value="{{ f.value }}" class="block w-full min-w-0 px-3 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"></label>
+                                {% endif %}
                             {% endfor %}
-                        </select>
-                        {% elif f.type == "time" %}
-                        <input type="time" name="{{ f.name }}" value="{{ f.value }}" title="{{ f.label }}"
-                               class="w-full lg:w-auto min-w-0 lg:max-w-[11rem] px-3 py-2.5 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
-                        {% elif f.type == "number" %}
-                        <input type="number" name="{{ f.name }}" value="{{ f.value }}" placeholder="{{ f.label }}"
-                               class="w-full lg:w-auto min-w-0 lg:max-w-[10rem] px-3 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
-                        {% else %}
-                        <input type="text" name="{{ f.name }}" value="{{ f.value }}" placeholder="{{ f.label }}"
-                               class="w-full lg:w-auto min-w-0 lg:max-w-[16rem] px-3 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
-                        {% endif %}
-                    {% endfor %}
-                    {% endblock %}
-                </div>
-                <div class="flex gap-2 shrink-0 w-full sm:w-auto">
-                    <button type="submit" class="flex-1 sm:flex-none px-4 py-2.5 bg-gray-800 text-white text-sm font-medium rounded-lg hover:bg-gray-900 transition">
-                        Filter
-                    </button>
-                    <a href="?" class="flex-1 sm:flex-none flex items-center justify-center px-4 py-2.5 text-sm font-medium text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 transition">
-                        Reset
-                    </a>
-                </div>
+                            {% endblock %}
+                        </div>
+                        <button type="submit" class="mt-3 px-4 py-2.5 bg-gray-800 text-white text-sm font-medium rounded-lg hover:bg-gray-900 transition">Apply filters</button>
+                    </div>
+                </details>
+                {% endif %}
             </div>
         </form>
     </div>

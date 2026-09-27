@@ -1,0 +1,249 @@
+{% load core_tags %}
+
+<div class="space-y-4">
+    {% if run %}
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+                <h2 class="text-sm font-semibold text-gray-800">
+                    Allocation plan &mdash; {{ run.semester }} &middot; {{ run.get_scope_display }}
+                </h2>
+                <p class="text-xs text-gray-500 mt-0.5">
+                    Run #{{ run.pk }} &middot; {{ run.get_status_display }}
+                    {% if plan.scanned %}&middot; {{ plan.scanned }} search step{{ plan.scanned|pluralize }}{% endif %}
+                    {% if plan.duration_ms %}&middot; {{ plan.duration_ms }} ms{% endif %}
+                </p>
+            </div>
+            <div class="flex flex-col sm:flex-row gap-2">
+                {% if run.status == 'PREVIEWED' %}
+                <form method="post" action="{{ apply_url }}"
+                      hx-post="{{ apply_url }}" hx-target="#allocation-plan" hx-swap="innerHTML"
+                      hx-disabled-elt="this"
+                      hx-confirm="Apply this plan? {{ run.assigned }} assignment(s) will be added and {{ run.removed }} previous link(s) removed.">
+                    {% csrf_token %}
+                    <input type="hidden" name="run" value="{{ run.pk }}">
+                    <button type="submit"
+                            class="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-emerald-600 text-white text-sm font-medium rounded-lg hover:bg-emerald-700 transition disabled:opacity-50">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                        Apply {{ run.assigned }} assignment{{ run.assigned|pluralize }}
+                    </button>
+                </form>
+                {% elif run.status == 'APPLIED' %}
+                <form method="post" action="{{ revert_url }}"
+                      hx-post="{{ revert_url }}" hx-target="#allocation-plan" hx-swap="innerHTML"
+                      hx-disabled-elt="this"
+                      hx-confirm="Revert this run? {{ run.assigned }} assignment(s) added and {{ run.removed }} removed will be undone.">
+                    {% csrf_token %}
+                    <input type="hidden" name="run" value="{{ run.pk }}">
+                    <button type="submit"
+                            class="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-4 py-2.5 text-amber-800 bg-amber-50 border border-amber-300 text-sm font-medium rounded-lg hover:bg-amber-100 transition disabled:opacity-50">
+                        Revert this run
+                    </button>
+                </form>
+                {% endif %}
+            </div>
+        </div>
+
+        <div class="mt-4 grid grid-cols-2 sm:grid-cols-5 gap-3">
+            <div class="rounded-lg bg-emerald-50 border border-emerald-200 p-3">
+                <p class="text-xs text-emerald-700 font-medium">Added</p>
+                <p class="text-xl font-semibold text-emerald-900">{{ plan.added|default:0 }}</p>
+            </div>
+            <div class="rounded-lg bg-blue-50 border border-blue-200 p-3">
+                <p class="text-xs text-blue-700 font-medium">Moved</p>
+                <p class="text-xl font-semibold text-blue-900">{{ plan.moved|default:0 }}</p>
+            </div>
+            <div class="rounded-lg bg-gray-50 border border-gray-200 p-3">
+                <p class="text-xs text-gray-600 font-medium">Retained</p>
+                <p class="text-xl font-semibold text-gray-900">{{ plan.retained|default:0 }}</p>
+            </div>
+            <div class="rounded-lg bg-amber-50 border border-amber-200 p-3">
+                <p class="text-xs text-amber-700 font-medium">Unresolved</p>
+                <p class="text-xl font-semibold text-amber-900">{{ plan.unresolved|default:0 }}</p>
+            </div>
+            <div class="rounded-lg bg-slate-50 border border-slate-200 p-3">
+                <p class="text-xs text-slate-600 font-medium">Requirements</p>
+                <p class="text-xl font-semibold text-slate-900">{{ plan.requirement_total|default:0 }}</p>
+            </div>
+        </div>
+
+        {% if plan.search_limit_hit %}
+        <div class="mt-4 rounded-lg border border-amber-300 bg-amber-50 p-3">
+            <p class="text-sm font-semibold text-amber-800">Search limit reached</p>
+            <p class="text-xs text-amber-700 mt-0.5">
+                This plan is the best found before the step budget ran out. It is
+                <strong>not</strong> proof that no valid allocation exists &mdash;
+                narrow the semester or the activity scope and run again.
+            </p>
+        </div>
+        {% endif %}
+    </div>
+    {% endif %}
+
+    {% for warning in plan.warnings %}
+    <div class="rounded-xl border border-amber-300 bg-amber-50 p-4">
+        <p class="text-sm text-amber-800">{{ warning }}</p>
+    </div>
+    {% endfor %}
+
+    {% if plan.unconfigured_courses %}
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+        <h3 class="text-sm font-semibold text-gray-800">
+            No allocation required &mdash; requirement not configured
+        </h3>
+        <p class="text-xs text-gray-500 mt-0.5 mb-3">
+            These courses have no required activities set, so nothing was
+            allocated for them. Set their requirements to include them.
+        </p>
+        <div class="overflow-x-auto">
+            <table class="min-w-full divide-y divide-gray-200 text-sm">
+                <thead class="bg-gray-50">
+                    <tr>
+                        <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Course</th>
+                        <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Name</th>
+                        <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Programmes</th>
+                        <th class="px-3 py-2 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Groups</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-100">
+                    {% for entry in plan.unconfigured_courses %}
+                    <tr>
+                        <td class="px-3 py-2 font-medium text-gray-800">{{ entry.code }}</td>
+                        <td class="px-3 py-2 text-gray-600">
+                            {{ entry.name }}
+                            {% if entry.variants %}
+                            <span class="block text-xs text-amber-700">
+                                {{ entry.variants|length }} conflicting name{{ entry.variants|length|pluralize }} in the source data
+                            </span>
+                            {% endif %}
+                        </td>
+                        <td class="px-3 py-2 text-gray-600">{{ entry.programmes|join:", " }}</td>
+                        <td class="px-3 py-2 text-right text-gray-600">{{ entry.group_count }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% endif %}
+
+    {% if plan.assignments %}
+    {% for activity, rows in plan.assignments|group_by_activity %}
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+        <h3 class="text-sm font-semibold text-gray-800 mb-3">{{ activity }} assignments</h3>
+        <div class="overflow-x-auto">
+            <table class="min-w-full divide-y divide-gray-200 text-sm">
+                <thead class="bg-gray-50">
+                    <tr>
+                        <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Group</th>
+                        <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Programme</th>
+                        <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Course</th>
+                        <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Day</th>
+                        <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Time</th>
+                        <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Venue</th>
+                        <th class="px-3 py-2 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Groups in session</th>
+                        <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Capacity</th>
+                        <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Change</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-100">
+                    {% for a in rows %}
+                    <tr class="hover:bg-blue-50/40">
+                        <td class="px-3 py-2 font-medium text-gray-800">{{ a.group }}</td>
+                        <td class="px-3 py-2 text-gray-600">{{ a.programme }}</td>
+                        <td class="px-3 py-2 text-gray-700">
+                            {{ a.course }}
+                            <span class="block text-xs text-gray-500">
+                                {{ a.activity }}{% if a.ordinal > 1 %} #{{ a.ordinal }}{% endif %}
+                            </span>
+                        </td>
+                        <td class="px-3 py-2 text-gray-600 whitespace-nowrap">{{ a.day }}</td>
+                        <td class="px-3 py-2 text-gray-600 whitespace-nowrap">{{ a.time }}</td>
+                        <td class="px-3 py-2 text-gray-600">{{ a.venue|default:"no venue" }}</td>
+                        <td class="px-3 py-2 text-right text-gray-700">{{ a.group_count }}</td>
+                        <td class="px-3 py-2 text-xs
+                            {% if a.capacity_status == 'ok' %}text-gray-500
+                            {% else %}text-amber-700{% endif %}">
+                            {{ a.capacity_message }}
+                        </td>
+                        <td class="px-3 py-2">
+                            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium
+                                {% if a.status == 'added' %}bg-emerald-100 text-emerald-700
+                                {% elif a.status == 'moved' %}bg-blue-100 text-blue-700
+                                {% else %}bg-gray-100 text-gray-600{% endif %}">
+                                {{ a.status }}
+                            </span>
+                            {% if a.moved_from %}
+                            <span class="block text-xs text-gray-500 mt-0.5">from {{ a.moved_from }}</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% endfor %}
+    {% endif %}
+
+    {% if plan.unresolved_items %}
+    <div class="bg-white rounded-xl shadow-sm border border-amber-200 p-4">
+        <h3 class="text-sm font-semibold text-gray-800 mb-1">
+            Unresolved &mdash; {{ plan.unresolved_items|length }} requirement{{ plan.unresolved_items|length|pluralize }}
+        </h3>
+        <p class="text-xs text-gray-500 mb-3">
+            These could not be assigned. Reasons are grouped across every
+            candidate session, so a line like &ldquo;5 sessions: no capacity
+            recorded&rdquo; means five sessions were blocked by that one problem.
+            The rest of the plan can still be applied; fix the reasons below and
+            run again.
+        </p>
+        <div class="overflow-x-auto">
+            <table class="min-w-full divide-y divide-gray-200 text-sm">
+                <thead class="bg-gray-50">
+                    <tr>
+                        <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Group</th>
+                        <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Programme</th>
+                        <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Course</th>
+                        <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Activity</th>
+                        <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Why</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-100">
+                    {% for u in plan.unresolved_items %}
+                    <tr>
+                        <td class="px-3 py-2 font-medium text-gray-800">{{ u.group }}</td>
+                        <td class="px-3 py-2 text-gray-600">{{ u.programme }}</td>
+                        <td class="px-3 py-2 text-gray-700">
+                            {{ u.course }}
+                            <span class="block text-xs text-gray-500">{{ u.course_name }}</span>
+                        </td>
+                        <td class="px-3 py-2 text-gray-600">
+                            {{ u.activity }}{% if u.ordinal > 1 %} #{{ u.ordinal }}{% endif %}
+                        </td>
+                        <td class="px-3 py-2">
+                            <ul class="space-y-0.5">
+                                {% for reason in u.reasons %}
+                                <li class="text-xs text-amber-800">&bull; {{ reason }}</li>
+                                {% endfor %}
+                            </ul>
+                            {% if u.sessions_considered %}
+                            <p class="text-xs text-gray-400 mt-1">
+                                {{ u.sessions_considered }} session{{ u.sessions_considered|pluralize }} checked
+                            </p>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% endif %}
+
+    {% if not plan.assignments and not plan.unresolved_items and not plan.unconfigured_courses %}
+    <div class="rounded-xl border border-gray-200 bg-white p-6 text-center text-gray-400 text-sm">
+        Nothing to allocate for this semester yet.
+    </div>
+    {% endif %}
+</div>

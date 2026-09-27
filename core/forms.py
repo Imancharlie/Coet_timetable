@@ -2,6 +2,10 @@ from django import forms
 from django.forms import inlineformset_factory
 
 from .models import (
+    ALLOCATED_ACTIVITY_TYPES,
+    ActivityType,
+    Course,
+    CourseActivityRequirement,
     Programme,
     ProgrammeCourse,
     Semester,
@@ -52,21 +56,87 @@ class StudentGroupForm(forms.ModelForm):
 
 
 class ProgrammeCourseForm(forms.ModelForm):
+    """Programme -> shared course link.
+
+    ``course_code``/``course_name`` are deliberately absent: they are mirrors of
+    the shared ``Course`` and are filled in by ``ProgrammeCourse.save()``, so
+    editing them here would only be overwritten.
+    """
+
     class Meta:
         model = ProgrammeCourse
-        fields = ["programme", "course_code", "course_name", "semester"]
+        fields = ["programme", "course", "semester"]
         widgets = {
             "programme": forms.Select(attrs={"class": SELECT_CLS}),
-            "course_code": forms.TextInput(
+            "course": forms.Select(attrs={"class": SELECT_CLS}),
+            "semester": forms.NumberInput(attrs={"class": INPUT_CLS, "min": 1}),
+        }
+        labels = {"course": "Course"}
+
+    def clean(self):
+        cleaned = super().clean()
+        programme = cleaned.get("programme")
+        course = cleaned.get("course")
+        semester = cleaned.get("semester")
+        if programme and course and semester:
+            clash = ProgrammeCourse.objects.filter(
+                programme=programme, semester=semester, course=course
+            ).exclude(pk=self.instance.pk)
+            if clash.exists():
+                self.add_error(
+                    "semester",
+                    f"{programme.code} already studies {course.code} in "
+                    f"semester {semester}.",
+                )
+        return cleaned
+
+
+class CourseRequirementForm(forms.ModelForm):
+    """One "how many sessions of this activity" row of a course."""
+
+    class Meta:
+        model = CourseActivityRequirement
+        fields = ["activity_type", "count"]
+        widgets = {
+            "activity_type": forms.Select(attrs={"class": SELECT_CLS}),
+            "count": forms.NumberInput(attrs={"class": INPUT_CLS, "min": 1}),
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Only the three allocatable activities can be required; a lecture or a
+        # workshop is never a group-allocation requirement.
+        self.fields["activity_type"].choices = [
+            (value, label)
+            for value, label in ActivityType.choices
+            if value in ALLOCATED_ACTIVITY_TYPES
+        ]
+
+
+CourseRequirementFormSet = inlineformset_factory(
+    Course,
+    CourseActivityRequirement,
+    form=CourseRequirementForm,
+    extra=1,
+    can_delete=True,
+    min_num=0,
+    validate_min=False,
+)
+
+
+class CourseForm(forms.ModelForm):
+    """The shared course record: one code, one name, its requirements."""
+
+    class Meta:
+        model = Course
+        fields = ["code", "name"]
+        widgets = {
+            "code": forms.TextInput(
                 attrs={"class": INPUT_CLS, "placeholder": "e.g. MT161"}
             ),
-            "course_name": forms.TextInput(
-                attrs={
-                    "class": INPUT_CLS,
-                    "placeholder": "e.g. Mathematics 1",
-                }
+            "name": forms.TextInput(
+                attrs={"class": INPUT_CLS, "placeholder": "e.g. Mathematics 1"}
             ),
-            "semester": forms.NumberInput(attrs={"class": INPUT_CLS, "min": 1}),
         }
 
 

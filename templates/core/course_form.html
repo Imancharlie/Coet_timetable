@@ -1,0 +1,81 @@
+{% load core_tags %}
+
+<form method="post" action="{{ action }}"
+      hx-post="{{ action }}" hx-target="#modal-content" hx-swap="innerHTML"
+      hx-disabled-elt="this"
+      x-data="{ submitting: false }" @submit="submitting = true">
+    {% csrf_token %}
+    {{ formset.management_form }}
+    <div class="space-y-5">
+        {% for field in form %}
+        <div>
+            <label for="{{ field.id_for_label }}" class="block text-sm font-medium text-gray-700 mb-1.5">
+                {{ field.label }}{% if field.field.required %} <span class="text-red-500">*</span>{% endif %}
+            </label>
+            {{ field }}
+            {% for error in field.errors %}
+            <p class="mt-1 text-xs text-red-500">{{ error }}</p>
+            {% endfor %}
+            {% if field.help_text %}
+            <p class="mt-1 text-xs text-gray-400">{{ field.help_text }}</p>
+            {% endif %}
+        </div>
+        {% endfor %}
+
+        <div>
+            <div class="flex items-center justify-between mb-2">
+                <label class="block text-sm font-medium text-gray-700">Required Activities</label>
+            </div>
+            <div class="space-y-2">
+                {% for sub in formset %}
+                <div class="flex flex-col sm:flex-row sm:items-center gap-2 bg-gray-50 rounded-lg px-3 py-2">
+                    {{ sub.id }}
+                    {{ sub.activity_type }}
+                    <span class="text-xs text-gray-400 shrink-0">sessions per group</span>
+                    <span class="w-24">{{ sub.count }}</span>
+                    <label class="shrink-0 text-xs text-gray-400 whitespace-nowrap flex items-center gap-1">Delete {{ sub.DELETE }}</label>
+                    {{ sub.errors }}
+                </div>
+                {% empty %}
+                <p class="text-xs text-gray-400 px-3 py-2 bg-gray-50 rounded-lg">
+                    No required activities — this course will be reported as
+                    &ldquo;requirement not configured&rdquo; during allocation
+                    review and will not be allocated.
+                </p>
+                {% endfor %}
+            </div>
+            <p class="text-xs text-gray-400 mt-2">
+                One row per activity. Leave the count at 1 for the usual case;
+                raise it when every group must attend more than one session of
+                that activity.
+            </p>
+        </div>
+    </div>
+    {% if formset.non_form_errors %}
+    <div class="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg">
+        {% for error in formset.non_form_errors %}
+        <p class="text-sm text-red-600">{{ error }}</p>
+        {% endfor %}
+    </div>
+    {% endif %}
+    {% if form.non_field_errors %}
+    <div class="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg">
+        {% for error in form.non_field_errors %}
+        <p class="text-sm text-red-600">{{ error }}</p>
+        {% endfor %}
+    </div>
+    {% endif %}
+    <div class="mt-6 flex flex-col sm:flex-row sm:justify-end gap-3">
+        <button type="button" @click="modalOpen = false" class="w-full sm:w-auto px-4 py-2.5 sm:py-2 text-sm font-medium text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 transition">
+            Cancel
+        </button>
+        <button type="submit" :disabled="submitting"
+                class="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-4 py-2.5 sm:py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition disabled:opacity-50">
+            <span x-show="!submitting">Save</span>
+            <span x-show="submitting" class="inline-flex items-center gap-2">
+                <svg class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                Saving...
+            </span>
+        </button>
+    </div>
+</form>

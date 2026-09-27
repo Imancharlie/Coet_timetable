@@ -1,0 +1,170 @@
+{% extends "base.html" %}
+{% load core_tags %}
+
+{% block content %}
+<div class="max-w-7xl mx-auto space-y-4">
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+        <form method="post" action="{{ preview_url }}"
+              hx-post="{{ preview_url }}" hx-target="#allocation-plan" hx-swap="innerHTML"
+              hx-disabled-elt="#allocate-btn"
+              class="flex flex-col lg:flex-row lg:items-end gap-3">
+            {% csrf_token %}
+            <div class="flex-1 min-w-0">
+                <label for="allocation-semester" class="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1.5">Semester</label>
+                <select name="semester" id="allocation-semester"
+                        class="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                    {% for s in semesters %}
+                    <option value="{{ s.pk }}" {% if semester and s.pk == semester.pk %}selected{% endif %}>{{ s }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="flex-1 min-w-0">
+                <label for="allocation-scope" class="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1.5">Activities</label>
+                <select name="scope" id="allocation-scope"
+                        class="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                    {% for value, label in scopes %}
+                    <option value="{{ value }}" {% if scope == value %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <button type="submit" id="allocate-btn"
+                    class="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-wait">
+                <span class="tt-idle-label inline-flex items-center gap-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"/></svg>
+                    Calculate Allocation
+                </span>
+                <span class="tt-status-label">
+                    <svg class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                    Calculating...
+                </span>
+            </button>
+        </form>
+        <p class="mt-3 text-xs text-gray-500">
+            Groups count as {{ 30 }} students each. Workshops are not allocated here, but they
+            are checked when a group's availability is worked out. Allocation priority is
+            seminar, then tutorial, then practical; earlier choices are revisited when a
+            later one cannot be completed.
+        </p>
+    </div>
+
+    {% if no_semesters %}
+    <div class="rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-800">
+        Create a semester before allocating groups.
+    </div>
+    {% endif %}
+
+    {% if error %}
+    <div class="rounded-xl border border-red-300 bg-red-50 p-4 text-sm text-red-700">{{ error }}</div>
+    {% endif %}
+    {% if message %}
+    <div class="rounded-xl border border-emerald-300 bg-emerald-50 p-4 text-sm text-emerald-800">{{ message }}</div>
+    {% endif %}
+
+    <div class="flex flex-wrap items-center gap-2">
+        <a href="{{ groups_url }}{% if semester %}?semester={{ semester.pk }}&scope={{ scope }}{% endif %}"
+           class="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 bg-white border border-gray-300 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-50 transition">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"/></svg>
+            Group progress &amp; manual placement
+        </a>
+    </div>
+
+    <div id="allocation-plan">
+        {% if plan %}{% include "core/_allocation_plan.html" %}{% endif %}
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <!-- Manual assignment: same validator as an automatic run -->
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+            <h2 class="text-sm font-semibold text-gray-800">Assign a group by hand</h2>
+            <p class="text-xs text-gray-500 mt-0.5 mb-3">
+                Checked with exactly the rules an automatic run applies: course
+                eligibility, timetable clashes (lectures, workshops, technical
+                drawings and this run's own proposals) and venue capacity.
+            </p>
+            <form method="post" action="{{ assign_url }}"
+                  hx-post="{{ assign_url }}" hx-target="#allocation-manual-result" hx-swap="innerHTML"
+                  hx-disabled-elt="this"
+                  class="space-y-3" x-data="{ submitting: false }" @submit="submitting = true">
+                {% csrf_token %}
+                <div>
+                    <label for="manual-group" class="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1.5">Group</label>
+                    <select name="group" id="manual-group" required
+                            class="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                        <option value="">Choose a group…</option>
+                        {% for g in groups %}
+                        <option value="{{ g.pk }}">{{ g.programme.code }} {{ g.code }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div>
+                    <label for="manual-session" class="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1.5">Session</label>
+                    <select name="session" id="manual-session" required
+                            class="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                        <option value="">Choose a session…</option>
+                        {% for s in sessions %}
+                        <option value="{{ s.pk }}">{{ s.course_code }} · {{ s.get_activity_type_display }} · {{ s.get_day_display }} {{ s.start_time|time_short }}-{{ s.end_time|time_short }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="flex flex-col sm:flex-row gap-2">
+                    <button type="submit" :disabled="submitting"
+                            class="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-emerald-600 text-white text-sm font-medium rounded-lg hover:bg-emerald-700 transition disabled:opacity-50">
+                        <span x-show="!submitting">Assign</span>
+                        <span x-show="submitting">Checking…</span>
+                    </button>
+                </div>
+            </form>
+            <div id="allocation-manual-result" hx-settle="220" class="mt-3"></div>
+        </div>
+
+        <!-- Run history -->
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+            <h2 class="text-sm font-semibold text-gray-800">Recent runs</h2>
+            <p class="text-xs text-gray-500 mt-0.5 mb-3">
+                Every applied run can be reverted. A revert is refused when an
+                assignment has been edited since the run was applied.
+            </p>
+            <div class="space-y-2 max-h-80 overflow-y-auto">
+                {% for r in runs %}
+                <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border border-gray-200 rounded-lg px-3 py-2">
+                    <div class="min-w-0">
+                        <a href="{{ allocation_url }}?run={{ r.pk }}&semester={{ r.semester_id }}"
+                           class="text-sm font-medium text-gray-800 truncate block hover:text-blue-700">
+                            {{ r.semester }} · {{ r.get_scope_display }}
+                        </a>
+                        <p class="text-xs text-gray-500">
+                            {{ r.created_at|date:"Y-m-d H:i" }} ·
+                            {{ r.assigned }} added, {{ r.moved }} moved, {{ r.retained }} kept,
+                            {{ r.unresolved }} unresolved
+                        </p>
+                    </div>
+                    <div class="flex items-center gap-2 shrink-0">
+                        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium
+                            {% if r.status == 'APPLIED' %}bg-emerald-100 text-emerald-700
+                            {% elif r.status == 'REVERTED' %}bg-gray-100 text-gray-600
+                            {% else %}bg-amber-100 text-amber-800{% endif %}">
+                            {{ r.get_status_display }}
+                        </span>
+                        {% if r.status == 'APPLIED' %}
+                        <form method="post" action="{{ revert_url }}"
+                              hx-post="{{ revert_url }}" hx-target="#allocation-plan" hx-swap="innerHTML"
+                              hx-disabled-elt="this"
+                              hx-confirm="Revert this run? {{ r.assigned }} assignment(s) added and {{ r.removed }} removed will be undone.">
+                            {% csrf_token %}
+                            <input type="hidden" name="run" value="{{ r.pk }}">
+                            <button type="submit"
+                                    class="px-2.5 py-1 text-xs font-medium text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-300 rounded-md">
+                                Revert
+                            </button>
+                        </form>
+                        {% endif %}
+                    </div>
+                </div>
+                {% empty %}
+                <p class="text-xs text-gray-400">No allocation runs yet.</p>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

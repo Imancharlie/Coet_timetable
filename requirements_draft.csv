@@ -1,0 +1,74 @@
+course_code,course_name,semester,Required Activities,DRAFT_basis,DRAFT_groups_needing_it
+AR111,Studio Design Project I,1,Practical,sessions exist: PRACTICAL,0
+AR112,Studio Design Project II,1,Practical,sessions exist: PRACTICAL,0
+AR121,Architectural Graphics I,1,Practical,sessions exist: PRACTICAL,0
+AR122,Architectural Graphics II,1,,NO small-group session in the timetable - decide,0
+AR131,History and Theory of Architecture I,1,Tutorial,sessions exist: TUTORIAL,0
+AR132,History and Theory of Architecture II,1,,NO small-group session in the timetable - decide,0
+AR151,Building Materials I,1,,NO small-group session in the timetable - decide,0
+AR152,Building Materials II,1,,NO small-group session in the timetable - decide,0
+CL111,Communication Skills for Engineers,1,Seminar,sessions exist: SEMINAR,16
+CP102,Fundamentals of Chemical and Biochemical Engineering,2,Tutorial,sessions exist: TUTORIAL,2
+CP105,Materials and Energy Balance,2,Tutorial,sessions exist: TUTORIAL,2
+CP111,Workshop Training I,1,,NO small-group session in the timetable - decide,2
+CP112,Workshop Training II,2,,NO small-group session in the timetable - decide,2
+DS112,Development Perspectives I,1,,NO small-group session in the timetable - decide,2
+DS113,Development Perspectives II,2,,NO small-group session in the timetable - decide,2
+DS114,Development Perspectives I,1,,NO small-group session in the timetable - decide,14
+DS115,Development Perspectives II,2,,NO small-group session in the timetable - decide,14
+EC116,Introduction to Micro Economics,1,Seminar,sessions exist: SEMINAR,0
+EE131,Fundamentals of Electronics,2,Seminar; Tutorial,"sessions exist: SEMINAR, TUTORIAL",4
+EE151,Fundamentals of Electrical Engineering,"1,2",,NO small-group session in the timetable - decide,6
+EE153,Computer Aided Drafting for Electrical and Electronics Engineers,2,Tutorial; Practical,"sessions exist: TUTORIAL, PRACTICAL",2
+EE171,Principles of Computer Programming,1,Tutorial; Practical,"sessions exist: TUTORIAL, PRACTICAL",16
+EE172,Computer Programming for Engineers,2,Practical,sessions exist: PRACTICAL,6
+GT111,Introduction to Surveying,1,,NO small-group session in the timetable - decide,0
+GT112,Topographic Surveying,1,Practical,sessions exist: PRACTICAL,0
+GT115,Principles of Cartography,1,,NO small-group session in the timetable - decide,0
+GT156,Introduction to Photogrammetry,1,Practical,sessions exist: PRACTICAL,0
+GT163,Computer Programming for Geomatics,1,,NO small-group session in the timetable - decide,0
+GT173,Physics for Geomaticians,1,,NO small-group session in the timetable - decide,0
+IE120,Fundamentals of Industrial and Systems Engineering,1,Tutorial,sessions exist: TUTORIAL,2
+ME101,Engineering Drawing,1,Tutorial,sessions exist: TUTORIAL,16
+ME103,Computer Aided Drafting,2,Tutorial; Practical,"sessions exist: TUTORIAL, PRACTICAL",7
+ME106,Strength of Materials I,2,Tutorial,sessions exist: TUTORIAL,6
+MT161,Matrices and Basic Calculus for Non-Majors,1,Tutorial,sessions exist: TUTORIAL,15
+MT171,One Variable Calculus and Differential Equations for Non-Majors,2,Tutorial,sessions exist: TUTORIAL,15
+QS122,Building Technology I,1,,NO small-group session in the timetable - decide,0
+QS125,Building Technology II,1,Tutorial,sessions exist: TUTORIAL,0
+QS132,Measurement of Building Works I,1,,NO small-group session in the timetable - decide,0
+QS151,Project Work I,1,,NO small-group session in the timetable - decide,0
+QS176,Introduction to Information Technology,1,Tutorial,sessions exist: TUTORIAL,0
+SC101,Mechanics of Materials,1,,NO small-group session in the timetable - decide,0
+SC102,Civil Engineering Drawing,2,Tutorial; Practical,"sessions exist: TUTORIAL, PRACTICAL",7
+SC112,Civil Engineering Materials I,2,Practical,sessions exist: PRACTICAL,7
+SC113,Civil Engineering Materials II,1,,NO small-group session in the timetable - decide,0
+SC121,Statics,1,Tutorial,sessions exist: TUTORIAL,15
+SC122,Dynamics of Solids,2,Tutorial,sessions exist: TUTORIAL,7
+SC131,Fundamentals of Building Design,2,Tutorial,sessions exist: TUTORIAL,7
+SC155,Building Construction I,1,,NO small-group session in the timetable - decide,0
+SC161,Mechanics for Architects,1,Tutorial,sessions exist: TUTORIAL,0
+TR111,Engineering survey,2,Tutorial,sessions exist: TUTORIAL,7
+TR112,Engineering Surveying II,2,Practical,sessions exist: PRACTICAL,7
+TR168,Introduction to Geomatics for Architects,1,,NO small-group session in the timetable - decide,0
+TW,Electrical Workshop,2,,NO small-group session in the timetable - decide,7
+TW104,Welding Workshop,2,,NO small-group session in the timetable - decide,7
+TW107,"Building, Setting Out, Formwork & Brick Work Skills",1,,NO small-group session in the timetable - decide,2
+TW108,Building Setting out Formwork & Brick Work Skills,1,,NO small-group session in the timetable - decide,7
+TW113,Carpentry and Joinery,1,,NO small-group session in the timetable - decide,9
+TW119,Fundamentals of Chemical and Process Engineering and Practice,1,,NO small-group session in the timetable - decide,0
+TW125,Practical Electronics Engineering,1,,NO small-group session in the timetable - decide,6
+TW133,Electrical Machines and Installation Practice,1,,NO small-group session in the timetable - decide,9
+TW134,Electrical Machines and Installation Practice,1,,NO small-group session in the timetable - decide,4
+TW139,Metal Cutting and Machine Tools Practice,1,,NO small-group session in the timetable - decide,4
+TW140,Metal Cutting and Machine Tools Practice,1,,NO small-group session in the timetable - decide,0
+TW145,Plumbing Skills and Pipe Fittings Installations,1,,NO small-group session in the timetable - decide,0
+TW151,Welding and Fabrication,1,,NO small-group session in the timetable - decide,11
+TX101,Apparel Technology,1,Practical,sessions exist: PRACTICAL,1
+TX103,Mathematics for Textile Designers I,1,Tutorial,sessions exist: TUTORIAL,1
+TX104,Fibre Science,2,,NO small-group session in the timetable - decide,1
+TX105,Pattern Design and Development,2,Practical,sessions exist: PRACTICAL,1
+TX106,3D Workshop,2,,NO small-group session in the timetable - decide,1
+TX107,Principles of Textile Design,2,Practical,sessions exist: PRACTICAL,1
+TX108,Mathematics for Textile Designers II,2,Tutorial,sessions exist: TUTORIAL,1
+TX109,Textile Chemistry,2,,NO small-group session in the timetable - decide,1

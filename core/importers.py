@@ -1,3 +1,4 @@
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import date, time
@@ -7,6 +8,7 @@ import pandas as pd
 
 from core.models import (
     ActivityType,
+    Course,
     Day,
     Programme,
     ProgrammeCourse,
@@ -18,6 +20,7 @@ from core.models import (
     TimePeriod,
     Venue,
     WorkshopAllocation,
+    normalise_course_code,
 )
 from core.workshop_times import (
     course_programme_codes,
@@ -210,6 +213,16 @@ class ImportResult:
     venue_resolutions: list = field(default_factory=list)
     venue_conflicts: list = field(default_factory=list)
     venue_capacity_issues: list = field(default_factory=list)
+    invalid_requirements: list = field(default_factory=list)
+    courses_created: list = field(default_factory=list)
+    courses_updated: list = field(default_factory=list)
+    warnings: list = field(default_factory=list)
+    course_requirements: list = field(default_factory=list)
+    requirements_column: str = ""
+    requirement_count_columns: dict = field(default_factory=dict)
+    derived_requirements: list = field(default_factory=list)
+    derived_unresolved: list = field(default_factory=list)
+    derived_skipped: list = field(default_factory=list)
 
     @property
     def total(self):
@@ -237,11 +250,70 @@ class ImportResult:
             lines.append(f"Detected format: {self.format}")
         if self.detected_semester:
             lines.append(f"Detected semester: {self.detected_semester}")
+        if self.requirements_column:
+            lines.append(
+                f"Required activities read from column "
+                f"'{self.requirements_column}'"
+            )
+        if self.requirement_count_columns:
+            lines.append(
+                "Per-activity count columns: "
+                + ", ".join(
+                    f"{column} -> {ActivityType(activity).label}"
+                    for activity, column in self.requirement_count_columns.items()
+                )
+            )
+        if self.warnings:
+            for warning in self.warnings:
+                lines.append(f"Warning: {warning}")
         if self.programmes_created:
             lines.append(
                 f"Programmes created automatically: "
                 f"{', '.join(self.programmes_created[:20])}"
             )
+        if self.courses_created:
+            lines.append(
+                f"Courses created: {', '.join(self.courses_created[:20])}"
+            )
+        if self.courses_updated:
+            lines.append(
+                f"Courses updated: {', '.join(self.courses_updated[:20])}"
+            )
+        if self.invalid_requirements:
+            lines.append(
+                f"Invalid required activities: {len(self.invalid_requirements)} "
+                f"row(s) - the course was left with no requirement set"
+            )
+            for issue in self.invalid_requirements[:10]:
+                lines.append(f"  - {issue}")
+        if self.derived_requirements:
+            lines.append(
+                f"Required activities derived from the timetable: "
+                f"{len(self.derived_requirements)} course(s)"
+            )
+            for entry in self.derived_requirements[:20]:
+                lines.append(f"  - {entry['code']}: {entry['requirements']}")
+            if len(self.derived_requirements) > 20:
+                lines.append(
+                    f"  ... and "
+                    f"{len(self.derived_requirements) - 20} more"
+                )
+        if self.derived_skipped:
+            lines.append(
+                f"Requirements already configured, left unchanged: "
+                f"{len(self.derived_skipped)}"
+            )
+        if self.derived_unresolved:
+            lines.append(
+                f"Nothing derived, no small-group session exists: "
+                f"{len(self.derived_unresolved)}"
+            )
+            for issue in self.derived_unresolved[:10]:
+                lines.append(f"  - {issue}")
+            if len(self.derived_unresolved) > 10:
+                lines.append(
+                    f"  ... and {len(self.derived_unresolved) - 10} more"
+                )
         if self.lecture_sessions_processed:
             lines.append(
                 f"Lecture groups assigned: {self.lecture_sessions_processed} "
@@ -335,6 +407,16 @@ class ImportResult:
             "venue_resolutions": list(self.venue_resolutions),
             "venue_conflicts": list(self.venue_conflicts),
             "venue_capacity_issues": list(self.venue_capacity_issues),
+            "invalid_requirements": list(self.invalid_requirements),
+            "courses_created": list(self.courses_created),
+            "courses_updated": list(self.courses_updated),
+            "course_requirements": list(self.course_requirements),
+            "requirements_column": self.requirements_column,
+            "requirement_count_columns": dict(self.requirement_count_columns),
+            "derived_requirements": list(self.derived_requirements),
+            "derived_unresolved": list(self.derived_unresolved),
+            "derived_skipped": list(self.derived_skipped),
+            "warnings": list(self.warnings),
             "lecture_sessions_processed": self.lecture_sessions_processed,
             "lecture_groups_linked": self.lecture_groups_linked,
             "lecture_groups_existing": self.lecture_groups_existing,
@@ -433,7 +515,42 @@ def import_student_groups_from_excel(path: str | Path) -> ImportResult:
     return result
 
 
-def import_programme_courses_from_excel(path: str | Path) -> ImportResult:
+def import_programme_courses_from_excel(
+    path: str | Path, requirements_column: str = None
+) -> ImportResult:
+    """Import programme-course rows, populating the shared Course records.
+
+    Each row finds or creates the one shared ``Course`` for its course code and
+    sets that course's name and required activities, then creates or updates
+    the programme's link to it.
+
+    **Requirements are read from an optional column.** The header is resolved by
+    :func:`core.group_allocation.find_requirements_column`, which understands
+    "Required Activities", "Allocation Requirements", "Activities Required" and
+    friends (case, spacing and punctuation are ignored), falls back to a fuzzy
+    "mentions an activity and a count word" match, and can be pointed at a
+    specific header with ``requirements_column`` / ``--requirements-column``.
+
+    Per-activity count columns ("Tutorial Count", "Number of Practicals") are
+    read too, so a workbook can keep the numbers in their own cells instead of
+    one list.
+
+    A column that looks like it holds requirements but is not understood is
+    **reported, never ignored** — that is the failure mode where a requirements
+    column quietly does nothing. A workbook with no requirements column at all
+    still imports; those courses are flagged during allocation review.
+
+    A course code that appears more than once in the same workbook with
+    conflicting names or requirements is reported as a conflict rather than
+    silently resolved, and re-importing the same file changes nothing.
+    """
+    from core.group_allocation import (
+        find_requirement_count_columns,
+        find_requirements_column,
+        parse_requirements,
+    )
+    from core.models import Course, normalise_course_code
+
     df = pd.read_excel(path, dtype=str).fillna("")
     result = ImportResult()
 
@@ -482,33 +599,150 @@ def import_programme_courses_from_excel(path: str | Path) -> ImportResult:
         )
         return result
 
-    for _, row in df.iterrows():
+    activities_col, unrecognised = find_requirements_column(
+        df.columns, explicit=requirements_column
+    )
+    if requirements_column and not activities_col:
+        result.errors.append(
+            f"Required-activities column '{requirements_column}' not found "
+            f"(available columns: {', '.join(map(str, df.columns))})"
+        )
+        return result
+    count_columns = find_requirement_count_columns(
+        df.columns, exclude=[activities_col] if activities_col else []
+    )
+    result.requirements_column = str(activities_col) if activities_col else ""
+    result.requirement_count_columns = {
+        activity: str(column) for activity, column in count_columns.items()
+    }
+    if unrecognised:
+        # A column that is clearly about requirements but was not understood.
+        # Say so, rather than importing nothing and leaving the courses to be
+        # discovered later as "requirement not configured".
+        result.errors.append(
+            "A column looks like it holds the required activities but was not "
+            f"recognised: {', '.join(unrecognised)}. Rename it to one of the "
+            "accepted headings (e.g. 'Required Activities'), or re-run with "
+            "--requirements-column '<the exact header>' to point at it."
+        )
+    if not activities_col and not count_columns:
+        result.warnings.append(
+            "No required-activities column was found, so every imported course "
+            "will have no seminar/tutorial/practical requirement and will be "
+            "flagged during allocation review. Add a 'Required Activities' "
+            "column to set them."
+        )
+
+    # Pass 1: resolve every row, and record what each course code is being asked
+    # to say. Two rows disagreeing about one code is a conflict to report, not a
+    # value to pick from.
+    rows = []
+    seen: dict = {}
+    for idx, row in df.iterrows():
+        row_no = idx + 2
         prog_raw = str(row[prog_col]).strip()
-        crs_code = str(row[code_col]).strip()
+        crs_code = normalise_course_code(row[code_col])
         crs_name = str(row[name_col]).strip()
         try:
             sem = int(float(str(row[sem_col]).strip()))
         except (ValueError, TypeError):
             result.errors.append(
-                f"Invalid semester value for course '{crs_code}' "
-                f"in programme '{prog_raw}'"
+                f"Row {row_no}: invalid semester value for course "
+                f"'{crs_code}' in programme '{prog_raw}'"
             )
             result.skipped += 1
             continue
-        programme = Programme.objects.filter(code=prog_raw).first()
+        if not crs_code:
+            result.errors.append(
+                f"Row {row_no}: missing course_code, skipped"
+            )
+            result.skipped += 1
+            continue
+        requirements, problems = set_requirements_for_row(
+            row, activities_col, count_columns
+        )
+        if problems:
+            result.invalid_requirements.append(
+                f"Row {row_no}: course {crs_code} — "
+                + "; ".join(problems)
+                + ". The course was left with no required activities "
+                "configured; set them on the course record."
+            )
+            requirements = {}
+        result.course_requirements.append(
+            {
+                "code": crs_code,
+                "name": crs_name,
+                "row_no": row_no,
+                "requirements": _requirements_text(requirements),
+            }
+        )
+        entry = {
+            "row_no": row_no,
+            "programme_raw": prog_raw,
+            "code": crs_code,
+            "name": crs_name,
+            "semester": sem,
+            "requirements": requirements,
+            "first_for_code": crs_code not in seen,
+            "name_conflict": False,
+            "requirements_conflict": False,
+        }
+        rows.append(entry)
+        previous = seen.get(crs_code)
+        if previous is None:
+            seen[crs_code] = entry
+            continue
+        # A blank cell means "this row has no opinion", not "no requirement".
+        # Requirements and the course name describe the course, not the
+        # programme, so a workbook that fills them in on only the first of a
+        # course's rows is the normal shape — only two *different stated*
+        # values are a conflict.
+        if crs_name and previous["name"] and previous["name"] != crs_name:
+            previous["name_conflict"] = entry["name_conflict"] = True
+            result.conflicts.append(
+                f"Course {crs_code} appears with conflicting names "
+                f"('{previous['name']}' on row {previous['row_no']} and "
+                f"'{crs_name}' on row {row_no}) — the shared course name was "
+                f"left unchanged. Fix the source file and re-import."
+            )
+        if requirements and previous["requirements"] and (
+            previous["requirements"] != requirements
+        ):
+            previous["requirements_conflict"] = entry["requirements_conflict"] = True
+            result.conflicts.append(
+                f"Course {crs_code} appears with conflicting required "
+                f"activities ('{_requirements_text(previous['requirements'])}' "
+                f"on row {previous['row_no']} and "
+                f"'{_requirements_text(requirements)}' on row {row_no}) — the "
+                f"shared course's requirements were left unchanged. Fix the "
+                f"source file and re-import."
+            )
+        previous["semester"] = max(previous["semester"], sem)
+
+    # Pass 2: write. The shared course is written first so the programme link
+    # can mirror its code and name.
+    for entry in rows:
+        programme = Programme.objects.filter(code=entry["programme_raw"]).first()
         if programme is None:
-            programme = Programme.objects.filter(name__iexact=prog_raw).first()
+            programme = Programme.objects.filter(
+                name__iexact=entry["programme_raw"]
+            ).first()
         if programme is None:
             programme = Programme.objects.create(
-                code=_derive_code(prog_raw), name=prog_raw
+                code=_derive_code(entry["programme_raw"]),
+                name=entry["programme_raw"],
             )
             result.programmes_created.append(
                 f"{programme.name} -> {programme.code}"
             )
+        course = _sync_course(entry, result)
+        if course is None:
+            continue
         _, created = ProgrammeCourse.objects.update_or_create(
             programme=programme,
-            course_code=crs_code,
-            defaults={"course_name": crs_name, "semester": sem},
+            course_code=course.code,
+            defaults={"course": course, "semester": entry["semester"]},
         )
         if created:
             result.created += 1
@@ -516,6 +750,106 @@ def import_programme_courses_from_excel(path: str | Path) -> ImportResult:
             result.updated += 1
 
     return result
+
+
+def _requirements_text(mapping: dict) -> str:
+    from core.group_allocation import format_requirements
+
+    return format_requirements(mapping) or "(none)"
+
+
+def set_requirements_for_row(row, activities_col, count_columns: dict):
+    """Requirements for one workbook row: the list cell plus any count cells.
+
+    Returns ``({activity: count}, problems)``. A dedicated count column
+    ("Tutorial Count" = 2) adds to whatever the combined cell said, so the two
+    layouts can be mixed in one file. An unusable count cell is a problem
+    against that row rather than a silent zero.
+
+    Lives here so ``manage.py set_course_requirements`` and the programme-course
+    import read a requirements sheet by exactly the same rules.
+    """
+    from core.group_allocation import parse_requirements
+
+    counts: dict = {}
+    problems: list = []
+    if activities_col:
+        raw = str(row.get(activities_col, "") or "").strip()
+        parsed, issues = parse_requirements(raw)
+        counts.update(parsed)
+        problems.extend(issues)
+    for activity, column in (count_columns or {}).items():
+        raw = str(row.get(column, "") or "").strip()
+        if not raw or raw.lower() in {"-", "n/a", "na"}:
+            continue
+        try:
+            value = int(float(raw))
+        except (TypeError, ValueError):
+            problems.append(
+                f"'{raw}' in column '{column}' is not a whole number of "
+                f"sessions"
+            )
+            continue
+        if value < 0:
+            problems.append(
+                f"column '{column}' has {value}; a count cannot be negative"
+            )
+            continue
+        if value:
+            counts[activity] = counts.get(activity, 0) + value
+    return counts, problems
+
+
+def _sync_course(entry, result: ImportResult):
+    """Create or update the shared Course for one imported row.
+
+    Two rules keep re-importing idempotent:
+
+    * Only the first row of a course code writes the name or the requirements.
+      A workbook normally repeats a course once per programme; letting every
+      row write would mean the last row silently wins.
+    * When the rows for one code disagree, the stored name and requirements are
+      left exactly as they are. The disagreement is already reported as a
+      conflict; choosing a side here would be the silent resolution the
+      requirements forbid, and it would make every re-import flip the name.
+      The losing spellings are still recorded as name variants so the
+      coordinator can see what the file actually said.
+    """
+    code = entry["code"]
+    name = entry["name"]
+    course = Course.objects.filter(code=code).first()
+    if course is None:
+        course = Course(code=code, name=name)
+        course.save()
+        result.courses_created.append(code)
+        if entry["requirements"]:
+            course.set_requirements(entry["requirements"])
+        return course
+
+    variants = course.name_conflicts()
+    if entry["name_conflict"]:
+        # Keep the stored name; just record what else this file called it.
+        if name and name != course.name and name not in variants:
+            variants.append(name)
+    elif entry["first_for_code"] and name and course.name != name:
+        variants = [
+            v for v in variants + [course.name] if v and v != name
+        ]
+        course.name = name
+    variants = sorted(set(variants))
+    if variants != course.name_conflicts():
+        course.name_variants = json.dumps(variants)
+        course.save(update_fields=["name_variants"])
+    else:
+        course.save()
+
+    result.courses_updated.append(code)
+    if entry["first_for_code"] and not entry["requirements_conflict"]:
+        # Only a stated value is written: a workbook whose requirements column
+        # is entirely blank must not wipe requirements someone set by hand.
+        if entry["requirements"]:
+            course.set_requirements(entry["requirements"])
+    return course
 
 
 def import_venues_from_excel(path: str | Path) -> ImportResult:
@@ -925,7 +1259,10 @@ def assign_lecture_groups(semester=None):
 
 
 def import_master_timetable_from_excel(
-    path: str | Path, semester_id: int | None = None, dry_run: bool = False
+    path: str | Path,
+    semester_id: int | None = None,
+    dry_run: bool = False,
+    derive_requirements: bool = False,
 ) -> ImportResult:
     """Import the master timetable idempotently (get_or_create on a natural key).
 
@@ -936,6 +1273,15 @@ def import_master_timetable_from_excel(
     import. Missing reference data is reported, never guessed at. Rows with
     unresolvable 'ALL' expansions are imported with no group links and listed
     under conflicts. With dry_run=True nothing is written.
+
+    With ``derive_requirements=True`` (and not dry-run) the sessions just
+    imported are used to fill in each course's required activities: a course
+    with tutorial sessions gets ``Tutorial``, one with tutorials *and*
+    practicals gets both. Only an activity that has a session is ever set, and
+    a course that already has a requirement — because it came from the
+    programme-course workbook, or someone set it by hand — is never touched.
+    Courses nothing could be said about are listed in
+    ``result.derived_unresolved`` so they are not mistaken for "needs nothing".
     """
     df = pd.read_excel(path, dtype=str).fillna("")
 
@@ -1042,8 +1388,40 @@ def import_master_timetable_from_excel(
         result.lecture_groups_linked = linked
         result.lecture_groups_existing = existing
         result.lecture_skipped_courses = skipped
+        if derive_requirements:
+            _derive_requirements_after_import(result, semester)
 
     return result
+
+
+def _derive_requirements_after_import(result: ImportResult, semester) -> None:
+    """Fill in requirements from the timetable that was just imported.
+
+    A course that already has a requirement is skipped: the programme-course
+    workbook's "Required Activities" column, or a value someone set by hand,
+    is a decision and this must not quietly replace it.
+    """
+    from core.group_allocation import derive_requirements_from_sessions
+
+    mapping, unresolved = derive_requirements_from_sessions(semester)
+    for course, requirements in mapping.items():
+        if course.has_requirements():
+            result.derived_skipped.append(
+                f"{course.code} already has "
+                f"'{course.activities_label()}' configured - left unchanged"
+            )
+            continue
+        course.set_requirements(requirements)
+        result.courses_updated.append(course.code)
+        result.derived_requirements.append(
+            {"code": course.code, "requirements": course.activities_label()}
+        )
+    for course in unresolved:
+        result.derived_unresolved.append(
+            f"{course.code}: no seminar/tutorial/practical session exists, so "
+            f"nothing was derived - decide whether the course needs one, or "
+            f"whether its sessions are still to be timetabled"
+        )
 
 
 def _detect_workshop_format(source) -> str:

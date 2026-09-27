@@ -1,0 +1,64 @@
+{% comment %}
+The candidate sessions for one requirement, each already judged by the same
+validator the allocator uses. Shared by the outstanding and the already-placed
+case: an unmet requirement shows the whole list, a met one shows it behind a
+toggle so a placement can still be moved.
+
+The forms post the semester and scope back with the mutation so the response
+redraws *this* view. Without them the endpoint would fall back to the latest
+semester and the list would change underneath the coordinator.
+{% endcomment %}
+<div class="space-y-2">
+    {% for option in options %}
+    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 rounded-lg border px-3 py-2
+        {% if option.already_assigned %}border-emerald-300 bg-emerald-50
+        {% elif option.ok %}border-gray-200 bg-white
+        {% else %}border-gray-200 bg-gray-50{% endif %}">
+        <div class="min-w-0">
+            <p class="text-sm {% if option.ok %}text-gray-800{% else %}text-gray-500{% endif %}">
+                {{ option.day_label }} {{ option.time_label }}
+                {% if option.venue_label != "no venue" %}&middot; {{ option.venue_label }}{% endif %}
+            </p>
+            {% if option.ok %}
+            <p class="text-xs text-gray-500">
+                {{ option.group_count }} group{{ option.group_count|pluralize }} attending
+                &middot; needs {{ option.group_count }} &times; {{ students_per_group }} places
+            </p>
+            {% else %}
+            <ul class="mt-0.5 space-y-0.5">
+                {% for reason in option.reasons %}
+                <li class="text-xs text-amber-700">&bull; {{ reason.message }}</li>
+                {% endfor %}
+            </ul>
+            {% endif %}
+        </div>
+        {% if option.already_assigned %}
+        <form method="post" action="{{ unassign_url }}"
+              hx-post="{{ unassign_url }}" hx-target="#allocation-requirements" hx-swap="outerHTML"
+              hx-disabled-elt="this" class="shrink-0">
+            {% csrf_token %}
+            {% include "core/_allocation_view_fields.html" %}
+            <input type="hidden" name="group" value="{{ group.pk }}">
+            <input type="hidden" name="session" value="{{ option.session.pk }}">
+            <button type="submit" class="px-3 py-1.5 text-xs font-medium text-red-700 bg-white border border-red-300 hover:bg-red-50 rounded-lg transition">
+                Remove
+            </button>
+        </form>
+        {% elif option.ok %}
+        <form method="post" action="{{ assign_url }}"
+              hx-post="{{ assign_url }}" hx-target="#allocation-requirements" hx-swap="outerHTML"
+              hx-disabled-elt="this" class="shrink-0">
+            {% csrf_token %}
+            {% include "core/_allocation_view_fields.html" %}
+            <input type="hidden" name="group" value="{{ group.pk }}">
+            <input type="hidden" name="session" value="{{ option.session.pk }}">
+            <button type="submit" class="px-3 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition">
+                Assign here
+            </button>
+        </form>
+        {% else %}
+        <span class="text-xs text-gray-400 shrink-0">not possible</span>
+        {% endif %}
+    </div>
+    {% endfor %}
+</div>

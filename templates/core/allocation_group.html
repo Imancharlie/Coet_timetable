@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% load core_tags %}
+
+{% block content %}
+<div class="max-w-5xl mx-auto space-y-4">
+    <a href="{{ back_url }}" class="inline-flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-700">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+        All groups
+    </a>
+
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+                <h2 class="text-base font-semibold text-gray-800">
+                    {{ group.programme.code }} {{ group.code }} &mdash; {{ group.programme.name }}
+                </h2>
+                <p class="text-xs text-gray-500 mt-0.5">
+                    {{ semester }}
+                </p>
+            </div>
+            <div class="flex flex-col sm:flex-row sm:items-center gap-3">
+                <form method="get" action="." class="flex items-center gap-2">
+                    <select name="semester" onchange="this.form.submit()"
+                            class="px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white">
+                        {% for s in semesters %}
+                        <option value="{{ s.pk }}" {% if semester and s.pk == semester.pk %}selected{% endif %}>{{ s }}</option>
+                        {% endfor %}
+                    </select>
+                    <select name="scope" onchange="this.form.submit()"
+                            class="px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white">
+                        {% for value, label in scopes %}
+                        <option value="{{ value }}" {% if scope == value %}selected{% endif %}>{{ label }}</option>
+                        {% endfor %}
+                    </select>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    {% include "core/_allocation_group_panel.html" %}
+</div>
+{% endblock %}

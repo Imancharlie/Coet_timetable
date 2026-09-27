@@ -21,14 +21,23 @@ When a student group has two or more *different* workshops allocated to the
 same daily slot (same day and time, e.g. Electrical and Carpentry on Thursday
 morning), those workshops rotate after every seven weeks. The cell then shows
 ``Electrical / Carpentry`` and a ``Workshop Rotation Key`` table is appended
-below the grid listing, per programme/group/day: the workshop used in Week 1-7,
-Week 8-14, and so on. Workshops that explicitly carry ``week_start``/``week_end``
-ranges keep those ranges; otherwise the seven-week blocks are assigned in a
-deterministic order (the workshop that matches the programme's name first, then
-alphabetical). Non-rotating workshops render only their normal name and never
-produce a rotation-key entry.
+below the grid with exactly three columns -- **Weeks**, **Group**, **Workshop** --
+one row per week block, so a row reads as a sentence: in weeks 1-7 this group
+attends this workshop. On a single group's sheet the cell carries no week range
+at all, because a rotated slot's cell names every workshop that shares it and
+cannot say which is which week; the key below prints the mapping properly.
+Workshops that explicitly carry ``week_start``/``week_end`` ranges keep those
+ranges; otherwise the seven-week blocks are assigned in a deterministic order
+(the workshop that matches the programme's name first, then alphabetical).
+Non-rotating workshops render only their normal name and never produce a
+rotation-key entry.
+
+Every export -- the two grid sheets and the all-programmes master timetable --
+carries the same provenance footer, painted on the canvas by
+``_draw_master_footer`` so it repeats on every page at the bottom margin.
 """
 import datetime
+import re
 from collections import defaultdict
 
 from django.db.models import Q
@@ -541,7 +550,7 @@ def collect_workshop_rotations(programme, semester, group=None, year=None):
     ]
 
 
-def build_grid(entries, show_groups=False, markup=False):
+def build_grid(entries, show_groups=False, markup=False, show_notes=True):
     """Return table data (list of rows), SPAN commands and fill colours.
 
     Classic layout: column 0 is TIME, columns 1..n are the weekdays, row 0 is
@@ -550,16 +559,20 @@ def build_grid(entries, show_groups=False, markup=False):
     blocks vertically; fills carries one BACKGROUND command per block,
     colour-coded by activity type (Lecture grey, Workshop green, TD pink).
     ``show_groups`` appends owning group codes to workshop cells (the
-    all-groups export). ``markup`` returns cell text as Paragraph markup with
+    all-groups export). ``show_notes`` keeps the workshop week range in the
+    cell; the single-group export turns it off because its rotation key
+    already prints it. ``markup`` returns cell text as Paragraph markup with
     the assigned-groups line emphasised, already escaped.
     """
     grid = build_time_day_grid(entries, full_range=True)
     return time_day_grid_to_table(
-        grid, show_groups=show_groups, markup=markup
+        grid, show_groups=show_groups, markup=markup, show_notes=show_notes
     )
 
 
-def render_programme_timetable(programme, semester, year_of_study=1, out=None):
+def render_programme_timetable(
+    programme, semester, year_of_study=1, out=None, portal_url=None
+):
     """Render the programme timetable PDF to `out` (file-like or a path)."""
     entries, rotation_keys = _collect_entries_and_rotations(
         programme, semester, year=year_of_study
@@ -579,17 +592,23 @@ def render_programme_timetable(programme, semester, year_of_study=1, out=None):
         show_groups=show_groups,
         rotation_keys=rotation_keys,
         out=out,
+        portal_url=portal_url,
     )
 
 
-def render_group_timetable(group, semester, year_of_study=1, out=None):
+def render_group_timetable(
+    group, semester, year_of_study=1, out=None, portal_url=None
+):
     """Render ONE student group's timetable PDF to `out` (file-like/path)."""
     entries, rotation_keys = _collect_group_entries_and_rotations(
         group, semester, year=year_of_study
     )
     # Same fold as the programme export, so a group's own workshop and the
-    # placeholder practical for it are one cell rather than two.
-    entries = fold_for_display(entries, {group.code})
+    # placeholder practical for it are one cell rather than two. The groups line
+    # is left out of the cells: this sheet is one group's timetable, so telling
+    # it which group it belongs to — or printing "ALL" because that one group
+    # happens to be everybody — says nothing the reader does not already know.
+    entries = fold_for_display(entries, {group.code}, show_groups=False)
     return _render_grid(
         entries,
         title=f"{group.programme.name.upper()}",
@@ -602,47 +621,66 @@ def render_group_timetable(group, semester, year_of_study=1, out=None):
         show_groups=False,
         rotation_keys=rotation_keys,
         out=out,
+        # No week range in the cells. A rotated slot's cell names every workshop
+        # that shares it ("Electrical / Carpentry") and cannot say which is
+        # which week, so "Wk 1-7 / Wk 8-14" beside it is noise rather than
+        # information -- and the rotation key below prints the mapping properly.
+        show_week_notes=False,
+        portal_url=portal_url,
     )
 
 
 def _rotation_key_table(rotation_keys, cell_style, head_style):
     """Build the Workshop Rotation Key table flowables.
 
-    Columns: Programme, Group, Day, Course/Session, then one week column per
-    rotation block (Wk 1-7, Wk 8-14, ...).
+    Exactly three columns -- **Weeks**, **Group**, **Workshop** -- and one row
+    per distinct (week block, workshop) pair, so a row reads as a sentence:
+    *in weeks 1-7 these groups attend this workshop*.
+
+    **Rows are shared, never repeated per group.** Whole programmes rotate on
+    the same schedule, so printing C1's two weeks and then C2's two weeks says
+    the same thing four times. Groups that share a schedule are collected into
+    one row and the Group column lists them. Only a genuinely different schedule
+    earns its own row, which is the case where the extra line actually tells the
+    reader something.
+
+    The earlier shape was one row per (group, day) with a column per week block,
+    plus Programme and Course/Session columns. The programme was the sheet's own
+    title, and in a rotation every workshop is the same course.
     """
     usable = A4[0] - 22 * mm
-    max_blocks = max(len(row["blocks"]) for row in rotation_keys)
-    first = rotation_keys[0]["blocks"]
-    week_headers = [f"Wk {ws}-{we}" for ws, we, _ in first]
-    while len(week_headers) < max_blocks:
-        week_headers.append(week_headers[-1] if week_headers else "Wk ?")
+    headers = ["Weeks", "Group", "Workshop"]
+    widths = [usable * 0.20, usable * 0.34, usable * 0.46]
 
-    headers = ["Programme", "Group", "Day", "Course/Session"] + week_headers
-    data = [[Paragraph(head, head_style) for head in headers]]
+    shared: dict = {}
     for row in rotation_keys:
-        values = [
-            row["programme"] or row["programme_code"],
-            row["group"],
-            Day(row["day"]).label,
-            row["course"] or "—",
-        ]
-        values += [name for _, _, name in row["blocks"]]
-        while len(values) < len(headers):
-            values.append("—")
-        data.append([Paragraph(str(v), cell_style) for v in values])
+        for wk_start, wk_end, name in row["blocks"]:
+            groups = shared.setdefault((wk_start, wk_end, name), [])
+            if row["group"] not in groups:
+                groups.append(row["group"])
 
-    n_week = max_blocks
-    week_w = usable * 0.32 / max(n_week, 1)
-    fixed = usable - week_w * n_week
-    widths = [
-        fixed * 0.34,
-        fixed * 0.12,
-        fixed * 0.16,
-        fixed * 0.22,
-    ] + [week_w] * n_week
-    while len(widths) < len(headers):
-        widths.append(week_w)
+    rows = [
+        (
+            _week_label(wk_start, wk_end),
+            _compact_group_codes(groups),
+            str(name or "—"),
+        )
+        for (wk_start, wk_end, name), groups in shared.items()
+    ]
+    # By week, then workshop name: the table reads as a schedule. Ordering on
+    # the numbers, not the wording -- "Week 15-21" sorts before "Week 8-14" as
+    # text, and a three-way rotation reaches a two-digit week.
+    rows.sort(key=lambda r: (_week_sort_key(r[0]), r[2]))
+
+    data = [[Paragraph(head, head_style) for head in headers]]
+    for weeks, groups, name in rows:
+        data.append(
+            [
+                Paragraph(weeks, cell_style),
+                Paragraph(groups, cell_style),
+                Paragraph(name, cell_style),
+            ]
+        )
 
     table = Table(data, colWidths=widths, repeatRows=1, hAlign="CENTER")
     style = [
@@ -651,11 +689,28 @@ def _rotation_key_table(rotation_keys, cell_style, head_style):
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("TOPPADDING", (0, 0), (-1, -1), 3),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-        ("LEFTPADDING", (0, 0), (-1, -1), 3),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        # Weeks centred, the two descriptive columns left-aligned, so the eye
+        # lands on the workshop names rather than on a wall of text.
+        ("ALIGN", (0, 0), (0, -1), "CENTER"),
+        ("ALIGN", (1, 0), (-1, -1), "LEFT"),
     ]
     table.setStyle(TableStyle(style))
     return table
+
+
+def _week_label(wk_start, wk_end) -> str:
+    """``(1, 7)`` -> ``"Week 1-7"``; an unrecorded range says so rather than lying."""
+    if wk_start is None or wk_end is None:
+        return "Weeks —"
+    return f"Week {wk_start}-{wk_end}"
+
+
+def _week_sort_key(weeks: str):
+    """Sort key for a rendered "Week 8-14" label, so blocks order by week."""
+    numbers = [int(n) for n in re.findall(r"\d+", str(weeks))]
+    return (numbers[0] if numbers else 0, numbers[1] if len(numbers) > 1 else 0)
 
 
 def _render_grid(
@@ -667,12 +722,21 @@ def _render_grid(
     out,
     show_groups=False,
     rotation_keys=None,
+    show_week_notes=True,
+    portal_url=None,
 ):
     """Render the weekly grid PDF to `out` (file-like or a path).
 
     Programmes/groups with no sessions get a clean "nothing scheduled" notice
     instead of a blank grid section; the Workshop Rotation Key is appended only
     when rotating workshops actually exist.
+
+    The provenance footer is painted on the canvas by the very same
+    ``_draw_master_footer`` the all-programmes export uses, on every page, at
+    the bottom margin. It used to be a flowable appended to the element list,
+    which put it wherever the content happened to end -- near the top of the
+    first page for a short timetable, and missing entirely from any page it
+    was not on.
     """
     rotation_keys = rotation_keys or []
 
@@ -682,9 +746,17 @@ def _render_grid(
         leftMargin=11 * mm,
         rightMargin=11 * mm,
         topMargin=13 * mm,
-        bottomMargin=14 * mm,
+        # Room for the canvas footer, so no table can ever run into it.
+        bottomMargin=FOOTER_MARGIN,
         title=doc_title,
     )
+
+    date_text = datetime.date.today().strftime("%d %B %Y")
+
+    def page_cb(canvas, doc_):
+        _draw_master_footer(
+            canvas, doc_, portal_url=portal_url, date_text=date_text
+        )
 
     title_style = ParagraphStyle(
         "tt",
@@ -722,9 +794,6 @@ def _render_grid(
         leading=14,
         spaceBefore=6,
     )
-    foot_style = ParagraphStyle(
-        "foot", fontName="Helvetica", fontSize=8, alignment=TA_CENTER
-    )
     key_title_style = ParagraphStyle(
         "keytitle",
         fontName="Helvetica-Bold",
@@ -743,9 +812,11 @@ def _render_grid(
 
     if entries:
         data, spans, fills = build_grid(
-            entries, show_groups=show_groups, markup=True
+            entries,
+            show_groups=show_groups,
+            markup=True,
+            show_notes=show_week_notes,
         )
-
         n_days = max(len(data[0]) - 1, 1) if data else 1
         usable = A4[0] - 22 * mm
         time_w = 44
@@ -815,11 +886,7 @@ def _render_grid(
         )
         elements.append(_rotation_key_table(rotation_keys, cell_style, head_style))
 
-    elements.append(Spacer(1, 6 * mm))
-    export_date = datetime.date.today().strftime("%d %B %Y")
-    elements.append(Paragraph(f"Prepared for personal use · {export_date}", foot_style))
-
-    doc.build(elements)
+    doc.build(elements, onFirstPage=page_cb, onLaterPages=page_cb)
     return doc
 
 
@@ -1063,7 +1130,12 @@ def fold_same_sessions(entries):
     order = []
     buckets = {}
     for entry in entries:
-        key = (_slot_of(entry), _identity_of(entry))
+        # The week range is part of the identity. Two groups doing the *same*
+        # workshop in the *same* slot but in different week blocks are not the
+        # same block: folding them keeps only the first entry's note, so the
+        # cell would read "ALL groups, weeks 1-7" and quietly be wrong about
+        # everyone. Equal ranges still fold, which is the common case.
+        key = (_slot_of(entry), _identity_of(entry), entry.get("note") or "")
         bucket = buckets.get(key)
         if bucket is None:
             bucket = _Bucket(key)
@@ -1142,21 +1214,27 @@ def _merge_master_entries(entries, all_groups):
     return fold_for_display(entries, all_groups)
 
 
-def fold_for_display(entries, all_group_codes):
+def fold_for_display(entries, all_group_codes, show_groups=True):
     """Fold duplicate records and label what survives: what an export draws.
 
     This is the one place the "same day, same time, same course is one session"
     rule lives, shared by every export so they cannot drift apart. The
     on-screen timetable view deliberately does NOT use it yet -- it still draws
     one block per group for workshops and technical drawing.
+
+    ``show_groups=False`` omits the assigned-groups line from the cell text
+    while still computing it, which is what a **single group's** own export
+    wants: the sheet is that group's timetable, so naming the group back to it
+    (or worse, reading "ALL" because the group is the only one there) is noise.
+    The data stays on the entry for any caller that wants it.
     """
     return [
-        _labelled_entry(entry, all_group_codes)
+        _labelled_entry(entry, all_group_codes, show_groups=show_groups)
         for entry in fold_same_sessions(entries)
     ]
 
 
-def _labelled_entry(entry, all_groups):
+def _labelled_entry(entry, all_groups, show_groups=True):
     """Attach the group list and the cell text to one folded block."""
     codes = entry.pop("_codes", None)
     if codes is None:
@@ -1172,6 +1250,9 @@ def _labelled_entry(entry, all_groups):
         entry["groups"] = "ALL"
     else:
         entry["groups"] = _groups_label(codes, all_groups)
+    # What gets *drawn* is separate from what is known: a single-group export
+    # keeps entry["groups"] for the caller but leaves the line out of the cell.
+    drawn_groups = entry["groups"] if show_groups else ""
 
     if kind in ("td", "workshop"):
         # Type, time and the groups: the individual course/venue detail would
@@ -1179,9 +1260,7 @@ def _labelled_entry(entry, all_groups):
         # block so a workshop reads the same way as a lecture does.
         entry["type_label"] = "Technical Drawing" if kind == "td" else "Workshop"
         entry["label"] = "\n".join(
-            part
-            for part in (entry["type_label"], _time_span(entry), entry["groups"])
-            if part
+            part for part in (entry["type_label"], _time_span(entry), drawn_groups) if part
         )
     else:
         entry["label"] = "\n".join(
@@ -1189,7 +1268,7 @@ def _labelled_entry(entry, all_groups):
             for part in (
                 f"{entry.get('course_code') or ''} "
                 f"{entry.get('type_label') or ''}".strip(),
-                entry["groups"],
+                drawn_groups,
                 entry.get("venue") or "",
             )
             if part
@@ -1885,9 +1964,15 @@ def _draw_master_footer(canvas, doc, portal_url=None, date_text=""):
     Drawn on the canvas rather than added to the element list, so every page
     carries it -- not just the last. The portal name is a live link back to the
     site that produced the export whenever the caller knows its address.
+
+    The page size comes from ``doc`` rather than being assumed landscape, so
+    the group and programme exports get the identical strip on their portrait
+    sheets. One footer, three exports: if the wording or the link ever changes
+    it changes in all of them at once, and a group sheet cannot end up with a
+    different-looking footer from the master timetable.
     """
     canvas.saveState()
-    pw, ph = landscape(A4)
+    pw, ph = doc.pagesize
     right = pw - doc.rightMargin
     baseline = FOOTER_MARGIN - 4.6 * mm
     canvas.setFont("Helvetica", 7.5)
@@ -1896,7 +1981,7 @@ def _draw_master_footer(canvas, doc, portal_url=None, date_text=""):
     name = canvas.stringWidth(PORTAL_NAME, "Helvetica-Bold", 7.5)
     tail = canvas.stringWidth(" on " + date_text, "Helvetica", 7.5)
     total = lead + name + tail
-    # Centred in the page, so the provenance line reads as a footer rather than
+    # Centred in the frame, so the provenance line reads as a footer rather than
     # as a stray note in the left margin.
     x = (pw - total) / 2.0
     canvas.setFont("Helvetica", 7.5)
@@ -1922,7 +2007,10 @@ def _draw_master_footer(canvas, doc, portal_url=None, date_text=""):
     canvas.setFillColor(colors.HexColor("#444444"))
     canvas.drawString(x, baseline, " on " + date_text)
 
-    canvas.setFont("Helvetica-Bold", 8)
+    # Same size as the text beside it: the page number used to be set a half
+    # point larger, which read as a separate element rather than part of one
+    # strip.
+    canvas.setFont("Helvetica-Bold", 7.5)
     canvas.setFillColor(colors.black)
     canvas.drawRightString(right, baseline, f"Page {canvas.getPageNumber()}")
     canvas.restoreState()
