@@ -23,10 +23,23 @@ from .models import (
 
 @admin.register(Semester)
 class SemesterAdmin(admin.ModelAdmin):
-    list_display = ("id", "academic_year", "semester")
-    list_display_links = list_display
-    list_editable = ()
-    ordering = ("academic_year", "semester")
+    # is_current is ticked straight from the list, the same one-value rule the
+    # semesters page uses; the conditional unique constraint stops two rows
+    # ever being ticked at once.
+    list_display = ("id", "academic_year", "semester", "is_current")
+    list_display_links = ("id", "academic_year", "semester")
+    list_editable = ("is_current",)
+    list_filter = ("is_current", "semester")
+    ordering = ("-is_current", "academic_year", "semester")
+
+    def save_model(self, request, obj, form, change):
+        # Both the change form and the changelist tick write the boolean
+        # straight to the database, bypassing Semester.set_current(), so the
+        # previous holder has to be cleared here or the conditional unique
+        # constraint would raise instead of switching terms.
+        if obj.is_current:
+            Semester.objects.exclude(pk=obj.pk).update(is_current=False)
+        super().save_model(request, obj, form, change)
 
 
 @admin.register(Programme)

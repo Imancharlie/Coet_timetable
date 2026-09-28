@@ -1,0 +1,28 @@
+{% comment %}
+One group, opened out of a board row into the slide-over panel.
+
+The requirement list is the very panel the group page shows, included rather than
+copied, so a placement made here posts to the same endpoints and redraws itself
+the same way -- the only thing this adds is the group heading and a way through
+to the full page for when the panel is not enough room.
+{% endcomment %}
+{% load core_tags %}
+
+<div class="space-y-4">
+    <div class="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+        <div class="min-w-0">
+            <h3 class="text-sm font-semibold text-gray-800">
+                {{ group.programme.code }} {{ group.code }}
+            </h3>
+            <p class="text-xs text-gray-500 mt-0.5">
+                {{ group.programme.name }} &middot; {{ semester|default:"no semester selected" }} &middot; {{ scope }}
+            </p>
+        </div>
+        <a href="{{ detail_url }}{% if semester %}?semester={{ semester.pk }}&scope={{ scope }}{% endif %}"
+           class="shrink-0 inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-gray-700 border border-gray-300 bg-white rounded-lg hover:bg-gray-50 transition">
+            Open the full page
+        </a>
+    </div>
+
+    {% include "core/_allocation_group_panel.html" %}
+</div>

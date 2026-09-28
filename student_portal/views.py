@@ -19,10 +19,20 @@ from .models import CollisionReport, PortalSettings
 
 
 def current_semester():
+    """The semester the portal shows when the reader picks nothing.
+
+    Three sources, in order: the portal's own override, the app-wide current
+    semester staff set on /semesters/, and finally the newest semester. The
+    override exists because the portal can be pointed at a different term than
+    the staff tools, and it is a required field, so a settings row always names
+    a semester -- creating one is a deliberate act, not an accident.
+    """
     configured = PortalSettings.objects.select_related("current_semester").first()
     if configured:
         return configured.current_semester
-    return Semester.objects.order_by("-academic_year", "-semester").first()
+    return Semester.current() or Semester.objects.order_by(
+        "-academic_year", "-semester"
+    ).first()
 
 
 def student_home(request):
@@ -104,7 +114,7 @@ def collision_report(request):
         form = CollisionReportForm(request.POST, default_semester=default)
         if form.is_valid():
             report = form.save()
-            return redirect("collision-report-thanks", reference=report.reference.hex)
+            return redirect("collision-report-thanks", reference=report.reference)
     else:
         form = CollisionReportForm(default_semester=default)
     return render(request, "student_portal/report.html", {"form": form})

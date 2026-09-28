@@ -6,7 +6,7 @@
     <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
         <div>
             <h1 class="text-2xl font-bold text-gray-800">{{ page_title }}</h1>
-            <p class="text-sm text-gray-500 mt-1">{{ total }} import{{ total|pluralize }} recorded — every result, error and automatic fix is kept here.</p>
+            <p class="text-sm text-gray-500 mt-1">{{ total }} import{{ total|pluralize }} recorded</p>
         </div>
         <div class="flex gap-2 shrink-0">
             <a href="{{ back_url }}" class="px-4 py-2 text-sm font-medium text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 transition">Back to Imports</a>
@@ -100,7 +100,6 @@
         <div class="px-5 py-16 text-center text-gray-400">
             <svg class="w-10 h-10 mx-auto mb-3 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
             <p class="text-sm">No import history yet{% if active_type %} for this type{% endif %}</p>
-            <p class="text-xs mt-1">Every import's full summary will be recorded here automatically.</p>
             <a href="{% url 'import-hub' %}" class="inline-block mt-4 px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700">Upload your first file</a>
         </div>
     </div>

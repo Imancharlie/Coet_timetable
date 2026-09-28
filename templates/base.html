@@ -4,7 +4,27 @@
 <html lang="en" class="h-full">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- viewport-fit=cover is what lets the page paint into the notch / home
+         indicator band. Without it the browser reserves that space and leaves a
+         pale strip above the app, which is exactly the seam a web page shows and
+         a native app does not. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <!-- Theme colour is the browser's own chrome. Without these the URL bar is
+         rendered by the OS in its default (usually white) and the app reads as a
+         page inside a browser rather than as itself. The light/dark media
+         variants stop the OS inverting it on a dark-mode phone. -->
+    <meta name="theme-color" content="#244b6b">
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#244b6b">
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#244b6b">
+    <!-- Standalone ("add to home screen") treatment. black-translucent is the
+         iOS one that matters: it makes the status bar transparent so the page's
+         own navy sits behind it, and it only has that effect alongside
+         viewport-fit=cover. -->
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="CoET Timetable">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="format-detection" content="telephone=no">
     <title>{% block title %}{{ page_title|default:"CoET Timetable" }}{% endblock %} — CoET Timetable</title>
     <script>
         // Apply the persisted sidebar collapse state before the first paint so
@@ -25,19 +45,30 @@
         [x-cloak] { display: none !important; }
 
         /* Shared CoET palette: slate blue structure, soft gray surfaces, green accents. */
-        :root { --coet-ink:#172b3b; --coet-blue:#315d83; --coet-blue-dark:#244b6b; --coet-blue-pale:#eaf1f6; --coet-green:#16836f; --coet-green-dark:#126956; --coet-canvas:#f2f5f7; --coet-line:#d8e1e7; }
+        :root { --coet-ink:#172b3b; --coet-blue:#315d83; --coet-blue-dark:#244b6b; --coet-blue-pale:#eaf1f6; --coet-green:#16836f; --coet-green-dark:#126956; --coet-canvas:#f2f5f7; --coet-line:#d8e1e7; --coet-cream:#f7e9c8; }
         body { background:var(--coet-canvas); color:var(--coet-ink); }
         body .bg-gray-50 { background-color:var(--coet-canvas); }
         body .bg-slate-900 { background-color:var(--coet-blue-dark); }
         body .bg-slate-800 { background-color:#315d83; }
-        body [class~="hover:bg-slate-800/60"]:hover { background-color:#315d83; }
+        /* Hover states are also the press state on touch: a tap is what a finger
+           gets, and it must land on the themed colour rather than a flash of
+           unstyled grey. Every themed :hover below is paired with :active. */
+        body [class~="hover:bg-slate-800/60"]:hover,
+        body [class~="hover:bg-slate-800/60"]:active { background-color:#315d83; }
         body .bg-blue-600 { background-color:var(--coet-blue); }
-        body [class~="hover:bg-blue-700"]:hover { background-color:var(--coet-blue-dark); }
+        body [class~="hover:bg-blue-700"]:hover,
+        body [class~="hover:bg-blue-700"]:active { background-color:var(--coet-blue-dark); }
         body .bg-emerald-600 { background-color:var(--coet-green); }
-        body [class~="hover:bg-emerald-700"]:hover { background-color:var(--coet-green-dark); }
+        body [class~="hover:bg-emerald-700"]:hover,
+        body [class~="hover:bg-emerald-700"]:active { background-color:var(--coet-green-dark); }
         body .text-blue-700, body .text-blue-600 { color:var(--coet-blue); }
         body .text-emerald-700, body .text-emerald-600, body .text-emerald-500, body .text-emerald-400 { color:var(--coet-green-dark); }
         body .border-gray-200 { border-color:var(--coet-line); }
+        /* The CoET wordmark is cream, so it stays legible on the dark blue
+           sidebar and the navy mobile bar. It gets its own class rather than a
+           text-* utility because the palette overrides above would repaint any
+           emerald/amber shade the utility named. */
+        .tt-brand-accent { color:var(--coet-cream); }
         body input:focus, body select:focus, body textarea:focus { --tw-ring-color:#9fc5d8; border-color:var(--coet-blue); }
         body [class~="focus:ring-blue-500"]:focus, body [class~="focus-visible:ring-blue-500"]:focus-visible { --tw-ring-color:#9fc5d8; }
 
@@ -56,6 +87,17 @@
 
         /* Page-level fade so full loads feel instant but not abrupt */
         main { animation: page-in 0.22s ease-out; }
+
+        /* Full-page loader: shown while the browser fetches the next document,
+           hidden again on load. pointer-events:none so it can never swallow a
+           click, and it only ever covers a navigation that has already left. */
+        #page-loader { opacity: 0; visibility: hidden; transition: opacity 0.18s ease, visibility 0s linear 0.18s; }
+        #page-loader.is-loading { opacity: 1; visibility: visible; transition: opacity 0.18s ease, visibility 0s linear 0s; }
+        #page-loader .tt-loader-bar { width: 40%; animation: loader-slide 1.1s ease-in-out infinite; }
+        @keyframes loader-slide {
+            0% { transform: translateX(-100%); }
+            100% { transform: translateX(250%); }
+        }
 
         @keyframes swap-in {
             from { opacity: 0; transform: translateY(3px); }
@@ -106,9 +148,49 @@
                 color: transparent;
                 background-color: rgb(51 65 85 / 0.5);
             }
+            /* A collapsed section is a divider, not something you can click, so
+               its own icon and chevron have nothing left to say. */
+            html.tt-collapsed #app-sidebar .tt-section-toggle { cursor: default; }
+            html.tt-collapsed #app-sidebar .tt-section-icon,
+            html.tt-collapsed #app-sidebar .tt-section-chevron,
+            html.tt-collapsed #app-sidebar .tt-section-label { display: none; }
             html.tt-collapsed #app-sidebar nav > a { justify-content: center; gap: 0; }
             html.tt-collapsed #app-sidebar nav > a > span { max-width: 0; opacity: 0; overflow: hidden; }
         }
+
+        /* A collapsible section header is tinted, not filled, when one of its
+           links is the current page — the child link already carries the solid
+           highlight, and two filled blocks would read as two active items. */
+        #app-sidebar .tt-section.is-active { color: var(--coet-cream); }
+        #app-sidebar .tt-section:not(:disabled):hover { color: #fff; }
+
+        /* Section children are indented one step from their header, on the
+           mobile drawer and the expanded desktop sidebar alike, so a child page
+           is never mistaken for a top-level entry. The extra left padding is
+           added *with* the link's own px-3 (margins would not narrow the
+           clickable row), and a left rule makes the parentage explicit. */
+        #app-sidebar .tt-section-body {
+            margin-left: 0.875rem;
+            padding-left: 0.625rem;
+            border-left: 1px solid rgb(51 65 85 / 0.9);
+        }
+        /* The icon-only rail has no room to indent, and an indent there would
+           push the icons off the 5rem bar entirely. */
+        @media (min-width: 1024px) {
+            html.tt-collapsed #app-sidebar .tt-section-body {
+                margin-left: 0;
+                padding-left: 0;
+                border-left: 0;
+            }
+        }
+
+        /* The Danger Zone link is the one sidebar item that leads to permanent
+           data loss, so it is tinted red on hover and its active state is a dark
+           red rather than the shared slate fill. The shared `active_cls` classes
+           are still what marks it current -- only the colours are overridden, so
+           it can never be the one item that looks unselected. */
+        #app-sidebar #nav-danger-zone:hover { background-color: rgba(225, 29, 72, 0.16); }
+        #app-sidebar #nav-danger-zone.bg-slate-800 { background-color: #7f1d1d; }
 
         /* Mobile drawer starts fully off-canvas from the first paint; only the
            .translate-x-0 class (Alpine's open state) brings it onto screen. */
@@ -125,7 +207,75 @@
         .mobile-bottom-nav { padding-bottom: max(.35rem, env(safe-area-inset-bottom)); }
         @media (min-width: 1024px) { .mobile-bottom-nav { display:none; } }
 
+        /* The app's own navy, not the browser's white, is what a phone shows
+           above the first pixel of content. Two parts:
+             - html carries the navy so the rubber-band area above the document
+               (and any scroll-back) is theme coloured rather than white, while
+               body's own canvas colour still paints the page itself.
+             - the top bar grows by the notch inset and pushes its content down
+               by the same amount, so the status bar sits on navy and the menu
+               row still clears the notch. Height has to be the sum, not just
+               padding, or the flex row is squeezed instead of moved.
+           Both insets are 0 on a device with no notch, so nothing shifts there. */
+        html { background: var(--coet-blue-dark); }
+        body .topbar {
+            height: calc(4.25rem + env(safe-area-inset-top));
+            padding-top: env(safe-area-inset-top);
+        }
+        @media (min-width: 640px) {
+            body .topbar { height: calc(5rem + env(safe-area-inset-top)); }
+        }
+        @media (min-width: 1024px) {
+            body .topbar { height: calc(4.5rem + env(safe-area-inset-top)); }
+        }
+        /* The mobile bar carries the theme blue, so the active item is marked
+           with a cream rule and cream text rather than a fill that would be
+           invisible on a dark bar. */
+        .tt-mobile-link { color:#c7d6e3; }
+        .tt-mobile-link:hover, .tt-mobile-link:focus-visible { color:#fff; }
+        .tt-mobile-link.is-active { color:var(--coet-cream); }
+        .tt-mobile-link.is-active::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 22%;
+            right: 22%;
+            height: 3px;
+            border-radius: 0 0 3px 3px;
+            background: var(--coet-cream);
+        }
+
         html { scroll-behavior: smooth; }
+
+        /* The tap flash is the mobile equivalent of :hover. Left alone, a
+           browser paints its own grey-blue box over the element -- on a themed
+           button that reads as a bug, and the student portal does not have it.
+           Tinting the flash with the app blue makes a tap look deliberate, and
+           :active (paired with :hover above) carries that through to the
+           settled state. rgba, not the solid colour, so it reads as a
+           highlight over whatever is underneath. */
+        a, button, [role="button"], summary, label, [tabindex] {
+            -webkit-tap-highlight-color: rgba(49, 93, 131, 0.22);
+        }
+        /* The dark chrome -- sidebar, top bar, mobile bottom nav -- sits on
+           navy, where a blue tint would be invisible. A light wash is what
+           reads as a press against that background. */
+        #app-sidebar a, #app-sidebar button, #app-sidebar summary,
+        .topbar a, .topbar button, .mobile-bottom-nav a, .mobile-bottom-nav button {
+            -webkit-tap-highlight-color: rgba(255, 255, 255, 0.16);
+        }
+        /* Text inputs keep the OS caret feedback: a tinted flash over a field
+           you are typing into is just noise. */
+        input, textarea, select {
+            -webkit-tap-highlight-color: transparent;
+        }
+        /* Touch devices have no hover to leave behind, but a pointer that also
+           supports hover should not show a stuck tint after a tap. */
+        @media (hover: hover) {
+            a:active, button:active, [role="button"]:active, summary:active, label:active {
+                -webkit-tap-highlight-color: transparent;
+            }
+        }
 
         @media (prefers-reduced-motion: reduce) {
             *, *::before, *::after {
@@ -142,9 +292,22 @@
       @open-modal.window="modalOpen = true"
       @close-slide.window="slideOpen = false"
       @open-slide.window="slideOpen = true"
-      @refresh-table.window="setTimeout(function(){ htmx.trigger('#data-table-wrap', 'refresh') }, 150)"
+      @refresh-table.window="setTimeout(function(){ htmx.trigger('#data-table-wrap', 'refresh'); htmx.trigger('#allocation-groups-board', 'refresh'); htmx.trigger('#danger-zone-body', 'refresh') }, 150)"
       @refresh-detail.window="setTimeout(refreshSlide, 150)">
 {% csrf_token %}
+
+<!-- Full-page loading indicator; driven by the page-loader script above. -->
+<div id="page-loader" class="fixed inset-0 z-[90] pointer-events-none" aria-hidden="true" role="status">
+    <div class="absolute top-0 inset-x-0 h-1 bg-[#244b6b]/20 overflow-hidden">
+        <div class="tt-loader-bar h-full bg-[#16836f]"></div>
+    </div>
+    <div class="absolute inset-0 flex items-center justify-center">
+        <div class="flex items-center gap-3 rounded-full bg-[#244b6b] px-5 py-2.5 text-white text-sm font-medium shadow-lg">
+            <svg class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24" aria-hidden="true"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-90" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+            Loading&hellip;
+        </div>
+    </div>
+</div>
 
 <script>
 function getCookie(name) {
@@ -274,11 +437,19 @@ document.addEventListener('alpine:init', function () {
         };
     });
     Alpine.data('sidebar', function () {
+        // Sections are collapsed by default so the sidebar opens on the current
+        // page's group; the choice is remembered per browser like the
+        // collapse/expand state.
+        var SECTION_KEYS = ['reference', 'timetable', 'allocation'];
+        var SECTION_STORE = 'coet.sidebar.sections';
         return {
             collapsed: false,
+            sections: { reference: true, timetable: true, allocation: true },
+            isDesktop: false,
             tooltip: '',
             tooltipX: 0,
             tooltipY: 0,
+            _media: null,
             init: function () {
                 var val = null;
                 try {
@@ -289,6 +460,24 @@ document.addEventListener('alpine:init', function () {
                 } catch (e) { val = null; }
                 if (val === '1') { this.collapsed = true; }
                 document.documentElement.classList.toggle('tt-collapsed', this.collapsed);
+
+                try {
+                    var stored = JSON.parse(window.localStorage.getItem(SECTION_STORE) || 'null');
+                    if (stored && typeof stored === 'object') {
+                        for (var i = 0; i < SECTION_KEYS.length; i++) {
+                            this.sections[SECTION_KEYS[i]] = stored[SECTION_KEYS[i]] === false ? false : true;
+                        }
+                    }
+                } catch (e) {}
+
+                var self = this;
+                if (window.matchMedia) {
+                    this._media = window.matchMedia('(min-width: 1024px)');
+                    this.isDesktop = this._media.matches;
+                    var onChange = function (e) { self.isDesktop = e.matches; };
+                    if (this._media.addEventListener) { this._media.addEventListener('change', onChange); }
+                    else if (this._media.addListener) { this._media.addListener(onChange); }
+                }
             },
             toggle: function () {
                 this.collapsed = !this.collapsed;
@@ -298,6 +487,24 @@ document.addEventListener('alpine:init', function () {
                     window.sessionStorage.setItem('coet.sidebar.collapsed', val);
                 } catch (e) {}
                 document.documentElement.classList.toggle('tt-collapsed', this.collapsed);
+            },
+            // Icon-only mode leaves the section header as a plain divider with
+            // nothing to click, so its links are always shown there. Reading
+            // this through one method keeps the button, the aria-expanded state
+            // and x-show from ever disagreeing.
+            isSectionDivider: function () {
+                return this.collapsed && this.isDesktop;
+            },
+            isSectionOpen: function (key) {
+                if (this.isSectionDivider()) { return true; }
+                return this.sections[key] !== false;
+            },
+            toggleSection: function (key) {
+                if (this.isSectionDivider()) { return; }
+                this.sections[key] = !this.isSectionOpen(key);
+                try {
+                    window.localStorage.setItem(SECTION_STORE, JSON.stringify(this.sections));
+                } catch (e) {}
             },
             showTooltip: function (el, text) {
                 if (this.collapsed && window.innerWidth >= 1024) {
@@ -336,6 +543,7 @@ document.body.addEventListener('htmx:afterSwap', function (evt) {
                 else if (path.indexOf('/venues/') !== -1) { section = 'Venue'; }
                 else if (path.indexOf('/programmes/') !== -1) { section = 'Programme'; }
                 else if (path.indexOf('/courses/') !== -1) { section = 'Programme Course'; }
+                else if (path.indexOf('/course-requirements/') !== -1) { section = 'Course'; }
                 else if (path.indexOf('/groups/') !== -1) { section = 'Student Group'; }
                 msg = 'All ' + section + ' data has been cleared successfully.';
             }
@@ -358,6 +566,73 @@ document.body.addEventListener('htmx:responseError', function (evt) {
 document.body.addEventListener('htmx:sendError', function () {
     showToast('Could not reach the server. Is it running?', 'error');
 });
+
+// ── Full-page loader ───────────────────────────────────────────────────
+// htmx already has its own .htmx-indicator for partial swaps, so this only
+// covers whole-document navigations. It is armed on a click/submit that will
+// really leave the page, and disarmed on load — including bfcache restores,
+// where 'load' never fires again and the bar would otherwise stick.
+(function () {
+    var el = document.getElementById('page-loader');
+    if (!el) { return; }
+    var hideTimer = null;
+
+    function showLoader() {
+        if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
+        el.classList.add('is-loading');
+    }
+    function hideLoader() {
+        if (hideTimer) { clearTimeout(hideTimer); }
+        // Short grace period so a fast response does not flash the overlay.
+        hideTimer = setTimeout(function () {
+            el.classList.remove('is-loading');
+            hideTimer = null;
+        }, 180);
+    }
+
+    // htmx owns anything it drives itself; a double overlay would fight the
+    // request's own indicator.
+    function htmxDriven(node) {
+        return !!(node && node.closest &&
+            node.closest('[hx-post],[hx-get],[hx-put],[hx-patch],[hx-delete],[hx-boost]'));
+    }
+    function leavesPage(node, href) {
+        if (!href) { return false; }
+        if (href.charAt(0) === '#') { return false; }
+        if (/^(mailto:|tel:|javascript:)/i.test(href)) { return false; }
+        try {
+            var url = new URL(href, window.location.href);
+            if (url.origin !== window.location.origin) { return false; }
+            if (url.pathname === window.location.pathname && url.search === window.location.search) { return false; }
+            return true;
+        } catch (e) { return false; }
+    }
+
+    document.addEventListener('click', function (evt) {
+        if (evt.defaultPrevented || evt.button !== 0 || evt.metaKey || evt.ctrlKey || evt.shiftKey || evt.altKey) { return; }
+        var link = evt.target.closest ? evt.target.closest('a[href]') : null;
+        if (!link) { return; }
+        if (link.target && link.target !== '_self') { return; }
+        if (link.hasAttribute('download') || htmxDriven(link)) { return; }
+        if (leavesPage(link, link.getAttribute('href'))) { showLoader(); }
+    }, true);
+
+    document.addEventListener('submit', function (evt) {
+        var form = evt.target;
+        if (!form || htmxDriven(form)) { return; }
+        if (form.target && form.target !== '_self') { return; }
+        showLoader();
+    }, true);
+
+    window.addEventListener('beforeunload', showLoader);
+    window.addEventListener('pageshow', hideLoader);
+    window.addEventListener('load', hideLoader);
+
+    // A failed htmx request never navigates, so nothing above will ever hide
+    // the overlay. Hiding on any htmx completion also covers a request that
+    // started from a real navigation and was then taken over by htmx.
+    document.body.addEventListener('htmx:afterRequest', hideLoader);
+})();
 </script>
 
 <div class="flex min-h-screen" x-data="sidebar">
@@ -371,20 +646,59 @@ document.body.addEventListener('htmx:sendError', function () {
 
     <!-- Main content -->
     <div class="flex-1 flex flex-col min-w-0">
-        <!-- Top bar -->
-        <header class="sticky top-0 z-20 bg-white border-b border-gray-200 px-3 sm:px-4 lg:px-6 h-14 flex items-center gap-3 sm:gap-4">
+        <!-- Top bar: the app's theme navy, not white, so the header reads as the
+             same band as the sidebar and the mobile bottom nav rather than a
+             pale strip. Height and type step at breakpoints -- but a phone gets
+             the student portal's bar height (~4.25rem, .7rem padding around a
+             2.8rem menu), so tapping through from the portal does not feel like
+             the app shrank when it got busier. -->
+        <header class="topbar sticky top-0 z-20 bg-[#244b6b] text-white shadow-[0_1px_3px_rgba(15,23,42,0.18)] px-3 sm:px-4 lg:px-6 flex items-center gap-3 sm:gap-4">
+             {% comment %}Height is NOT a h-* utility: it is `base + env(safe-area-inset-top)`
+             in the `body .topbar` rules above, so the bar can grow by the notch
+             inset and stay flush with the top of the screen. Do not re-add
+             h-[4.25rem] sm:h-20 lg:h-[4.5rem] here -- that is a second source of
+             truth for the same value and it silently drops the inset.{% endcomment %}
             <button @click="sidebarOpen = !sidebarOpen" aria-label="Toggle navigation menu"
-                    class="lg:hidden text-gray-500 hover:text-gray-700 rounded-lg p-2 -ml-1.5 hover:bg-gray-100 focus-visible:outline-2 focus-visible:outline-blue-500">
-                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
+                    class="lg:hidden text-white/80 hover:text-white rounded-lg p-2 -ml-1.5 hover:bg-white/10 focus-visible:outline-2 focus-visible:outline-white/70">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
             </button>
-            <h1 class="text-base font-semibold text-gray-800 truncate">{{ page_title|default:"Dashboard" }}</h1>
-            <div class="ml-auto flex items-center gap-3">
-                <div class="text-xs text-gray-400 hidden sm:block">CoET — University of Dar es Salaam</div>
+            {% nav_section as top_nav %}
+            {% if top_nav == 'dashboard' %}{% comment %}The dashboard is the app's own
+            front door, so the bar names the app rather than repeating the page:
+            the same cream-on-white wordmark the sidebar rail carries, included
+            from partials/brand.html so the two can never drift. It is a link, not
+            the page's h1 -- dashboard.html still owns that -- which is why a tap
+            here lands where the user already is instead of going nowhere.{% endcomment %}
+            <a href="{% url 'dashboard' %}"
+               aria-label="CoET Timetable, dashboard"
+               class="truncate min-w-0 rounded transition-colors focus-visible:ring-2 focus-visible:ring-white/70">
+                {% include "partials/brand.html" with brand_size="text-base sm:text-lg lg:text-xl" %}
+            </a>
+            {% else %}
+            <h1 class="text-base sm:text-lg lg:text-xl font-semibold text-white truncate min-w-0">{{ page_title|default:"Dashboard" }}</h1>
+            {% endif %}
+            <div class="ml-auto flex items-center gap-2 sm:gap-3 shrink-0">
+                <div class="text-xs text-white/70 hidden lg:block whitespace-nowrap">CoET — University of Dar es Salaam</div>
+                {% comment %}Students report timetable problems from the public portal; the
+                bell is the one place staff see how many are still open.{% endcomment %}
+                <a href="{% url 'collision-report-list' %}"
+                   aria-label="{% if open_issue_count %}{{ open_issue_count }} reported timetable issue{{ open_issue_count|pluralize }} awaiting review{% else %}Reported timetable issues{% endif %}"
+                   {% if open_issue_count %}title="{{ open_issue_count }} reported issue{{ open_issue_count|pluralize }} awaiting review"{% else %}title="Reported timetable issues"{% endif %}
+                   class="relative shrink-0 inline-flex items-center justify-center w-9 h-9 sm:w-10 sm:h-10 rounded-lg border border-white/30 text-white/90 hover:bg-white/10 hover:text-white focus-visible:ring-2 focus-visible:ring-white/70 transition">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/>
+                        <path class="hidden" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v4m0 4h.01"/></svg>
+                    {% if open_issue_count %}
+                    <span class="absolute -top-1 -right-1 min-w-[1.25rem] h-5 px-1 inline-flex items-center justify-center rounded-full bg-red-600 text-white text-[11px] font-bold leading-none ring-2 ring-[#244b6b]">{{ open_issue_count }}</span>
+                    {% endif %}
+                </a>
                 {% if request.user.is_authenticated %}
                 <form method="post" action="{% url 'staff-logout' %}" class="shrink-0">
                     {% csrf_token %}
-                    <button type="submit" class="rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-blue-500">
-                        Sign out{% if request.user.first_name %} · {{ request.user.first_name }}{% endif %}
+                    <!-- The name is dropped on a phone so the title never has to
+                         compete with it for the bar's width. -->
+                    <button type="submit" title="Sign out"
+                            class="rounded-lg border border-white/30 px-2.5 sm:px-3 py-1.5 text-xs font-medium text-white/90 hover:bg-white/10 hover:text-white focus-visible:ring-2 focus-visible:ring-white/70 whitespace-nowrap">
+                        <span class="sm:hidden">Out</span><span class="hidden sm:inline">Sign out</span>{% if request.user.first_name %}<span class="hidden lg:inline"> · {{ request.user.first_name }}</span>{% endif %}
                     </button>
                 </form>
                 {% endif %}
@@ -407,21 +721,21 @@ document.body.addEventListener('htmx:sendError', function () {
 </div>
 
 {% nav_section as mobile_nav %}
-<nav class="mobile-bottom-nav fixed inset-x-0 bottom-0 z-30 grid grid-cols-5 border-t border-slate-200 bg-white/95 backdrop-blur lg:hidden" aria-label="Mobile navigation">
-    <a href="{% url 'dashboard' %}" class="flex min-w-0 flex-col items-center justify-center gap-1 px-1 py-2 text-[10px] font-semibold {% if mobile_nav == 'dashboard' %}text-[#244b6b]{% else %}text-slate-500{% endif %}" {% if mobile_nav == 'dashboard' %}aria-current="page"{% endif %}>
-        <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10.5 12 3l9 7.5M5.5 9v11h13V9M9 20v-6h6v6"/></svg><span>Home</span>
+<nav class="mobile-bottom-nav fixed inset-x-0 bottom-0 z-30 grid grid-cols-5 bg-[#244b6b] shadow-[0_-2px_12px_rgba(23,43,59,0.25)] lg:hidden" aria-label="Mobile navigation">
+    <a href="{% url 'dashboard' %}" class="tt-mobile-link relative flex min-w-0 flex-col items-center justify-center gap-1 px-1 pt-2.5 pb-2 min-h-[4.25rem] text-[11px] font-semibold {% if mobile_nav == 'dashboard' %}is-active{% endif %}"} {% if mobile_nav == 'dashboard' %}aria-current="page"{% endif %}>
+        <svg class="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10.5 12 3l9 7.5M5.5 9v11h13V9M9 20v-6h6v6"/></svg><span>Home</span>
     </a>
-    <a href="{% url 'import-hub' %}" class="flex min-w-0 flex-col items-center justify-center gap-1 px-1 py-2 text-[10px] font-semibold {% if mobile_nav == 'imports' %}text-[#244b6b]{% else %}text-slate-500{% endif %}" {% if mobile_nav == 'imports' %}aria-current="page"{% endif %}>
-        <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 16V4m0 0L7 9m5-5 5 5M5 15v4a2 2 0 002 2h10a2 2 0 002-2v-4"/></svg><span>Import</span>
+    <a href="{% url 'import-hub' %}" class="tt-mobile-link relative flex min-w-0 flex-col items-center justify-center gap-1 px-1 pt-2.5 pb-2 min-h-[4.25rem] text-[11px] font-semibold {% if mobile_nav == 'imports' %}is-active{% endif %}" {% if mobile_nav == 'imports' %}aria-current="page"{% endif %}>
+        <svg class="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 16V4m0 0L7 9m5-5 5 5M5 15v4a2 2 0 002 2h10a2 2 0 002-2v-4"/></svg><span>Import</span>
     </a>
-    <a href="{% url 'allocation-page' %}" class="flex min-w-0 flex-col items-center justify-center gap-1 px-1 py-2 text-[10px] font-semibold {% if mobile_nav == 'allocation' %}text-[#244b6b]{% else %}text-slate-500{% endif %}" {% if mobile_nav == 'allocation' %}aria-current="page"{% endif %}>
-        <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 18h6v-2a3 3 0 00-4.5-2.6M16 18H8m8 0v-2a4 4 0 00-8 0v2m0 0H2v-2a3 3 0 014.5-2.6M15 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg><span>Allocation</span>
+    <a href="{% url 'allocation-page' %}" class="tt-mobile-link relative flex min-w-0 flex-col items-center justify-center gap-1 px-1 pt-2.5 pb-2 min-h-[4.25rem] text-[11px] font-semibold {% if mobile_nav == 'allocation' %}is-active{% endif %}" {% if mobile_nav == 'allocation' %}aria-current="page"{% endif %}>
+        <svg class="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 18h6v-2a3 3 0 00-4.5-2.6M16 18H8m8 0v-2a4 4 0 00-8 0v2m0 0H2v-2a3 3 0 014.5-2.6M15 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg><span>Allocation</span>
     </a>
-    <a href="{% url 'allocation-groups' %}" class="flex min-w-0 flex-col items-center justify-center gap-1 px-1 py-2 text-[10px] font-semibold {% if mobile_nav == 'allocation-progress' %}text-[#244b6b]{% else %}text-slate-500{% endif %}" {% if mobile_nav == 'allocation-progress' %}aria-current="page"{% endif %}>
-        <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 19V5m0 14h17M8 15l3-4 3 2 5-7"/></svg><span>Group progress</span>
+    <a href="{% url 'allocation-groups' %}" class="tt-mobile-link relative flex min-w-0 flex-col items-center justify-center gap-1 px-1 pt-2.5 pb-2 min-h-[4.25rem] text-[11px] font-semibold {% if mobile_nav == 'allocation-progress' %}is-active{% endif %}" {% if mobile_nav == 'allocation-progress' %}aria-current="page"{% endif %}>
+        <svg class="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 19V5m0 14h17M8 15l3-4 3 2 5-7"/></svg><span>Progress</span>
     </a>
-    <a href="{% url 'timetable' %}" class="flex min-w-0 flex-col items-center justify-center gap-1 px-1 py-2 text-[10px] font-semibold {% if mobile_nav == 'timetable' %}text-[#244b6b]{% else %}text-slate-500{% endif %}" {% if mobile_nav == 'timetable' %}aria-current="page"{% endif %}>
-        <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 5a2 2 0 012-2h12a2 2 0 012 2v14a2 2 0 01-2 2H6a2 2 0 01-2-2V5zM8 3v4m8-4v4M4 11h16M8 15h.01M12 15h.01M16 15h.01"/></svg><span>Timetable</span>
+    <a href="{% url 'timetable' %}" class="tt-mobile-link relative flex min-w-0 flex-col items-center justify-center gap-1 px-1 pt-2.5 pb-2 min-h-[4.25rem] text-[11px] font-semibold {% if mobile_nav == 'timetable' %}is-active{% endif %}" {% if mobile_nav == 'timetable' %}aria-current="page"{% endif %}>
+        <svg class="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 5a2 2 0 012-2h12a2 2 0 012 2v14a2 2 0 01-2 2H6a2 2 0 01-2-2V5zM8 3v4m8-4v4M4 11h16M8 15h.01M12 15h.01M16 15h.01"/></svg><span>Timetable</span>
     </a>
 </nav>
 

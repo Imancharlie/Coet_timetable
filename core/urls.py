@@ -40,6 +40,11 @@ urlpatterns = [
     path("semesters/", views.semester_list, name="semester-list"),
     path("semesters/create/", views.semester_create, name="semester-create"),
     path("semesters/<int:pk>/", views.semester_detail, name="semester-detail"),
+    path(
+        "semesters/<int:pk>/current/",
+        views.semester_set_current,
+        name="semester-set-current",
+    ),
     path("semesters/<int:pk>/edit/", views.semester_edit, name="semester-edit"),
     path("semesters/<int:pk>/delete/", views.semester_delete, name="semester-delete"),
     # Sessions (Master Timetable)
@@ -148,6 +153,11 @@ urlpatterns = [
         name="allocation-group-panel",
     ),
     path(
+        "allocation/group/<int:pk>/slide/",
+        views.allocation_group_slide,
+        name="allocation-group-slide",
+    ),
+    path(
         "allocation/preview/", views.allocation_preview, name="allocation-preview"
     ),
     path("allocation/apply/", views.allocation_apply, name="allocation-apply"),
@@ -192,4 +202,6 @@ urlpatterns = [
     path("timetable/groups/", views.timetable_groups_json, name="timetable-groups"),
     # Activity Log
     path("activity/", views.activity_list, name="activity-list"),
+    # Danger Zone: the one page holding every "clear all" action
+    path("danger-zone/", views.danger_zone, name="danger-zone"),
 ]

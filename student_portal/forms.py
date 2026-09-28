@@ -28,10 +28,10 @@ class CollisionReportForm(forms.ModelForm):
         self.fields["semester"].queryset = Semester.objects.order_by(
             "-academic_year", "-semester"
         )
-        self.fields["programme"].queryset = Programme.objects.order_by("code")
+        self.fields["programme"].queryset = Programme.objects.order_by("name")
         self.fields["group"].queryset = StudentGroup.objects.select_related(
             "programme"
-        ).order_by("programme__code", "code")
+        ).order_by("programme__name", "code")
         self.fields["day"].choices = [("", "Not specified"), *Day.choices]
         self.fields["programme"].required = False
         self.fields["group"].required = False
@@ -41,6 +41,8 @@ class CollisionReportForm(forms.ModelForm):
         self.fields["contact_email"].required = False
         self.fields["description"].label = "What is conflicting?"
         self.fields["contact_email"].label = "Email for follow-up (optional)"
+        self.fields["programme"].choices = [(p.pk, p.name) for p in self.fields["programme"].queryset]
+        self.fields["group"].choices = [(g.pk, f"{g.programme.name} — {g.code}") for g in self.fields["group"].queryset]
         if default_semester and not self.is_bound:
             self.initial.setdefault("semester", default_semester.pk)
 

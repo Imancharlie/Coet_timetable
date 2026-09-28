@@ -5,151 +5,211 @@
 
 {% block content %}
 <style>
-    .max-w-6xl { max-width: 72rem; }
-    @media (max-width: 768px) {
-        .max-w-6xl { max-width: 100%; padding: 0 0.5rem; }
+    /* The timetable is the one page whose content is a wide grid, so its
+       container is deliberately *uncapped*: the grid is told to grow into
+       whatever width is left after the sidebar, which is why collapsing the
+       sidebar (or opening it) widens the timetable instead of leaving a dead
+       margin. Everything else on the site keeps its max-w-* wrapper. */
+    #tt-page { width: 100%; max-width: none; }
+
+    /* The toolbar has to survive a 320px phone and a 2560px monitor with the
+       same markup: the fields wrap, then the actions move onto their own row
+       and stretch. `flex: 1 1 9rem` is what makes the select boxes share a
+       row on a tablet and stack on a phone without a second layout. */
+    #tt-page .tt-toolbar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 0.75rem; }
+    #tt-page .tt-field { flex: 1 1 9rem; min-width: 0; }
+    #tt-page .tt-field label, #tt-page .tt-label { display: block; margin-bottom: 0.25rem; font-size: 0.6875rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: #64748b; }
+    #tt-page .tt-field select {
+        width: 100%; max-width: 100%; min-width: 0; padding: 0.5rem 0.75rem;
+        border: 1px solid #cbd5e1; border-radius: 0.5rem; background: #fff;
+        font-size: 0.875rem; color: #0f172a;
+        appearance: none; -webkit-appearance: none;
+        background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='%2364748b'%3E%3Cpath fill-rule='evenodd' d='M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z' clip-rule='evenodd'/%3E%3C/svg%3E");
+        background-repeat: no-repeat; background-position: right 0.5rem center; background-size: 1.15em 1.15em;
+        padding-right: 2rem;
+    }
+    /* Only one year of study is timetabled, so that field is a stated fact
+       rather than a one-option menu: same box as the selects, no chevron, no
+       way to ask for a year that does not exist. */
+    #tt-page .tt-static {
+        width: 100%; max-width: 100%; min-width: 0; padding: 0.5rem 0.75rem;
+        border: 1px solid #e2e8f0; border-radius: 0.5rem; background: #f8fafc;
+        font-size: 0.875rem; color: #475569;
+    }
+    #tt-page .tt-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin-left: auto; }
+    #tt-page .tt-actions > * { flex: 0 0 auto; }
+    #tt-page .tt-btn {
+        display: inline-flex; align-items: center; justify-content: center; gap: 0.375rem;
+        padding: 0.5rem 0.875rem; border-radius: 0.5rem; font-size: 0.875rem; font-weight: 500;
+        white-space: nowrap; transition: background-color 0.15s ease, color 0.15s ease;
+    }
+    #tt-page .tt-btn-ghost { border: 1px solid #cbd5e1; color: #475569; background: #fff; }
+    #tt-page .tt-btn-ghost:hover { background: #f1f5f9; }
+    #tt-page .tt-btn-quiet { background: #f1f5f9; color: #334155; }
+    #tt-page .tt-btn-quiet:hover { background: #e2e8f0; }
+
+    /* Export lives inside the dark result card, on the light-on-dark half where
+       the session count used to sit — the sheet describes the programme/group/
+       semester on the left, and the button for that same sheet on the right. */
+    #tt-page .tt-export {
+        display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem;
+        padding: 0.55rem 0.95rem; border-radius: 0.6rem; text-decoration: none;
+        background: #ecfdf5; color: #126956;
+        font-size: 0.8125rem; font-weight: 600; white-space: nowrap;
+        transition: background-color 0.15s ease;
+    }
+    #tt-page .tt-export:hover { background: #d1fae5; }
+    #tt-page .tt-export:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+
+    /* A phone cannot print usefully — the A4 landscape grid is far wider than
+       the sheet, so the browser offers nothing but a scaled-down smudge, and
+       the PDF export inside the result card carries the phone instead. Hidden
+       at phone width, and on any touch device too narrow to be a tablet, so a
+       phone turned into landscape does not keep the button. */
+    @media (max-width: 640px), (hover: none) and (pointer: coarse) and (max-width: 1023px) {
+        #tt-page .tt-print { display: none; }
+    }
+
+    @media (max-width: 1023px) {
+        #tt-page .tt-actions { width: 100%; margin-left: 0; }
+        #tt-page .tt-actions > * { flex: 1 1 auto; }
     }
     @media (max-width: 640px) {
-        .no-print form { flex-direction: column; align-items: stretch; }
-        .no-print form > div { width: 100%; max-width: 100%; }
-        .no-print form .ml-auto { margin-left: 0; margin-top: 0.5rem; flex-direction: column; }
-        .no-print form .ml-auto > * { flex: 1; width: 100%; }
+        #tt-page .tt-actions > * { flex: 1 1 45%; }
     }
+
+    /* The legend is a single row that scrolls on a phone rather than wrapping
+       into a tall block that pushes the grid off-screen. */
+    #tt-page .tt-legend-bar {
+        display: flex; align-items: center; gap: 0.5rem 1rem;
+        overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none;
+        white-space: nowrap;
+    }
+    #tt-page .tt-legend-bar::-webkit-scrollbar { display: none; }
+    #tt-page .tt-legend-bar > * { flex: 0 0 auto; }
 </style>
 
-<div class="max-w-6xl mx-auto flex flex-col gap-4">
+<div id="tt-page" class="flex flex-col gap-3 sm:gap-4">
     <!-- Selector toolbar -->
-    <form method="get" action="." class="no-print bg-white rounded-xl shadow-sm border border-gray-200 p-4 flex flex-wrap items-end gap-3">
-        <div class="min-w-0">
-            <label for="programme" class="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Programme</label>
-            <select id="programme" name="programme"
-                    class="max-w-full sm:max-w-[15rem] min-w-0 truncate border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+    {% comment %}There is no "Show Timetable" button: every control below is a
+       navigation, and the script at the foot of this page submits the form on
+       each change. {% endcomment %}
+    <form id="tt-filters" method="get" action="." class="no-print tt-toolbar bg-white rounded-xl shadow-sm border border-gray-200 p-3 sm:p-4">
+        <div class="tt-field">
+            <label for="programme">Programme</label>
+            <select id="programme" name="programme">
                 <option value="all" {% if show_all %}selected{% endif %}>All Programs</option>
                 {% for p in programmes %}
                 <option value="{{ p.pk }}" {% if active_programme and p.pk == active_programme.pk %}selected{% endif %}>{{ p.code }} — {{ p.name }}</option>
                 {% endfor %}
             </select>
         </div>
-        <div id="group-selector-wrapper" class="min-w-0" {% if not active_programme %}style="display:none"{% endif %}>
-            <label for="group" class="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Group</label>
-            <select id="group" name="group"
-                    class="max-w-full sm:max-w-[12rem] min-w-0 truncate border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+        <div id="group-selector-wrapper" class="tt-field" {% if not active_programme %}hidden{% endif %}>
+            <label for="group">Group</label>
+            <select id="group" name="group">
                 <option value="">All Groups</option>
                 {% for g in groups_for_programme %}
                 <option value="{{ g.pk }}" {% if active_group and g.pk == active_group.pk %}selected{% endif %}>{{ g.code }}</option>
                 {% endfor %}
             </select>
         </div>
-        <div class="min-w-0">
-            <label for="semester" class="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Semester</label>
-            <select id="semester" name="semester"
-                    class="max-w-full sm:max-w-[12rem] min-w-0 truncate border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+        <div class="tt-field">
+            <label for="semester">Semester</label>
+            <select id="semester" name="semester">
                 {% for s in semesters %}
                 <option value="{{ s.pk }}" {% if active_semester and s.pk == active_semester.pk %}selected{% endif %}>{{ s }}</option>
                 {% endfor %}
             </select>
         </div>
-        <div class="min-w-0">
-            <label for="year" class="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Year of Study</label>
-            <select id="year" name="year"
-                    class="max-w-full sm:max-w-[10rem] min-w-0 truncate border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
-                {% for y in year_options %}
-                {% if y == 1 %}<option value="{{ y }}" {% if year == y %}selected{% endif %}>1st Year</option>
-                {% elif y == 2 %}<option value="{{ y }}" {% if year == y %}selected{% endif %}>2nd Year</option>
-                {% elif y == 3 %}<option value="{{ y }}" {% if year == y %}selected{% endif %}>3rd Year</option>
-                {% else %}<option value="{{ y }}" {% if year == y %}selected{% endif %}>{{ y }}th Year</option>
-                {% endif %}
-                {% endfor %}
-            </select>
+        <div class="tt-field">
+            <span class="tt-label">Year of Study</span>
+            <p class="tt-static">{{ year_ordinal }} Year</p>
+            <input type="hidden" name="year" value="{{ year }}">
         </div>
-        <button type="submit" class="px-4 py-2 bg-slate-800 text-white text-sm font-medium rounded-lg hover:bg-slate-900 transition">Show Timetable</button>
-        <a href="?" class="px-4 py-2 text-sm font-medium text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 transition">Reset</a>
-        <div class="ml-auto flex items-center gap-2">
-            <button type="button" onclick="window.print()"
-                    class="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"/></svg>
-                Print
+        <div class="tt-actions">
+            <a href="?" class="tt-btn tt-btn-ghost">Reset</a>
+            <button type="button" onclick="window.print()" class="tt-btn tt-btn-quiet tt-print">
+                <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 00-2-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"/></svg>
+                <span>Print</span>
             </button>
-            {% if active_semester %}
-            {% if show_all %}
-            <a href="{% url 'all-programmes-timetable-export' %}?semester={{ active_semester.pk }}&year={{ year }}"
-               class="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-green-700 bg-green-50 hover:bg-green-100 rounded-lg transition">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
-                Export PDF
-            </a>
-            {% elif active_programme and active_group %}
-            <a href="{% url 'group-timetable-export' active_group.pk %}?semester={{ active_semester.pk }}&year={{ year }}"
-               class="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-green-700 bg-green-50 hover:bg-green-100 rounded-lg transition">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
-                Export PDF
-            </a>
-            {% elif active_programme %}
-            <a href="{% url 'programme-timetable-export' active_programme.pk %}?semester={{ active_semester.pk }}&year={{ year }}"
-               class="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-green-700 bg-green-50 hover:bg-green-100 rounded-lg transition">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
-                Export PDF
-            </a>
-            {% endif %}
-            {% endif %}
         </div>
     </form>
 
+
     {% if not active_semester %}
-    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-16 text-center text-gray-400">
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-10 sm:p-16 text-center text-gray-400">
         <p class="text-sm">No semester available. Create a semester first.</p>
     </div>
     {% elif not programmes and not grid.slots %}
-    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-16 text-center text-gray-400">
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-10 sm:p-16 text-center text-gray-400">
         <p class="text-sm">No programmes registered yet.</p>
         <p class="text-xs mt-1">Add a programme and import a master timetable to see it here.</p>
     </div>
     {% else %}
 
     <!-- Timetable header -->
-    <div class="bg-slate-900 rounded-xl px-6 py-5 text-white shadow-sm">
-        <div class="flex flex-wrap items-end justify-between gap-4">
-            <div>
+    <div class="bg-slate-900 rounded-xl px-4 sm:px-6 py-4 sm:py-5 text-white shadow-sm">
+        <div class="flex flex-wrap items-end justify-between gap-3 sm:gap-4">
+            <div class="min-w-0">
                 {% if show_all %}
-                <p class="text-lg font-bold tracking-tight">ALL PROGRAMMES</p>
-                <p class="text-sm font-medium text-slate-300 mt-0.5">{{ year_ordinal|upper }} YEAR &middot; {{ active_semester.academic_year }}</p>
+                <p class="text-base sm:text-lg font-bold tracking-tight break-words">ALL PROGRAMMES</p>
+                <p class="text-xs sm:text-sm font-medium text-slate-300 mt-0.5">{{ year_ordinal|upper }} YEAR &middot; {{ active_semester.academic_year }}</p>
                 {% elif active_group %}
-                <p class="text-lg font-bold tracking-tight">{{ active_group.programme.name|upper }}</p>
-                <p class="text-sm font-medium text-slate-300 mt-0.5">GROUP {{ active_group.code }} &middot; {{ year_ordinal|upper }} YEAR &middot; {{ active_semester.academic_year }}</p>
+                <p class="text-base sm:text-lg font-bold tracking-tight break-words">{{ active_group.programme.name|upper }}</p>
+                <p class="text-xs sm:text-sm font-medium text-slate-300 mt-0.5">GROUP {{ active_group.code }} &middot; {{ year_ordinal|upper }} YEAR &middot; {{ active_semester.academic_year }}</p>
                 {% else %}
-                <p class="text-lg font-bold tracking-tight">{{ active_programme.name|upper }}</p>
-                <p class="text-sm font-medium text-slate-300 mt-0.5">{{ year_ordinal|upper }} YEAR &middot; {{ active_semester.academic_year }}</p>
+                <p class="text-base sm:text-lg font-bold tracking-tight break-words">{{ active_programme.name|upper }}</p>
+                <p class="text-xs sm:text-sm font-medium text-slate-300 mt-0.5">{{ year_ordinal|upper }} YEAR &middot; {{ active_semester.academic_year }}</p>
                 {% endif %}
-                <p class="text-sm font-semibold text-emerald-400 mt-0.5">SEMESTER {{ active_semester.semester }}</p>
+                <p class="text-xs sm:text-sm font-semibold text-emerald-400 mt-0.5">SEMESTER {{ active_semester.semester }}</p>
             </div>
-            <div class="text-right text-xs text-slate-400">
-                <p>{{ entry_count }} scheduled session{{ entry_count|pluralize }}</p>
+            {% comment %}The export button sits on the right of this card, where the
+               session count used to be: the card already names the programme,
+               the group and the semester on the left, so the way out to a PDF
+               of that exact selection belongs beside it rather than back up in
+               the toolbar — and, unlike the toolbar, it is not `.no-print`, so
+               the printed sheet carries nothing but the timetable.{% endcomment %}
+            <div class="shrink-0">
                 {% if show_all %}
-                <p class="mt-0.5">{{ programmes|length }} programme{{ programmes|length|pluralize }}</p>
+                <a href="{% url 'all-programmes-timetable-export' %}?semester={{ active_semester.pk }}&year={{ year }}"
+                   class="tt-export">
+                    <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                    <span>Export PDF</span>
+                </a>
                 {% elif active_group %}
-                <p class="mt-0.5">{{ active_group.programme.code }} &middot; Group {{ active_group.code }}</p>
+                <a href="{% url 'group-timetable-export' active_group.pk %}?semester={{ active_semester.pk }}&year={{ year }}"
+                   class="tt-export">
+                    <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                    <span>Export PDF</span>
+                </a>
                 {% else %}
-                <p class="mt-0.5">{{ active_programme.code }} &middot; {{ active_programme.student_groups.count }} group{{ active_programme.student_groups.count|pluralize }}</p>
+                <a href="{% url 'programme-timetable-export' active_programme.pk %}?semester={{ active_semester.pk }}&year={{ year }}"
+                   class="tt-export">
+                    <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                    <span>Export PDF</span>
+                </a>
                 {% endif %}
             </div>
         </div>
     </div>
 
     <!-- Type legend -->
-    <div class="no-print bg-white rounded-xl shadow-sm border border-gray-200 px-4 py-2.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-600">
-        <span class="text-xs font-medium text-gray-500 uppercase tracking-wide mr-1">Type</span>
+    <div class="no-print tt-legend-bar bg-white rounded-xl shadow-sm border border-gray-200 px-3 sm:px-4 py-2.5 text-xs text-gray-600">
+        <span class="font-semibold text-gray-500 uppercase tracking-wide">Type</span>
         <span class="flex items-center gap-1.5"><span class="tt-kind-dot bg-gray-300"></span>Lecture</span>
         <span class="flex items-center gap-1.5"><span class="tt-kind-dot bg-blue-400"></span>Tutorial</span>
         <span class="flex items-center gap-1.5"><span class="tt-kind-dot bg-purple-400"></span>Seminar</span>
         <span class="flex items-center gap-1.5"><span class="tt-kind-dot bg-amber-400"></span>Practical</span>
         <span class="flex items-center gap-1.5"><span class="tt-kind-dot bg-emerald-400"></span>Workshop</span>
         <span class="flex items-center gap-1.5"><span class="tt-kind-dot bg-pink-400"></span>Technical Drawing</span>
+        <span class="flex items-center gap-1.5 font-medium" style="color:#0b4f9e"><span class="tt-kind-dot" style="background:#0b4f9e"></span>Assigned groups</span>
     </div>
 
     <!-- Grid: TIME slots in the first row (top header), DAYS down the first column -->
     {% if grid.slots %}
     {% include "core/_timetable_grid.html" %}
     {% else %}
-    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-16 text-center text-gray-400">
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-10 sm:p-16 text-center text-gray-400">
         {% if show_all %}
         <p class="text-sm">No sessions scheduled for COET First Year in {{ active_semester }} yet.</p>
         {% else %}
@@ -162,21 +222,39 @@
 </div>
 
 <script>
-const programmeSelect = document.getElementById('programme');
-const groupWrapper = document.getElementById('group-selector-wrapper');
-const groupSelect = document.getElementById('group');
+{% comment %}Every filter is a navigation, so the toolbar has no "Show Timetable"
+   button to press: this submits the form on each change. `form.submit()` is a
+   real navigation, so #page-loader picks it up through its beforeunload
+   listener and the grid is never redrawn under a stale filter set.{% endcomment %}
+(function () {
+    var form = document.getElementById('tt-filters');
+    var programmeSelect = document.getElementById('programme');
+    var groupWrapper = document.getElementById('group-selector-wrapper');
+    var groupSelect = document.getElementById('group');
+    var semesterSelect = document.getElementById('semester');
+    if (!form || !programmeSelect || !groupWrapper || !groupSelect || !semesterSelect) return;
 
-programmeSelect.addEventListener('change', function() {
-    if (this.value === 'all') {
-        groupWrapper.style.display = 'none';
-        groupSelect.value = '';
-    } else {
-        groupWrapper.style.display = 'block';
-        fetch(`/timetable/groups/?programme=${this.value}`)
-            .then(response => response.json())
-            .then(data => {
+    function reload() { form.submit(); }
+
+    function showGroups(show) {
+        // `hidden` rather than an inline display, so the flex rule in the page
+        // stylesheet can no longer win over the toggle.
+        groupWrapper.hidden = !show;
+        if (!show) groupSelect.value = '';
+    }
+
+    /* Pull a programme's groups into the group select. The navigation waits on
+       this so the list is already in the dropdown — and visible in it — by the
+       time the user reaches for it, which is the point: choosing a programme
+       and choosing a group are two steps, not "choose a programme, press a
+       button, then go and look for the groups". A failure is not fatal: the
+       reloaded page renders the same list server-side, so reload either way. */
+    function loadGroups(programmeId) {
+        return fetch(`{% url 'timetable-groups' %}?programme=${encodeURIComponent(programmeId)}`)
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
                 groupSelect.innerHTML = '<option value="">All Groups</option>';
-                data.groups.forEach(g => {
+                (data.groups || []).forEach(function (g) {
                     const option = document.createElement('option');
                     option.value = g.id;
                     option.textContent = g.code;
@@ -184,6 +262,21 @@ programmeSelect.addEventListener('change', function() {
                 });
             });
     }
-});
+
+    programmeSelect.addEventListener('change', function () {
+        if (this.value === 'all') {
+            showGroups(false);
+            reload();
+            return;
+        }
+        showGroups(true);
+        // `then(reload, reload)`: navigate once the groups are in place, and
+        // navigate anyway if the fetch failed.
+        loadGroups(this.value).then(reload, reload);
+    });
+
+    groupSelect.addEventListener('change', reload);
+    semesterSelect.addEventListener('change', reload);
+})();
 </script>
 {% endblock %}

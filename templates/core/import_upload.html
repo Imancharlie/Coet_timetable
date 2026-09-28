@@ -19,7 +19,6 @@
                 {% if hint %}
                 <p class="text-xs text-gray-500 mt-2">{{ hint }}</p>
                 {% endif %}
-                <p class="text-xs text-gray-400 mt-2">File must be .xlsx or .xls format. The first row should be headers. Column names are matched case-insensitively.</p>
             </div>
 
             <form method="post" enctype="multipart/form-data"
@@ -30,6 +29,7 @@
                   hx-disabled-elt="this"
                   x-data="{ uploading: false, noSemester: {{ no_semester|yesno:"true,false" }} }"
                   @submit="uploading = true"
+                  @htmx:after-request.window="if ($event.detail.elt === $el) uploading = false"
                   id="upload-form">
                 {% csrf_token %}
                 <div class="space-y-4">
@@ -57,7 +57,6 @@
                             No semesters have been created yet. Create one first, then import.
                             <a href="{% url 'semester-create' %}" class="underline font-medium">Create a semester</a>
                         </div>
-                        <p class="text-xs text-gray-500 mt-1">The Master Timetable importer needs a target semester — it is never guessed or auto-created.</p>
                         {% endif %}
                     </div>
                     {% endif %}
@@ -70,21 +69,10 @@
                     </div>
                     {% endfor %}
                     {% if derive_requirements %}
-                    <label class="flex items-start gap-3 bg-emerald-50 border border-emerald-200 rounded-lg p-3 cursor-pointer">
+                    <label class="flex items-center gap-3 bg-emerald-50 border border-emerald-200 rounded-lg p-3 cursor-pointer">
                         <input type="checkbox" name="derive_requirements" value="1" checked
-                               class="mt-0.5 h-4 w-4 text-emerald-600 border-gray-300 rounded focus:ring-emerald-500">
-                        <span class="min-w-0">
-                            <span class="block text-sm font-medium text-emerald-900">{{ derive_requirements }}</span>
-                            <span class="block text-xs text-emerald-700 mt-0.5">
-                                A course with tutorial sessions gets
-                                <strong>Tutorial</strong>; one with tutorials and
-                                practicals gets <strong>both</strong>. Only an
-                                activity that has a session is set, a course that
-                                already has a requirement is never overwritten,
-                                and courses with no small-group session are
-                                reported so you can decide about them.
-                            </span>
-                        </span>
+                               class="h-4 w-4 text-emerald-600 border-gray-300 rounded focus:ring-emerald-500">
+                        <span class="text-sm font-medium text-emerald-900">{{ derive_requirements }}</span>
                     </label>
                     {% endif %}
                 </div>
@@ -109,7 +97,6 @@
                         <svg class="animate-spin w-6 h-6 text-blue-600" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
                         <div>
                             <p class="font-semibold text-blue-800">Importing…</p>
-                            <p class="text-xs text-blue-600">Reading the workbook and reconciling reference data. This can take a moment.</p>
                         </div>
                     </div>
                 </div>

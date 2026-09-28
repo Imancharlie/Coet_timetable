@@ -1,0 +1,81 @@
+{% comment %}The Danger Zone board.
+
+Swappable on its own (`danger_zone` serves this fragment to an htmx GET), so a
+clear made from one of the confirmation modals can refresh the counts here
+without a reload -- the same split `list.html` / `_table_and_cards.html` make.
+The cards only *link* to the existing `/…/clear-all/` endpoints; the deletion
+itself, its phrase confirmation and its cascade preview are unchanged.
+{% endcomment %}
+<div id="danger-zone-body"
+     hx-get="/danger-zone/"
+     hx-trigger="refresh from:window"
+     hx-swap="outerHTML"
+     hx-settle="220">
+    <div class="rounded-2xl border-2 border-rose-300 bg-rose-50/60 p-4 sm:p-6 mb-5">
+        <div class="flex items-start gap-3">
+            <div class="shrink-0 w-11 h-11 rounded-full bg-rose-100 flex items-center justify-center text-rose-700">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+            </div>
+            <div class="min-w-0">
+                <h2 class="text-base font-semibold text-rose-900">Every “clear all” action lives here</h2>
+                <p class="text-sm text-rose-800/90 mt-1">
+                    Each action below empties one kind of record
+                    <strong>across the whole database</strong> — not the rows a search or filter happens to be showing.
+                    There is no undo. Use the individual
+                    <span class="whitespace-nowrap">Delete</span> buttons on a list when you only mean to remove some records.
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <div class="text-sm text-gray-500 mb-4">{{ target_count }} destructive action{{ target_count|pluralize }}</div>
+
+    {% for group in groups %}
+    <section class="mb-6">
+        <h3 class="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-2">{{ group.label }}</h3>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {% for target in group.targets %}
+            <div class="rounded-xl border {% if target.has_records %}border-rose-200{% else %}border-gray-200{% endif %} bg-white shadow-sm p-4 flex flex-col gap-3 min-w-0">
+                <div class="flex items-start justify-between gap-3 min-w-0">
+                    <div class="min-w-0">
+                        <h4 class="font-semibold text-gray-800">{{ target.label }}</h4>
+                        <p class="text-sm text-gray-500 mt-0.5">{{ target.summary }}</p>
+                    </div>
+                    <span class="shrink-0 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold {% if target.count %}bg-rose-100 text-rose-700{% else %}bg-gray-100 text-gray-500{% endif %}"
+                          title="{{ target.count }} record{{ target.count|pluralize }}">{{ target.count }}</span>
+                </div>
+
+                {% if target.related_total %}
+                <p class="text-xs text-gray-500 -mt-1">
+                    Also removes {{ target.related_total }} linked record{{ target.related_total|pluralize }}.
+                </p>
+                {% elif target.detached_total %}
+                <p class="text-xs text-amber-700 -mt-1">
+                    Keeps the records that point at these, with the reference cleared.
+                </p>
+                {% endif %}
+
+                <div class="mt-auto flex flex-wrap items-center gap-2">
+                    {% if target.has_records %}
+                    <button type="button"
+                            onclick="openModal('{{ target.clear_url }}', 'Clear all {{ target.label }}')"
+                            class="inline-flex items-center justify-center gap-2 px-3.5 py-2 text-sm font-medium text-red-700 border border-red-300 bg-red-50 rounded-lg hover:bg-red-100 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500/70">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                        Clear All
+                    </button>
+                    {% else %}
+                    <span class="inline-flex items-center gap-2 px-3.5 py-2 text-sm font-medium text-gray-400 border border-gray-200 bg-gray-50 rounded-lg cursor-not-allowed">
+                        Nothing to clear
+                    </span>
+                    {% endif %}
+                    <a href="{{ target.list_url }}"
+                       class="inline-flex items-center px-3.5 py-2 text-sm font-medium text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 transition">
+                        View {{ target.label|lower }}
+                    </a>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </section>
+    {% endfor %}
+</div>

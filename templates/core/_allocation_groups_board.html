@@ -1,0 +1,125 @@
+{% comment %}
+The progress board: the summary tiles and the table of every group.
+
+Kept apart from the page so it can be swapped on its own. A placement made from
+the group panel (opened out of a row) fires ``refresh-table``, and the board
+redraws from the same context a fresh page load would use -- otherwise the row
+the coordinator just came from still claims work that is already placed.
+
+The table is the board at every width, because a group is one row of facts and
+cards would hide the comparison. What is given up on a phone is width, not
+information: the Programme column and the per-activity chips come back from
+``sm`` / ``md`` up, and a tap anywhere on a row opens that group in the
+slide-over panel, which shows the programme and the full requirement list.
+{% endcomment %}
+<div id="allocation-groups-board"
+     class="space-y-4 min-w-0"
+     hx-get="{{ board_url }}"
+     hx-trigger="refresh from:window"
+     hx-swap="outerHTML"
+     hx-settle="220">
+
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div class="rounded-lg bg-emerald-50 border border-emerald-200 p-3">
+            <p class="text-xs text-emerald-700 font-medium">Complete</p>
+            <p class="text-xl font-semibold text-emerald-900">{{ complete }}</p>
+        </div>
+        <div class="rounded-lg bg-amber-50 border border-amber-200 p-3">
+            <p class="text-xs text-amber-700 font-medium">Partly done</p>
+            <p class="text-xl font-semibold text-amber-900">{{ partial }}</p>
+        </div>
+        <div class="rounded-lg bg-red-50 border border-red-200 p-3">
+            <p class="text-xs text-red-700 font-medium">Not started</p>
+            <p class="text-xl font-semibold text-red-900">{{ unassigned }}</p>
+        </div>
+        <div class="rounded-lg bg-gray-50 border border-gray-200 p-3">
+            <p class="text-xs text-gray-600 font-medium">Outstanding</p>
+            <p class="text-xl font-semibold text-gray-900">{{ outstanding }}</p>
+        </div>
+    </div>
+
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden min-w-0">
+        <div class="overflow-x-auto min-w-0">
+            <table class="min-w-full divide-y divide-gray-200 text-sm">
+                <thead class="bg-gray-50">
+                    <tr>
+                        <th class="px-3 sm:px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">Group</th>
+                        <th class="hidden md:table-cell px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">Programme</th>
+                        <th class="px-3 sm:px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">Progress</th>
+                        <th class="hidden sm:table-cell px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">By activity</th>
+                        <th class="px-3 sm:px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">Still needed</th>
+                        <th class="px-3 sm:px-4 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider"><span class="sr-only sm:not-sr-only">Open</span></th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-100">
+                    {% for row in rows %}
+                    <tr class="hover:bg-blue-50/50 cursor-pointer transition-colors"
+                        hx-get="{{ row.slide_url }}"
+                        hx-target="#slide-content"
+                        hx-swap="innerHTML"
+                        @click="slideOpen = true">
+                        <td class="px-3 sm:px-4 py-3 font-medium text-gray-800 whitespace-nowrap">{{ row.group.code }}</td>
+                        <td class="hidden md:table-cell px-4 py-3 text-gray-600 whitespace-nowrap">{{ row.group.programme.code }}</td>
+                        <td class="px-3 sm:px-4 py-3">
+                            {% if row.has_nothing_to_do %}
+                            <span class="text-xs text-gray-500 whitespace-nowrap">nothing required</span>
+                            {% else %}
+                            <div class="flex items-center gap-2 min-w-[7rem] sm:min-w-[9rem]">
+                                <div class="flex-1 h-2 rounded-full bg-gray-200 overflow-hidden">
+                                    <div class="h-full {% if row.is_complete %}bg-emerald-500{% else %}bg-amber-500{% endif %}"
+                                         style="width: {{ row.percent }}%"></div>
+                                </div>
+                                <span class="text-xs font-medium text-gray-700 whitespace-nowrap">{{ row.met }}/{{ row.total }}</span>
+                            </div>
+                            {% endif %}
+                        </td>
+                        <td class="hidden sm:table-cell px-4 py-3">
+                            {% if row.has_nothing_to_do %}
+                            <span class="text-xs text-gray-400">&mdash;</span>
+                            {% else %}
+                            <div class="flex flex-wrap gap-1.5">
+                                {% for label, met, total in row.activity_progress %}
+                                <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap
+                                    {% if met == total %}bg-emerald-100 text-emerald-700{% else %}bg-gray-100 text-gray-600{% endif %}">
+                                    {{ label }} {{ met }}/{{ total }}
+                                </span>
+                                {% endfor %}
+                            </div>
+                            {% endif %}
+                        </td>
+                        <td class="px-3 sm:px-4 py-3 max-w-[16rem] sm:max-w-none">
+                            {% if row.outstanding %}
+                            <ul class="space-y-0.5">
+                                {% for entry in row.entries %}{% if not entry.is_met %}
+                                <li class="text-xs text-amber-800 break-safe">
+                                    {{ entry.requirement.course.code }} {{ entry.activity_label }}{% if entry.requirement.ordinal > 1 %} #{{ entry.requirement.ordinal }}{% endif %}
+                                    &mdash; {% if entry.options %}{{ entry.free_options|length }} of {{ entry.options|length }} option{{ entry.options|length|pluralize }} free
+                                    {% else %}no session exists{% endif %}
+                                </li>
+                                {% endif %}{% endfor %}
+                            </ul>
+                            {% else %}
+                            <span class="text-xs text-emerald-700 whitespace-nowrap">
+                                {% if row.is_complete %}all done{% else %}nothing required{% endif %}
+                            </span>
+                            {% endif %}
+                        </td>
+                        <td class="px-3 sm:px-4 py-3 text-right whitespace-nowrap" @click.stop>
+                            <a href="{{ row.detail_url }}{% if semester %}?semester={{ semester.pk }}&scope={{ scope }}{% endif %}"
+                               class="inline-flex items-center gap-1 px-2.5 sm:px-3 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-lg transition">
+                                {{ row.outstanding }} to place
+                            </a>
+                        </td>
+                    </tr>
+                    {% empty %}
+                    <tr>
+                        <td colspan="6" class="px-4 py-10 text-center text-gray-400 text-sm">
+                            No student groups study a course in this semester.
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>

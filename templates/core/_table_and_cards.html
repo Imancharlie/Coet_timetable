@@ -39,6 +39,11 @@
                             </span>
                         {% elif col.key == 'day' %}
                             <span class="text-gray-600">{{ item|get_attr:col.key }}</span>
+                        {% elif col.badge %}
+                            {# A boolean column reads as a state, not a value: a pill, never "True". #}
+                            {% with flagged=item|get_attr:col.key %}
+                            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium {% if flagged %}{{ col.badge_class|default:'bg-emerald-100 text-emerald-700' }}{% else %}bg-gray-100 text-gray-500{% endif %}">{{ flagged|yesno:col.badge_label|default:"Yes" }}</span>
+                            {% endwith %}
                         {% else %}
                             <span class="block truncate" title="{{ item|get_attr:col.key }}">{{ item|get_attr:col.key }}</span>
                         {% endif %}
@@ -58,6 +63,12 @@
                     {% endif %}
                     <td class="px-4 py-3 text-right whitespace-nowrap" @click.stop>
                         <div class="inline-flex items-center">
+                            {# Extra per-row mutations a list view hands over (the semesters list sets the current term). #}
+                            {% for action in row_actions|get_item:item.pk %}
+                            <button type="button" hx-post="{{ action.url }}" hx-swap="none"
+                                    title="{{ action.title }}" aria-label="{{ action.title }}"
+                                    class="px-2.5 py-1.5 mr-1 rounded-md border text-xs font-medium transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 {% if action.active %}bg-gray-50 border-gray-200 text-gray-500 hover:bg-gray-100{% else %}bg-blue-50 border-blue-200 text-blue-700 hover:bg-blue-100{% endif %}">{{ action.label }}</button>
+                            {% endfor %}
                             <a href="{{ item.pk }}/edit/"
                                onclick="event.preventDefault(); openEdit(this.getAttribute('href'))"
                                class="p-2 rounded-md text-gray-400 hover:text-blue-600 hover:bg-blue-50 transition"
@@ -137,7 +148,7 @@
                     {% if col.key == 'start_time' or col.key == 'end_time' %}
                     <span class="text-xs text-gray-700 font-medium text-right">{{ item|get_attr:col.key|time_short }}</span>
                     {% elif col.key == 'activity_type' %}
-                    <span class="text-xs font-medium grow text-right
+                        <span class="text-xs font-medium grow text-right
                         {% if item.activity_type == 'LECTURE' %}text-blue-700
                         {% elif item.activity_type == 'TUTORIAL' %}text-emerald-700
                         {% elif item.activity_type == 'SEMINAR' %}text-purple-700
@@ -145,6 +156,10 @@
                         {% elif item.activity_type == 'WORKSHOP' %}text-rose-700{% endif %}">
                         {{ item|get_attr:col.key }}
                     </span>
+                    {% elif col.badge %}
+                        {% with flagged=item|get_attr:col.key %}
+                        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium {% if flagged %}{{ col.badge_class|default:'bg-emerald-100 text-emerald-700' }}{% else %}bg-gray-100 text-gray-500{% endif %}">{{ flagged|yesno:col.badge_label|default:"Yes" }}</span>
+                        {% endwith %}
                     {% else %}
                     <span class="text-xs text-gray-700 font-medium text-right break-safe">{{ item|get_attr:col.key }}</span>
                     {% endif %}
@@ -152,7 +167,12 @@
                 {% endif %}
                 {% endfor %}
             </div>
-            <div class="mt-3 pt-3 border-t border-gray-100 flex gap-2" @click.stop>
+            <div class="mt-3 pt-3 border-t border-gray-100 flex flex-wrap gap-2" @click.stop>
+                {% for action in row_actions|get_item:item.pk %}
+                <button type="button" hx-post="{{ action.url }}" hx-swap="none"
+                        title="{{ action.title }}"
+                        class="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2.5 text-xs sm:text-sm font-medium rounded-lg transition {% if action.active %}bg-gray-100 text-gray-700 hover:bg-gray-200{% else %}bg-blue-50 text-blue-700 hover:bg-blue-100{% endif %}">{{ action.label }}</button>
+                {% endfor %}
                 <a href="{{ item.pk }}/edit/"
                    onclick="event.preventDefault(); openEdit(this.getAttribute('href'))"
                    class="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2.5 text-xs sm:text-sm font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-lg transition">

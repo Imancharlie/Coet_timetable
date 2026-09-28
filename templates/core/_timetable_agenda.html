@@ -1,0 +1,29 @@
+{% comment %}
+  Narrow-screen agenda: one stacked list per day, shown below `lg` where the
+  hour-column grid is too wide to read. It renders the *same* entries as
+  `_timetable_grid.html` — `row.entries` is that day's sessions in reading
+  order, built from the same `collect_entries` output — and reuses the same
+  `_activity_card.html` box, so a session reads identically in both views.
+  A day with no sessions is stated rather than left as a gap in the list.
+{% endcomment %}
+<div class="tt-agenda">
+    {% for row in grid.rows %}
+    <section class="tt-agenda-day" aria-labelledby="tt-day-{{ row.day }}">
+        <h2 id="tt-day-{{ row.day }}" class="tt-agenda-head">
+            <span class="day">{{ row.label }}</span>
+            <span class="count">
+                {% if row.entries %}{{ row.entries|length }} session{{ row.entries|length|pluralize }}{% else %}No sessions{% endif %}
+            </span>
+        </h2>
+        {% if row.entries %}
+        <div class="tt-agenda-list">
+            {% for entry in row.entries %}
+            {% include "core/_activity_card.html" with entry=entry %}
+            {% endfor %}
+        </div>
+        {% else %}
+        <p class="tt-agenda-free">Nothing scheduled — free for study or lab work.</p>
+        {% endif %}
+    </section>
+    {% endfor %}
+</div>

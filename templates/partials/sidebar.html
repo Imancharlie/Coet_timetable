@@ -1,14 +1,14 @@
-{% load core_tags %}
+﻿{% load core_tags %}
 {% nav_section as nav %}
 <aside id="app-sidebar"
        :class="(sidebarOpen ? 'translate-x-0' : '-translate-x-full') + ' ' + (collapsed ? 'lg:w-20' : 'lg:w-64')"
-       class="fixed lg:sticky top-0 left-0 z-40 h-screen w-64 bg-slate-900 text-slate-200 flex flex-col shrink-0 transition-[width,transform] duration-300 ease-in-out lg:translate-x-0">
+       class="fixed lg:sticky top-0 left-0 z-40 h-screen w-72 lg:w-64 bg-slate-900 text-slate-200 flex flex-col shrink-0 transition-[width,transform] duration-300 ease-in-out lg:translate-x-0">
     <div class="px-4 py-4 border-b border-slate-700 flex flex-col gap-2">
         <div class="tt-brand-row flex items-center justify-between gap-2" :class="collapsed ? 'lg:justify-center lg:gap-0' : ''">
             <a href="{% url 'dashboard' %}"
                :class="collapsed ? 'lg:max-w-0 lg:opacity-0' : 'lg:max-w-48 lg:opacity-100'"
-               class="tt-brand-link text-lg font-bold text-white tracking-tight truncate transition-all duration-300 min-w-0">
-                <span class="text-emerald-400">CoET</span> Timetable
+               class="tt-brand-link truncate transition-all duration-300 min-w-0">
+                {% include "partials/brand.html" %}
             </a>
             <button type="button"
                     @click="toggle()"
@@ -23,6 +23,10 @@
         </div>
         <p :class="collapsed ? 'lg:hidden' : ''" class="tt-hide-when-collapsed text-xs text-slate-400">Group Allocation &amp; Validation</p>
     </div>
+    {% comment %}Section children are indented one step (see .tt-section-body in
+    base.html) so a reader can tell a child page from a top-level entry at a
+    glance, on the mobile drawer and the desktop rail alike. The collapsed
+    rail zeroes the indent so its icons stay optically aligned.{% endcomment %}
     <nav class="flex-1 overflow-y-auto py-4 px-3 space-y-1 text-sm" @mouseleave="hideTooltip()">
         <a href="{% url 'dashboard' %}"
            aria-label="Dashboard"
@@ -36,8 +40,20 @@
             <span :class="collapsed ? 'lg:max-w-0 lg:opacity-0' : 'lg:max-w-44 lg:opacity-100'" class="truncate transition-all duration-300">Dashboard</span>
         </a>
 
-        <div :class="collapsed ? 'lg:my-2 lg:h-px lg:py-0 lg:overflow-hidden lg:bg-slate-700/50 lg:text-transparent' : ''"
-             class="tt-section px-3 pt-3 pb-1 text-xs font-semibold uppercase tracking-wider text-slate-500 transition-all duration-300">Reference Data</div>
+        {# ── Reference Data ── #}
+        <button type="button"
+                class="tt-section tt-section-toggle w-full flex items-center gap-2 text-left rounded-md px-3 pt-3 pb-1 text-xs font-semibold uppercase tracking-wider text-slate-500 transition-all duration-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 {% if nav|nav_is_any:'programmes,groups,venues,semesters,courses' %}is-active{% endif %}"
+                @click="toggleSection('reference')"
+                :aria-expanded="isSectionOpen('reference') ? 'true' : 'false'"
+                aria-controls="nav-section-reference"
+                :disabled="isSectionDivider()">
+            <svg class="tt-section-icon w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2 3.582 3 8 3s8-1 8-3V7M4 7c0 2 3.582 3 8 3s8-1 8-3-3.582-3-8-3-8 1-8 3z"/></svg>
+            <span class="tt-section-label flex-1 min-w-0">Reference Data</span>
+            <svg class="tt-section-chevron w-3.5 h-3.5 shrink-0 transition-transform duration-200"
+                 :class="isSectionOpen('reference') ? 'rotate-90' : ''"
+                 fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5l7 7-7 7"/></svg>
+        </button>
+        <div id="nav-section-reference" x-show="isSectionOpen('reference')" x-cloak class="tt-section-body space-y-1">
         <a href="{% url 'programme-list' %}"
            aria-label="Programmes"
            @mouseenter="showTooltip($el, 'Programmes')"
@@ -104,9 +120,22 @@
             <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
             <span :class="collapsed ? 'lg:max-w-0 lg:opacity-0' : 'lg:max-w-44 lg:opacity-100'" class="truncate transition-all duration-300">Semesters</span>
         </a>
+        </div>
 
-        <div :class="collapsed ? 'lg:my-2 lg:h-px lg:py-0 lg:overflow-hidden lg:bg-slate-700/50 lg:text-transparent' : ''"
-             class="tt-section px-3 pt-3 pb-1 text-xs font-semibold uppercase tracking-wider text-slate-500 transition-all duration-300">Timetable</div>
+        {# ── Timetable ── #}
+        <button type="button"
+                class="tt-section tt-section-toggle w-full flex items-center gap-2 text-left rounded-md px-3 pt-3 pb-1 text-xs font-semibold uppercase tracking-wider text-slate-500 transition-all duration-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 {% if nav|nav_is_any:'timetable,sessions,workshops' %}is-active{% endif %}"
+                @click="toggleSection('timetable')"
+                :aria-expanded="isSectionOpen('timetable') ? 'true' : 'false'"
+                aria-controls="nav-section-timetable"
+                :disabled="isSectionDivider()">
+            <svg class="tt-section-icon w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+            <span class="tt-section-label flex-1 min-w-0">Timetable</span>
+            <svg class="tt-section-chevron w-3.5 h-3.5 shrink-0 transition-transform duration-200"
+                 :class="isSectionOpen('timetable') ? 'rotate-90' : ''"
+                 fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5l7 7-7 7"/></svg>
+        </button>
+        <div id="nav-section-timetable" x-show="isSectionOpen('timetable')" x-cloak class="tt-section-body space-y-1">
         <a href="{% url 'timetable' %}"
            aria-label="Timetable View"
            @mouseenter="showTooltip($el, 'Timetable View')"
@@ -129,6 +158,33 @@
             <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"/></svg>
             <span :class="collapsed ? 'lg:max-w-0 lg:opacity-0' : 'lg:max-w-44 lg:opacity-100'" class="truncate transition-all duration-300">Master Timetable</span>
         </a>
+        <a href="{% url 'workshop-list' %}"
+           aria-label="Workshop Allocation"
+           @mouseenter="showTooltip($el, 'Workshop Allocation')"
+           @mouseleave="hideTooltip()"
+           @focus="showTooltip($el, 'Workshop Allocation')"
+           @blur="hideTooltip()"
+           :class="collapsed ? 'lg:justify-center lg:gap-0' : 'lg:justify-start lg:gap-3'"
+           class="relative flex items-center justify-start gap-3 px-3 py-2.5 rounded-lg transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 {{ nav|active_cls:'workshops' }}">
+            <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+            <span :class="collapsed ? 'lg:max-w-0 lg:opacity-0' : 'lg:max-w-44 lg:opacity-100'" class="truncate transition-all duration-300">Workshop Allocations</span>
+        </a>
+        </div>
+
+        {# ── Allocation ── #}
+        <button type="button"
+                class="tt-section tt-section-toggle w-full flex items-center gap-2 text-left rounded-md px-3 pt-3 pb-1 text-xs font-semibold uppercase tracking-wider text-slate-500 transition-all duration-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 {% if nav|nav_is_any:'allocation,allocation-progress' %}is-active{% endif %}"
+                @click="toggleSection('allocation')"
+                :aria-expanded="isSectionOpen('allocation') ? 'true' : 'false'"
+                aria-controls="nav-section-allocation"
+                :disabled="isSectionDivider()">
+            <svg class="tt-section-icon w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 4a2 2 0 110 4h1a1 1 0 011 1v1a1 1 0 11-2 0v-1a1 1 0 011-1h1M13 4a2 2 0 114 0h-4zM7 12a2 2 0 110-4h2a2 2 0 012 2v6a2 2 0 11-4 0v-6a2 2 0 012-2H7zm6 0a2 2 0 114 0v1a1 1 0 11-2 0v-1h-2zm4 2a2 2 0 110 4h-1a1 1 0 01-1-1v-1a1 1 0 011-1h1z"/></svg>
+            <span class="tt-section-label flex-1 min-w-0">Allocation</span>
+            <svg class="tt-section-chevron w-3.5 h-3.5 shrink-0 transition-transform duration-200"
+                 :class="isSectionOpen('allocation') ? 'rotate-90' : ''"
+                 fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5l7 7-7 7"/></svg>
+        </button>
+        <div id="nav-section-allocation" x-show="isSectionOpen('allocation')" x-cloak class="tt-section-body space-y-1">
         <a href="{% url 'allocation-page' %}"
            aria-label="Group Allocation"
            @mouseenter="showTooltip($el, 'Group Allocation')"
@@ -151,28 +207,7 @@
             <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
             <span :class="collapsed ? 'lg:max-w-0 lg:opacity-0' : 'lg:max-w-44 lg:opacity-100'" class="truncate transition-all duration-300">Group Progress</span>
         </a>
-        <a href="{% url 'workshop-list' %}"
-           aria-label="Workshop Allocation"
-           @mouseenter="showTooltip($el, 'Workshop Allocation')"
-           @mouseleave="hideTooltip()"
-           @focus="showTooltip($el, 'Workshop Allocation')"
-           @blur="hideTooltip()"
-           :class="collapsed ? 'lg:justify-center lg:gap-0' : 'lg:justify-start lg:gap-3'"
-           class="relative flex items-center justify-start gap-3 px-3 py-2.5 rounded-lg transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 {{ nav|active_cls:'workshops' }}">
-            <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
-            <span :class="collapsed ? 'lg:max-w-0 lg:opacity-0' : 'lg:max-w-44 lg:opacity-100'" class="truncate transition-all duration-300">Workshop Allocations</span>
-        </a>
-        <a href="{% url 'td-list' %}"
-           aria-label="TD Allocations"
-           @mouseenter="showTooltip($el, 'TD Allocations')"
-           @mouseleave="hideTooltip()"
-           @focus="showTooltip($el, 'TD Allocations')"
-           @blur="hideTooltip()"
-           :class="collapsed ? 'lg:justify-center lg:gap-0' : 'lg:justify-start lg:gap-3'"
-           class="relative flex items-center justify-start gap-3 px-3 py-2.5 rounded-lg transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 {{ nav|active_cls:'td' }}">
-            <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
-            <span :class="collapsed ? 'lg:max-w-0 lg:opacity-0' : 'lg:max-w-44 lg:opacity-100'" class="truncate transition-all duration-300">TD Allocations</span>
-        </a>
+        </div>
 
         <div :class="collapsed ? 'lg:my-2 lg:h-px lg:py-0 lg:overflow-hidden lg:bg-slate-700/50 lg:text-transparent' : ''"
              class="tt-section px-3 pt-3 pb-1 text-xs font-semibold uppercase tracking-wider text-slate-500 transition-all duration-300">Data Import</div>
@@ -226,20 +261,25 @@
             <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
             <span :class="collapsed ? 'lg:max-w-0 lg:opacity-0' : 'lg:max-w-44 lg:opacity-100'" class="truncate transition-all duration-300">Activity Log</span>
         </a>
-        {% activity_logs 6 as logs %}
-        {% for log in logs %}
-        <a href="{% url 'dashboard' %}?log={{ log.pk }}"
-           :class="collapsed ? 'lg:hidden' : ''"
-           class="tt-hide-when-collapsed flex items-start gap-2 px-2 py-1.5 rounded-lg transition hover:bg-slate-800/60 group">
-            <span class="mt-1.5 w-1.5 h-1.5 rounded-full {{ log.action|log_badge_cls }} shrink-0"></span>
-            <span class="min-w-0 flex-1 leading-snug">
-                <span class="block text-xs text-slate-300 group-hover:text-white truncate">{{ log.message|truncatechars:44 }}</span>
-                <span class="block text-[11px] text-slate-500">{{ log.created_at|timesince }} ago</span>
-            </span>
+
+        {% comment %}Danger Zone: the one link that leads to irreversible, whole-table
+        deletions. It sits last, on its own, because reaching it should be a
+        decision rather than something a coordinator scrolls past on the way to
+        the Activity Log. {% endcomment %}
+        <div :class="collapsed ? 'lg:my-2 lg:h-px lg:py-0 lg:overflow-hidden lg:bg-rose-500/30 lg:text-transparent' : ''"
+             class="tt-section px-3 pt-4 pb-1 text-xs font-semibold uppercase tracking-wider text-rose-400/80 transition-all duration-300">Danger Zone</div>
+        <a href="{% url 'danger-zone' %}"
+           id="nav-danger-zone"
+           aria-label="Danger Zone"
+           @mouseenter="showTooltip($el, 'Danger Zone')"
+           @mouseleave="hideTooltip()"
+           @focus="showTooltip($el, 'Danger Zone')"
+           @blur="hideTooltip()"
+           :class="collapsed ? 'lg:justify-center lg:gap-0' : 'lg:justify-start lg:gap-3'"
+           class="relative flex items-center justify-start gap-3 px-3 py-2.5 rounded-lg transition focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-400/70 {{ nav|active_cls:'danger' }}">
+            <svg class="w-5 h-5 shrink-0 text-rose-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+            <span :class="collapsed ? 'lg:max-w-0 lg:opacity-0' : 'lg:max-w-44 lg:opacity-100'" class="truncate transition-all duration-300">Clear all data</span>
         </a>
-        {% empty %}
-        <p :class="collapsed ? 'lg:hidden' : ''" class="tt-hide-when-collapsed px-3 py-2 text-xs text-slate-500">No activity yet.</p>
-        {% endfor %}
     </nav>
     <div :class="collapsed ? 'lg:hidden' : ''" class="tt-hide-when-collapsed px-5 py-3 border-t border-slate-700 text-xs text-slate-500">v0.1 — Phase 1</div>
 </aside>

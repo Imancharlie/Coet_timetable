@@ -1,0 +1,44 @@
+{# The allocation pages' own navigation bar: choose the term and the activity
+   scope, and get to the allocator. A self-contained control row rather than a
+   copy of the shared list toolbar, because the shared one is laid out with
+   flex and keeps needing classes patched onto it to stay inside a phone.
+
+   The tracks are `minmax(0, 1fr)`, not `1fr`. That is the whole trick: in CSS
+   grid a bare `1fr` is really `minmax(auto, 1fr)`, and the `auto` minimum is
+   the content's min-content size. A <select> wants to be as wide as its widest
+   option, so that minimum sets the track's floor, the track outgrows the
+   container and the whole document scrolls sideways. `minmax(0, 1fr)` removes
+   the floor, so a track can never be wider than the space it was given. #}
+<form method="get" action="."
+      class="grid grid-cols-1 gap-3 min-w-0
+             sm:grid-cols-2
+             lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]
+             lg:items-end">
+    <div class="min-w-0">
+        <label for="{{ nav_prefix }}-nav-semester"
+               class="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1.5">Semester</label>
+        <select name="semester" id="{{ nav_prefix }}-nav-semester" onchange="this.form.submit()"
+                class="w-full min-w-0 px-3 py-2.5 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+            {% for s in semesters %}
+            <option value="{{ s.pk }}" {% if semester and s.pk == semester.pk %}selected{% endif %}>{{ s }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div class="min-w-0">
+        <label for="{{ nav_prefix }}-nav-scope"
+               class="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1.5">Activities</label>
+        <select name="scope" id="{{ nav_prefix }}-nav-scope" onchange="this.form.submit()"
+                class="w-full min-w-0 px-3 py-2.5 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+            {% for value, label in scopes %}
+            <option value="{{ value }}" {% if scope == value %}selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    {# Own cell so it is not stretched by a track: `auto` sizes to the label. #}
+    <div class="min-w-0 sm:col-span-2 lg:col-span-1">
+        <a href="{% url 'allocation-page' %}"
+           class="inline-flex w-full items-center justify-center gap-1.5 px-4 py-2.5 text-sm font-medium text-gray-700 border border-gray-300 bg-white rounded-lg hover:bg-gray-50 transition">
+            Run the allocator
+        </a>
+    </div>
+</form>

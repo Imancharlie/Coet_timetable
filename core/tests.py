@@ -8,8 +8,11 @@ from pathlib import Path
 from unittest import mock
 
 import pandas as pd
+from django.conf import settings
+from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import DatabaseError, IntegrityError, transaction
 from django.db.models.deletion import ProtectedError
 from django.test import Client, TestCase
 from openpyxl import Workbook
@@ -53,6 +56,7 @@ from core.models import (
     AllocationStatus,
     Course,
     CourseActivityRequirement,
+    Day,
     ImportHistory,
     LogAction,
     Programme,
@@ -105,6 +109,7 @@ from core.venue_quality import (
     resolve_venue_name_conflict,
     suggested_name,
 )
+from core.views import _latest_semester_with_data, CLEAR_ALL_TARGETS
 from core.workshop_parser import parse_workbook
 from core.workshop_times import (
     allocation_programme_codes,
@@ -1041,6 +1046,23 @@ class ImportUploadViewTests(TestCase):
         self.assertIn("Created", resp.content.decode())
         self.assertTrue(Programme.objects.filter(code="CE").exists())
 
+    def test_the_submit_button_leaves_its_importing_state_when_the_request_ends(self):
+        """The busy state is cleared by the request finishing, not by a reload.
+
+        The button is disabled and reads "Importing..." while ``uploading`` is
+        true, and nothing else on the page ever clears it — the result panel
+        lands in a swap, the URL never changes. Without this handler the
+        coordinator is left with a stuck button above a finished result, and
+        the only way out is to reload the page.
+        """
+        html = self.client.get("/import/programmes/").content.decode()
+        self.assertIn('@submit="uploading = true"', html)
+        self.assertIn(
+            '@htmx:after-request.window="if ($event.detail.elt === $el)'
+            ' uploading = false"',
+            html,
+        )
+
     def test_plain_upload_returns_full_page_with_result(self):
         self.client.get("/import/programmes/")
         path = make_xlsx(
@@ -1762,6 +1784,311 @@ class ListFilterTests(TestCase):
         self.assertNotContains(resp, "NB102")
 
 
+class SidebarStructureTests(TestCase):
+    """The collapsible sections, the loader and the issue bell.
+
+    The committed student-portal work serves the portal at ``/`` and
+    ``StaffAccessMiddleware`` 302s anonymous clients away from staff URLs, so
+    these log in as staff and read the ``/staff/`` paths directly. Testing the
+    markup any other way would only ever measure the 302.
+    """
+
+    def setUp(self):
+        self.staff = User.objects.create_user(
+            "section-tester", password="pw", is_staff=True
+        )
+        self.client = Client()
+        self.client.force_login(self.staff)
+        self.semester = Semester.objects.create(academic_year="2026/2027", semester=1)
+        self.programme = Programme.objects.create(code="CE", name="Civil Engineering")
+
+    @staticmethod
+    def _sidebar(html):
+        """Just the aside, so the mobile bar's duplicate links don't count."""
+        start = html.index('id="app-sidebar"')
+        end = html.index("</aside>", start)
+        return html[start:end]
+
+    @staticmethod
+    def _topbar(html):
+        """Just the <header> bar, so the sidebar's wordmark doesn't count."""
+        start = html.index('<header class="topbar')
+        return html[start:html.index("</header>", start)]
+
+    def _html(self, path):
+        resp = self.client.get(path)
+        self.assertEqual(resp.status_code, 200, path)
+        return resp.content.decode()
+
+    def test_the_three_sections_exist_and_nothing_else_is_collapsible(self):
+        sidebar = self._sidebar(self._html("/staff/"))
+        for key, label in (
+            ("reference", "Reference Data"),
+            ("timetable", "Timetable"),
+            ("allocation", "Allocation"),
+        ):
+            self.assertIn('aria-controls="nav-section-%s"' % key, sidebar)
+            self.assertIn("toggleSection('%s')" % key, sidebar)
+            self.assertIn("isSectionOpen('%s')" % key, sidebar)
+            self.assertIn(label, sidebar)
+        # Import, Export, the Activity Log and the Danger Zone stay flat -- a
+        # section header on them would strand their links behind a chevron.
+        self.assertEqual(sidebar.count("toggleSection("), 3)
+        for flat in ("Import Data", "Export", "Activity Log", "Danger Zone"):
+            self.assertIn(flat, sidebar)
+            self.assertNotIn('aria-controls="nav-%s"' % flat.lower()[:6], sidebar)
+
+    def test_the_group_allocator_and_progress_share_the_allocation_section(self):
+        sidebar = self._sidebar(self._html("/staff/"))
+        block = sidebar[sidebar.index('id="nav-section-allocation"'):]
+        self.assertLess(block.index('href="/allocation/"'), block.index('href="/allocation/groups/"'))
+        # The progress board is "Group Progress" — the full name states what the
+        # page tracks, so it cannot be mistaken for the allocator's own progress.
+        # It still lives inside the collapsible Allocation section.
+        self.assertIn(">Group Progress<", block)
+        self.assertIn(">Group Allocation<", block)
+
+    def test_a_section_body_is_never_hid_without_a_persistent_key(self):
+        """Every x-show in the sidebar is bound to a key the store persists.
+
+        The store's own key list is what section state is written against; a
+        body bound to a key missing from it would open on load and refuse to
+        remember its state.
+        """
+        html = self._html("/staff/")
+        sidebar = self._sidebar(html)
+        keys = set(re.findall(r"isSectionOpen\('([a-z]+)'\)", sidebar))
+        self.assertEqual(keys, {"reference", "timetable", "allocation"})
+        store = html[html.index("Alpine.data('sidebar'"):]
+        for key in keys:
+            self.assertIn("'%s'" % key, store)
+        # Persistence is what makes a collapse survive a reload.
+        self.assertIn("coet.sidebar.sections", store)
+        self.assertIn("localStorage", store)
+        # A collapsed desktop rail must not be allowed to hide the icons, or
+        # the 16px sidebar would lose every child page.
+        self.assertIn("isSectionDivider()", sidebar)
+        self.assertIn(':disabled="isSectionDivider()"', sidebar)
+
+    def test_the_section_header_lights_up_for_every_link_it_contains(self):
+        """A page highlights its own section header as well as its own link.
+
+        The header carries ``nav|nav_is_any`` listing each child key, so a new
+        child link without a matching key would leave the header dark.
+        """
+        for path, header in (
+            ("/venues/", "nav-section-reference"),
+            ("/timetable/", "nav-section-timetable"),
+            ("/allocation/groups/", "nav-section-allocation"),
+        ):
+            sidebar = self._sidebar(self._html(path))
+            # Slice from the <button> itself: class comes before aria-controls.
+            at = sidebar.index('aria-controls="%s"' % header)
+            start = sidebar.rindex("<button", 0, at)
+            button = sidebar[start: sidebar.index("</button>", at)]
+            self.assertIn("is-active", button, path)
+
+    def test_td_allocation_is_reachable_but_not_listed(self):
+        """The view works; the sidebar link was dropped as unused."""
+        self.assertEqual(self.client.get("/td/").status_code, 200)
+        self.assertNotIn("TD Allocations", self._sidebar(self._html("/staff/")))
+
+    def test_a_tap_is_tinted_in_the_theme_instead_of_the_browsers_own_flash(self):
+        """A phone tap must look deliberate, the way it does in the portal.
+
+        Left to itself the browser paints a grey-blue box over whatever was
+        tapped, which on a themed button reads as a rendering fault, and the
+        student portal -- the first thing a user sees -- does not do it. The
+        dark chrome cannot carry the app blue either, so it gets a light wash.
+        """
+        html = self._html("/staff/")
+        self.assertIn("-webkit-tap-highlight-color: rgba(49, 93, 131, 0.22)", html)
+        self.assertIn(
+            ".topbar a, .topbar button, .mobile-bottom-nav a, .mobile-bottom-nav button",
+            html,
+        )
+        self.assertIn("rgba(255, 255, 255, 0.16)", html)
+        # :active has to reach the themed hovers, otherwise the press colour is
+        # gone the moment the finger lifts and only the flash is left.
+        for hover in ("hover:bg-blue-700", "hover:bg-emerald-700", "hover:bg-slate-800/60"):
+            block = html[html.index('[class~="%s"]' % hover):]
+            self.assertIn(":active", block[: block.index("}") + 1], hover)
+
+    def test_the_phone_top_bar_is_the_height_of_the_student_portals(self):
+        """Tapping through from the portal must not feel like the app shrank.
+
+        The portal's bar is `.7rem` of padding around a `2.8rem` menu, so
+        anything under 4.25rem is visibly smaller than the page the user just
+        came from.
+
+        The height is a `calc()` and not a `h-*` utility because it has to grow
+        by the notch inset as well -- see the next test. So the assertion is on
+        the rule, not on a class, and it also pins the no-dual-source point: a
+        height class back on the element would be a second value for the same
+        box and would silently drop the inset.
+        """
+        html = self._html("/staff/")
+        topbar = html[html.index('<header class="topbar'):]
+        self.assertNotIn("h-[4.25rem]", topbar[: topbar.index(">")])
+
+        rule = html[html.index("body .topbar {"):]
+        self.assertIn("height: calc(4.25rem + env(safe-area-inset-top))", rule[: rule.index("}") + 1])
+        self.assertIn("padding-top: env(safe-area-inset-top)", rule[: rule.index("}") + 1])
+
+    def test_the_dashboard_bar_names_the_app_rather_than_the_page(self):
+        """On the front door the bar wears the wordmark; elsewhere it names the page.
+
+        "Dashboard" in the bar of the dashboard said nothing a user could not
+        already see, while the sidebar rail was already stating the app's name in
+        the one form the brand has. Both now include ``partials/brand.html``, so
+        the cream-on-white pairing cannot be retyped and drift -- that is the
+        reason for the partial, and the reason the pair is asserted on both
+        bars rather than just the one being changed.
+
+        The size passed in is the bar's own type scale, a step below the rail's:
+        the phone's bar is narrower, and the link is the flex item that has to
+        truncate (``text-overflow`` does nothing on the inline span inside it),
+        so the wordmark gives way before the issue bell is pushed off the end.
+        """
+        topbar = self._topbar(self._html("/staff/"))
+        self.assertIn('aria-label="CoET Timetable, dashboard"', topbar)
+        self.assertIn('<span class="tt-brand-accent">CoET</span> Timetable', topbar)
+        # The link is the flex item, so `truncate` belongs to it and the size to
+        # the span inside -- `text-overflow` does nothing on the inline span, and
+        # a size on both would be two values for one box.
+        brand = topbar[topbar.index('class="tt-brand-text'):]
+        brand = brand[: brand.index("</a>")]
+        self.assertIn("text-base sm:text-lg lg:text-xl", brand)
+        link = topbar[: topbar.index('class="tt-brand-text')]
+        self.assertIn("truncate min-w-0", link)
+        self.assertNotIn("text-base sm:text-lg lg:text-xl", link)
+        # It is a link, not a second heading: dashboard.html owns the page's h1,
+        # and repeating "Dashboard" in the bar is exactly what is going away.
+        self.assertNotIn(">Dashboard</h1>", topbar)
+
+        sidebar = self._sidebar(self._html("/staff/"))
+        for shared in ('<span class="tt-brand-accent">CoET</span> Timetable', "tt-brand-text"):
+            self.assertIn(shared, sidebar)
+            self.assertIn(shared, topbar)
+
+        # Every other page still names itself -- a brand in the bar everywhere
+        # would leave the user with no idea which page they are on.
+        venues = self._topbar(self._html("/venues/"))
+        self.assertIn(">Venues</h1>", venues)
+        self.assertNotIn("tt-brand-text", venues)
+
+    def test_the_browsers_own_chrome_is_painted_in_the_theme_not_white(self):
+        """The pale URL bar is the one thing that says "this is a web page".
+
+        The OS draws that bar, so the app cannot colour it with CSS -- it has to
+        ask, via `theme-color`, and the media variants stop the OS inverting it
+        on a dark-mode phone. The light/dark pair matters as much as the base
+        tag: one untagged `theme-color` is a white bar on a dark-mode device.
+        """
+        html = self._html("/staff/")
+        self.assertIn('<meta name="theme-color" content="#244b6b">', html)
+        for scheme in ("light", "dark"):
+            self.assertIn(
+                'name="theme-color" media="(prefers-color-scheme: %s)" content="#244b6b"' % scheme,
+                html,
+            )
+
+    def test_the_app_can_be_installed_and_owns_the_status_bar(self):
+        """Standalone mode, so there is no browser furniture between the user and the app.
+
+        `black-translucent` is the iOS tag that actually does anything: it makes
+        the status bar transparent so the page's own navy sits behind it. It only
+        has that effect alongside `viewport-fit=cover`, which is why both are
+        asserted here -- the translucent status bar without the viewport fit just
+        leaves a white strip, which is the bug being fixed.
+        """
+        html = self._html("/staff/")
+        for tag in (
+            'name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"',
+            'name="apple-mobile-web-app-capable" content="yes"',
+            'name="mobile-web-app-capable" content="yes"',
+            'name="apple-mobile-web-app-status-bar-style" content="black-translucent"',
+        ):
+            self.assertIn(tag, html)
+
+        # The area above the document (the rubber-band region when a phone
+        # scrolls past the top) is <html>, not <body>, so it has to carry the
+        # navy itself or it flashes white where the app's colour should be.
+        self.assertIn("html { background: var(--coet-blue-dark); }", html)
+
+    def test_typing_in_a_field_never_flashes_a_tap_tint(self):
+        """A tinted flash over a field being typed into is pure noise."""
+        html = self._html("/staff/")
+        rule = html[html.index("input, textarea, select {"):]
+        self.assertIn("-webkit-tap-highlight-color: transparent", rule[: rule.index("}") + 1])
+
+    def test_the_loader_exists_and_ignores_htmx_writes(self):
+        html = self._html("/staff/")
+        self.assertIn('id="page-loader"', html)
+        # An htmx write swaps a fragment; a full-page loader over it would
+        # flash on every save.
+        self.assertIn("htmxDriven", html)
+        self.assertIn("afterRequest", html)
+        # A full navigation, a back/forward restore and a failed request all
+        # have to be able to take the overlay back down.
+        for event in ("beforeunload", "load", "pageshow"):
+            self.assertIn("addEventListener('%s'" % event, html)
+
+    def test_the_bell_counts_only_unresolved_issues(self):
+        from student_portal.models import CollisionReport
+
+        def report(**kw):
+            kw.setdefault("timetable_type", CollisionReport.TimetableType.TEACHING)
+            kw.setdefault("semester", self.semester)
+            return CollisionReport.objects.create(**kw)
+
+        # The bell lives in the top bar, not the sidebar.
+        self.assertIn('href="/staff/collision-reports/"', self._html("/staff/"))
+        self.assertNotIn("reported issue", self._html("/staff/"))  # nothing yet
+
+        report(description="Double booked")
+        self.assertIn("1 reported issue awaiting review", self._html("/staff/"))
+
+        report(description="Already fixed", status=CollisionReport.Status.RESOLVED)
+        self.assertIn("1 reported issue awaiting review", self._html("/staff/"))
+
+        report(description="Second open one")
+        self.assertIn("2 reported issues awaiting review", self._html("/staff/"))
+
+    def test_the_bell_degrades_to_zero_instead_of_taking_the_page_down(self):
+        """A missing table must cost the badge, not the page.
+
+        The processor swallows the database error so a half-migrated deploy
+        still renders every management page. Called directly rather than
+        through a page render, because the dashboard's own clash counter is a
+        separate query and is allowed to fail loudly on its own terms.
+        """
+        from core.context_processors import issue_notifications
+
+        with mock.patch("student_portal.models.CollisionReport") as broken:
+            broken.objects.exclude.return_value.count.side_effect = DatabaseError(
+                "no such table"
+            )
+            self.assertEqual(
+                issue_notifications(self._request()), {"open_issue_count": 0}
+            )
+        # And the real query still works, counting only unresolved rows.
+        self.assertEqual(issue_notifications(self._request()), {"open_issue_count": 0})
+
+    def _request(self):
+        from django.test import RequestFactory
+
+        request = RequestFactory().get("/staff/")
+        request.user = self.staff
+        return request
+
+    def test_the_allocation_page_says_simulate_not_calculate(self):
+        html = self._html("/allocation/")
+        self.assertIn("Simulate Allocation", html)
+        self.assertNotIn("Calculate Allocation", html)
+        self.assertIn("Simulating", html)  # the running state, too
+
+
 class ActivityLogTests(TestCase):
     """Sidebar vlogs: changes logged, clickable from dashboard, cancellable."""
 
@@ -1821,7 +2148,14 @@ class ActivityLogTests(TestCase):
         self.assertEqual(log.resource, "Programmes")
         self.assertIn("1 created", log.message)
 
-    def test_sidebar_lists_latest_events(self):
+    def test_the_sidebar_links_the_activity_log_but_does_not_preview_it(self):
+        """The latest-events list is gone from the sidebar; the page is not.
+
+        Six log lines under the Activity Log link pushed the Danger Zone -- the
+        only way to reach an irreversible action -- off the bottom of a laptop
+        sidebar, and a preview is a poor place for it anyway: the full log
+        filters and paginates, and every entry is a click away.
+        """
         ActivityLog.objects.create(
             action=LogAction.CREATE,
             message="Created Venue ZZZ99",
@@ -1830,9 +2164,15 @@ class ActivityLogTests(TestCase):
         )
         resp = self.client.get("/")
         html = resp.content.decode()
-        self.assertIn("Activity Log", html)
-        self.assertIn("Created Venue ZZZ99", html)
-        self.assertIn("/?log=", html)
+        start = html.index('id="app-sidebar"')
+        sidebar = html[start : html.index("</aside>", start)]
+        self.assertIn("Activity Log", sidebar)
+        self.assertIn('href="/activity/"', sidebar)
+        self.assertNotIn("Created Venue ZZZ99", sidebar)
+        # Nothing anywhere in the shell previews the log any more.
+        self.assertNotIn("No activity yet.", html)
+        # The full log still holds it, and the dashboard still takes ?log=.
+        self.assertContains(self.client.get("/activity/"), "Created Venue ZZZ99")
 
     def test_dashboard_shows_selected_log_and_cancel(self):
         log = ActivityLog.objects.create(
@@ -2922,7 +3262,13 @@ class WorkshopCellDisplayTests(TestCase):
         )
         self.assertEqual(resp.status_code, 200)
         html = resp.content.decode()
-        self.assertEqual(html.count("Course: Building"), 1)
+        # The grid and the narrow-screen agenda are two renderings of the same
+        # entries, so "once" is per view: a card must not repeat the workshop
+        # name that its venue already spells out.
+        self.assertIn("tt-agenda", html)
+        grid, _, agenda = html.partition('class="tt-agenda')
+        self.assertEqual(grid.count("Course: Building"), 1)
+        self.assertEqual(agenda.count("Course: Building"), 1)
         self.assertIn("Venue: Building", html)
         self.assertIn("Assigned groups: C2", html)
         self.assertNotIn("Building Building", html)
@@ -5527,7 +5873,7 @@ class DayTimeGridTests(TestCase):
         session = Session.objects.create(
             semester=self.sem,
             course_code="MT171",
-            activity_type="LECTURE",
+            activity_type="TUTORIAL",
             day="MONDAY",
             start_time="08:00",
             end_time="09:00",
@@ -5542,17 +5888,65 @@ class DayTimeGridTests(TestCase):
         html = resp.content.decode()
         # Box reads exactly like the Excel grid cells: header line, then
         # Course:/Venue:/Assigned groups: rows.
-        self.assertIn("Lecture, 08:00-09:00, Mon", html)
+        self.assertIn("Tutorial, 08:00-09:00, Mon", html)
         self.assertIn("Course: MT171", html)
         self.assertIn("Venue: NB102", html)
         self.assertIn("Assigned groups: C1", html)
         self.assertNotIn("Assigned groups: N/A", html)
 
+    def _grouped(self, course_code, activity_type, day, start, end, group=None):
+        """A session linked to a group, so it survives the programme filter.
+
+        A programme view only shows sessions that have ``SessionGroup`` links,
+        so every fixture below needs one or the page renders empty.
+        """
+        session = Session.objects.create(
+            semester=self.sem,
+            course_code=course_code,
+            activity_type=activity_type,
+            day=day,
+            start_time=start,
+            end_time=end,
+            venue=self.venue,
+        )
+        SessionGroup.objects.create(session=session, group=group or self.g)
+        return session
+
+    def _timetable_html(self, **params):
+        resp = self.client.get(
+            "/timetable/",
+            {"programme": self.prog.pk, "semester": self.sem.pk, **params},
+            HTTP_HOST="localhost",
+        )
+        self.assertEqual(resp.status_code, 200)
+        return resp.content.decode()
+
+    def test_lecture_card_omits_the_assigned_groups_line(self):
+        # A whole-cohort lecture is not "assigned" to anyone, so the line is
+        # left out of the box entirely rather than printed as "ALL" or a list.
+        # (The legend still names the concept, hence the check is on the card.)
+        self._grouped("MT171", "LECTURE", "MONDAY", "08:00", "09:00")
+        html = self._timetable_html()
+        self.assertIn("Lecture, 08:00-09:00, Mon", html)
+        self.assertIn("Course: MT171", html)
+        self.assertIn("Venue: NB102", html)
+        self.assertIn("tt-kind-lecture", html)
+        self.assertNotIn('class="tt-line groups"', html)
+
+    def test_assigned_groups_line_is_emphasised_in_blue(self):
+        # The groups line is the one a reader looks for, so it is drawn in the
+        # same blue the PDF exports use (GROUPS_STYLE in core/timetable_grid).
+        self._grouped("MT171", "SEMINAR", "MONDAY", "08:00", "09:00")
+        html = self._timetable_html()
+        self.assertIn('class="tt-line groups"', html)
+        self.assertIn("Assigned groups: C1", html)
+        self.assertRegex(html, r"\.tt-card \.groups \{[^}]*color:\s*#0b4f9e")
+
     def test_activity_card_groups_line_blank_without_groups(self):
         Session.objects.create(
             semester=self.sem,
             course_code="MT171",
-            activity_type="LECTURE",
+            activity_type="TUTORIAL",
             day="MONDAY",
             start_time="08:00",
             end_time="09:00",
@@ -5565,6 +5959,63 @@ class DayTimeGridTests(TestCase):
         html = resp.content.decode()
         self.assertIn("Course: MT171", html)
         self.assertRegex(html, r"Assigned groups:\s*</div>")
+
+    def test_grid_claims_the_full_page_width(self):
+        # The container is uncapped and the grid's overflow floor is the sum of
+        # its column minimums, so the table grows into whatever the sidebar
+        # leaves rather than stopping at a fixed max width.
+        self._grouped("MT171", "LECTURE", "MONDAY", "08:00", "09:00")
+        html = self._timetable_html()
+        self.assertIn("#tt-page { width: 100%; max-width: none; }", html)
+        self.assertIn("tt-table--grid", html)
+        self.assertIn("min-width: calc(var(--tt-day) + var(--tt-hour) * var(--tt-slot-count))", html)
+        # The overflow floor is fed the real number of hourly columns.
+        self.assertRegex(html, r'--tt-slot-count: \d+')
+        # The old 72rem cap on this page's own wrapper is gone (the base
+        # template still ships a max-w-6xl phone rule for every other page).
+        self.assertNotIn("max-width: 72rem", html)
+        self.assertNotIn('class="max-w-6xl', html)
+        # Collapsing the sidebar is what hands the grid its extra width, so the
+        # collapsed state has to be allowed to use it.
+        self.assertIn("html.tt-collapsed .tt-scroll", html)
+
+    def test_narrow_screens_get_an_agenda_of_the_same_sessions(self):
+        self._grouped("MT171", "LECTURE", "MONDAY", "08:00", "09:00")
+        self._grouped("CL111", "SEMINAR", "MONDAY", "10:00", "11:00")
+        html = self._timetable_html()
+        self.assertIn("tt-agenda", html)
+        # Both views are rendered from the same grid, so a session that is in
+        # the grid is in the agenda too.
+        self.assertIn("tt-agenda-day", html)
+        self.assertGreaterEqual(html.count("tt-card"), 4)
+        # A day with nothing on it says so instead of leaving a hole.
+        self.assertIn("Nothing scheduled", html)
+        # The grid is what prints; the agenda would print every session twice.
+        self.assertIn(".tt-agenda { display: none !important; }", html)
+
+    def test_day_entries_are_chronological_for_the_agenda(self):
+        late = self._entry(
+            key=("session", 2), day="MONDAY", hours={13}, course_code="B",
+            name="B", start="13:00", end="14:00",
+        )
+        early = self._entry(
+            key=("session", 1), day="MONDAY", hours={8, 9}, course_code="A",
+            name="A", start="08:00", end="09:55",
+        )
+        row = build_day_time_grid([late, early])["rows"][0]
+        self.assertEqual([e["course_code"] for e in row["entries"]], ["A", "B"])
+        # The lanes keep the same two sessions; the agenda list is an extra
+        # ordering of them, not a different set.
+        self.assertEqual(
+            sorted(
+                e["course_code"]
+                for lane in row["lanes"]
+                for cell in lane
+                if not cell.get("empty")
+                for e in cell["entries"]
+            ),
+            ["A", "B"],
+        )
 
     def test_activity_label_filter_maps_variants(self):
         from django.template import Template, Context
@@ -5579,6 +6030,73 @@ class DayTimeGridTests(TestCase):
         )
         out = tmpl.render({"request": None})
         self.assertEqual(out, "Lecture|Lecture|Tutorial|Practical|Seminar|Workshop")
+
+    def test_no_template_leaks_its_own_comment_markup(self):
+        """`{# #}` is single-line; a multi-line one renders as visible text.
+
+        Django's short comment syntax does not span newlines -- only
+        `{% comment %}` does. A long explanatory note written as
+        `{# line one\n   line two #}` is therefore emitted into the page
+        verbatim, which is how a navbar once showed a sentence about the
+        issue bell. This walks every template and fails on the pattern, so
+        the mistake cannot come back silently.
+        """
+        from pathlib import Path
+
+        # BASE_DIR, not django.__file__: walking the interpreter's
+        # site-packages would scan Django's own templates and find nothing.
+        root = Path(settings.BASE_DIR)
+        offenders = []
+        for path in sorted(root.rglob("*.html")):
+            if any(
+                part in {".venv", "venv", ".git", "node_modules", "__pycache__"}
+                for part in path.parts
+            ):
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            # An opener whose closing `#}` is not on the same line.
+            for match in re.finditer(r"\{#", text):
+                line_end = text.find("\n", match.start())
+                line = text[match.start(): line_end if line_end != -1 else len(text)]
+                if "#}" not in line:
+                    rel = path.relative_to(root).as_posix()
+                    offenders.append("%s: %s" % (rel, line.strip()[:70]))
+                    break
+        self.assertEqual(offenders, [], "multi-line {# #} comments leak to the page")
+
+    def test_every_template_actually_compiles(self):
+        """One unparsable template takes down every page that includes it.
+
+        ``sidebar.html`` once closed a ``{% comment %}`` with ``#}``, which
+        Django cannot parse: the template fails to *compile*, so every staff
+        page raised TemplateSyntaxError rather than merely rendering oddly.
+        Nothing caught it because the only tests that rendered a page never
+        got past the login redirect, so the bug sat in the tree being shipped.
+
+        Compiling rather than rendering is the point -- a template can be
+        unparsable and still be on disk looking fine.
+        """
+        from django.template.loader import get_template
+
+        root = Path(settings.BASE_DIR)
+        unparsable = []
+        for path in sorted(root.rglob("*.html")):
+            if any(
+                part in {".venv", "venv", ".git", "node_modules", "__pycache__"}
+                for part in path.parts
+            ):
+                continue
+            # Templates are addressed by name, and a stray .html under a
+            # directory that is not a template dir has no name to load by.
+            try:
+                name = path.relative_to(root / "templates").as_posix()
+            except ValueError:
+                continue
+            try:
+                get_template(name)
+            except Exception as exc:  # TemplateSyntaxError and friends
+                unparsable.append("%s: %s" % (name, str(exc).splitlines()[0][:80]))
+        self.assertEqual(unparsable, [], "templates that do not compile")
 
 
 class DeletionImpactTests(TestCase):
@@ -5974,19 +6492,32 @@ class ClearAllReferenceDataTests(TestCase):
         self.assertEqual(resp.status_code, 200)
         return resp.content.decode()
 
-    def test_list_pages_show_clear_all_button(self):
-        for url, label in [
-            ("/venues/", "Venues"),
-            ("/programmes/", "Programmes"),
-            ("/courses/", "Programme Courses"),
-            ("/groups/", "Student Groups"),
-        ]:
+    def test_list_pages_show_no_clear_all_button(self):
+        """The destructive action moved to the Danger Zone, off the list pages.
+
+        It used to sit in `list.html`'s toolbar, next to a search box and a set
+        of filters, which is the worst possible place for "delete everything" --
+        and the filters never limited it, so the amber note had to warn about
+        them. Nothing in the list UI may offer it now.
+        """
+        for url in (
+            "/venues/",
+            "/programmes/",
+            "/courses/",
+            "/groups/",
+            "/sessions/",
+            "/workshops/",
+            "/td/",
+            "/course-requirements/",
+        ):
             resp = self.client.get(url)
             html = resp.content.decode()
-            self.assertEqual(resp.status_code, 200)
-            self.assertIn("Clear All", html)
-            self.assertIn('id="record-total"', html)
-            self.assertIn(label, html)
+            self.assertEqual(resp.status_code, 200, url)
+            self.assertNotIn("Clear All", html, url)
+            self.assertNotIn("clear-all", html, url)
+            # The toolbar itself is untouched: records are still added and counted.
+            self.assertIn("Add New", html, url)
+            self.assertIn('id="record-total"', html, url)
 
     def test_confirm_get_heading_phrase_and_csrf(self):
         for url, label in [
@@ -6140,12 +6671,191 @@ class ClearAllReferenceDataTests(TestCase):
         self.assertEqual(ActivityLog.objects.count(), before)
         self.assertEqual(Venue.objects.count(), 0)
 
-def test_filters_note_when_query_active(self):
+    def test_filters_note_when_query_active(self):
         html = self._confirm("/venues/clear-all/", "?q=NB")
         self.assertIn("Filtered view", html)
-        self.assertNotIn("not limited", html)
+        self.assertIn("not limited", html)
         plain = self._confirm("/venues/clear-all/")
         self.assertNotIn("Filtered view", plain)
+
+
+class DangerZoneTests(TestCase):
+    """The one page holding every 'clear all' action.
+
+    The actions themselves are unchanged -- they are the same endpoints, the
+    same confirmation modal and the same typed phrase, and the two ClearAll
+    classes above still drive them. What is asserted here is that the board is
+    the only place they are reachable from, that it lists every one of them
+    with a live count, and that the sidebar gets staff to it.
+    """
+
+    ALL_TARGETS = (
+        ("/programmes/clear-all/", "Programmes"),
+        ("/groups/clear-all/", "Student Groups"),
+        ("/courses/clear-all/", "Programme Courses"),
+        ("/course-requirements/clear-all/", "Courses"),
+        ("/venues/clear-all/", "Venues"),
+        ("/sessions/clear-all/", "Sessions"),
+        ("/workshops/clear-all/", "Workshop Allocations"),
+        ("/td/clear-all/", "Technical Drawing Allocations"),
+    )
+
+    def setUp(self):
+        self.client = Client()
+        # The portal middleware 302s an anonymous client away from every staff
+        # URL, so log in as staff or every request here measures the redirect.
+        self.client.force_login(
+            User.objects.create_user("danger-tester", password="pw", is_staff=True)
+        )
+        self.sem = Semester.objects.create(academic_year="2026/2027", semester=1)
+        self.prog = Programme.objects.create(code="CE", name="Civil Engineering")
+        self.g1 = StudentGroup.objects.create(programme=self.prog, code="A1")
+        self.venue = Venue.objects.create(name="NB102", capacity=100)
+        self.mapping = ProgrammeCourse.objects.create(
+            programme=self.prog, course_code="MT161", course_name="Maths 1", semester=1
+        )
+        # Saving the link created the shared course record; both must be clearable.
+        self.course = Course.objects.get(code="MT161")
+        self.session = Session.objects.create(
+            semester=self.sem,
+            course_code="MT161",
+            activity_type="LECTURE",
+            day="MONDAY",
+            start_time="08:00",
+            end_time="10:00",
+            venue=self.venue,
+        )
+        self.link = SessionGroup.objects.create(session=self.session, group=self.g1)
+        self.workshop = WorkshopAllocation.objects.create(
+            semester=self.sem, course_code="TG201", group_code="A1", day="WEDNESDAY"
+        )
+        self.td = TechnicalDrawingAllocation.objects.create(
+            semester=self.sem,
+            course_code="TG201",
+            group_code="A1",
+            day="THURSDAY",
+            start_time="09:00",
+            end_time="12:00",
+            venue="TW101",
+        )
+
+    def test_the_board_offers_every_clear_all_and_nothing_else(self):
+        resp = self.client.get("/danger-zone/")
+        self.assertEqual(resp.status_code, 200)
+        html = resp.content.decode()
+        for clear_url, label in self.ALL_TARGETS:
+            with self.subTest(target=clear_url):
+                self.assertIn("openModal('%s'" % clear_url, html)
+                self.assertIn("Clear all %s" % label, html)
+        # One card per target, so the count matches the registry exactly.
+        # Counted on the onclick attribute: base.html also defines openModal().
+        self.assertEqual(html.count('onclick="openModal('), len(self.ALL_TARGETS))
+        # The board is a page about irreversible actions, so it says so.
+        self.assertIn("There is no undo", html)
+        self.assertIn("across the whole database", html)
+
+    def test_each_card_shows_the_live_count_of_what_it_would_delete(self):
+        html = self.client.get("/danger-zone/").content.decode()
+        self.assertIn("Every programme, and with it its student groups", html)
+        groups = self.client.get("/danger-zone/").context["groups"]
+        # Counts come from the same registry the endpoint deletes through.
+        for group in groups:
+            for target in group["targets"]:
+                with self.subTest(target=target["key"]):
+                    model = CLEAR_ALL_TARGETS[target["key"]]["model"]
+                    self.assertEqual(target["count"], model.objects.count())
+                    # A cascading target says so before the modal opens.
+                    self.assertEqual(
+                        target["has_records"],
+                        bool(
+                            target["count"]
+                            or target["related_total"]
+                            or target["detached_total"]
+                        ),
+                    )
+
+    def test_the_board_refreshes_its_counts_after_a_clear(self):
+        """A board that still says "1 session" after the clear would be a lie."""
+        html = self.client.get("/danger-zone/").content.decode()
+        # A swappable fragment with a stable id is what `refresh-table` targets.
+        self.assertIn('id="danger-zone-body"', html)
+        self.assertIn("hx-get=\"/danger-zone/\"", html)
+        self.assertIn("refresh from:window", html)
+        self.assertIn("htmx.trigger('#danger-zone-body', 'refresh')", html)
+        # The htmx GET serves the same fragment on its own, like a list view's table.
+        fragment = self.client.get("/danger-zone/", HTTP_HX_REQUEST="true")
+        self.assertEqual(fragment.status_code, 200)
+        body = fragment.content.decode()
+        self.assertIn('id="danger-zone-body"', body)
+        self.assertNotIn("<html", body)
+
+    def test_a_card_with_nothing_to_delete_offers_nothing(self):
+        for model in (
+            SessionGroup,
+            Session,
+            WorkshopAllocation,
+            TechnicalDrawingAllocation,
+            ProgrammeCourse,
+            Course,
+            StudentGroup,
+            Programme,
+        ):
+            model.objects.all().delete()
+        html = self.client.get("/danger-zone/").content.decode()
+        self.assertIn("Nothing to clear", html)
+        for clear_url, _label in self.ALL_TARGETS:
+            if clear_url == "/venues/clear-all/":
+                continue
+            self.assertNotIn("openModal('%s'" % clear_url, html)
+        # The one record left is the venue, and it is still clearable.
+        self.assertIn("openModal('/venues/clear-all/'", html)
+        self.assertEqual(html.count('onclick="openModal('), 1)
+
+    def test_clearing_from_the_board_runs_the_unchanged_endpoint(self):
+        """The board is a new door onto the old flow, not a second one."""
+        token = self.client.get("/danger-zone/").cookies["csrftoken"].value
+        preview = self.client.get(
+            "/sessions/clear-all/", HTTP_HX_REQUEST="true"
+        ).content.decode()
+        self.assertIn("csrfmiddlewaretoken", preview)
+        self.assertIn("DELETE ALL", preview)
+        resp = self.client.post(
+            "/sessions/clear-all/",
+            {"phrase": "DELETE ALL", "csrfmiddlewaretoken": token},
+            HTTP_HX_REQUEST="true",
+        )
+        self.assertEqual(resp.headers["HX-Trigger"], "close-modal,refresh-table")
+        self.assertEqual(Session.objects.count(), 0)
+        self.assertEqual(SessionGroup.objects.count(), 0)
+        log = ActivityLog.objects.get(action=LogAction.CLEAR)
+        self.assertIn("Cleared all Sessions", log.message)
+        # And the board now reports the sessions as gone.
+        self.assertNotIn("openModal('/sessions/clear-all/'", self.client.get("/danger-zone/").content.decode())
+
+    def test_the_sidebar_links_here_from_the_bottom(self):
+        html = self.client.get("/danger-zone/").content.decode()
+        start = html.index('id="app-sidebar"')
+        sidebar = html[start : html.index("</aside>", start)]
+        self.assertIn('href="/danger-zone/"', sidebar)
+        self.assertIn(">Clear all data</span>", sidebar)
+        # The section header names the area, the link names the action.
+        self.assertIn(">Danger Zone</div>", sidebar)
+        # It is the last link in the nav: getting here must not look routine.
+        self.assertLess(sidebar.index('href="/activity/"'), sidebar.index('href="/danger-zone/"'))
+        self.assertGreater(sidebar.index('href="/danger-zone/"'), sidebar.index('href="/allocation/groups/"'))
+        # The Danger Zone link is the one sidebar item tinted red.
+        self.assertIn("#nav-danger-zone:hover", html)
+        self.assertIn("#nav-danger-zone.bg-slate-800", html)
+
+    def test_the_link_lights_up_only_on_its_own_page(self):
+        for path, lit in (("/danger-zone/", True), ("/activity/", False), ("/venues/", False)):
+            with self.subTest(path=path):
+                html = self.client.get(path).content.decode()
+                start = html.index('id="app-sidebar"')
+                sidebar = html[start : html.index("</aside>", start)]
+                at = sidebar.index("nav-danger-zone")
+                link = sidebar[sidebar.rindex("<a ", 0, at) : sidebar.index("</a>", at)]
+                self.assertEqual("bg-slate-800 text-white" in link, lit, path)
 
 
 class ImportHistoryTests(TestCase):
@@ -6317,6 +7027,28 @@ class ImportHistoryTests(TestCase):
         self.assertIn("Previous Import Details", html)
         self.assertIn("hub_progs.xlsx", html)
         self.assertIn("SUCCESS", html)
+
+    def test_import_hub_hides_the_td_card_but_keeps_it_importable(self):
+        """The TD upload card is withdrawn from the hub, not deleted.
+
+        Hiding it is a presentation choice; the importer and the upload
+        endpoint keep working, so a coordinator who needs it can still post to
+        /import/upload/td-allocation/ directly.
+        """
+        hub = self.client.get("/import/").content.decode()
+        self.assertNotIn("TD Allocation", hub)
+        self.assertNotIn("import/td-allocation/", hub)
+        # Every other type still gets its card.
+        for key in ("programmes", "venues", "master-timetable", "workshop-allocation"):
+            self.assertIn("import/%s/" % key, hub)
+        # The type is still registered, so the upload view does not 400 with
+        # "Unknown import type" and its GET form still renders.
+        from core.views import IMPORT_TYPES
+
+        self.assertIn("td-allocation", IMPORT_TYPES)
+        form = self.client.get("/import/td-allocation/")
+        self.assertEqual(form.status_code, 200)
+        self.assertIn("TD Allocation", form.content.decode())
 
 
 class WorkshopStandardTimesTests(ImporterTestCase):
@@ -8694,7 +9426,7 @@ class AllocationPageTests(AllocationTestCase):
         resp = self.client.get("/allocation/")
         self.assertEqual(resp.status_code, 200)
         self.assertContains(resp, "Group Allocation")
-        self.assertContains(resp, "Calculate Allocation")
+        self.assertContains(resp, "Simulate Allocation")
         self.assertContains(resp, "Seminar")
         self.assertContains(resp, "Tutorial")
         self.assertContains(resp, "Practical")
@@ -8714,7 +9446,7 @@ class AllocationPageTests(AllocationTestCase):
         )
         self.assertEqual(resp.status_code, 200)
         self.assertContains(resp, "Allocation plan")
-        self.assertContains(resp, "Apply 4 assignment")
+        self.assertContains(resp, "Apply Allocation")
         self.assertEqual(SessionGroup.objects.count(), 0)
         self.assertEqual(AllocationRun.objects.count(), 1)
 
@@ -8740,6 +9472,57 @@ class AllocationPageTests(AllocationTestCase):
         )
         self.assertContains(resp, "requirement not configured")
         self.assertContains(resp, "ZZ999")
+
+    def test_the_plan_is_readable_on_a_phone_not_a_nine_column_table(self):
+        """The plan overflowed the viewport on a phone.
+
+        Nine columns cannot be read at 375px, and the page then forced a
+        horizontal scroll for the whole document. The rows are now presented
+        twice -- a labelled card list below `lg`, the table from `lg` up -- and
+        each presentation is hidden at the other one's breakpoint, so exactly
+        one is ever on screen and no field is dropped to achieve it.
+
+        The assertion is scoped to one view for that reason: "this text appears
+        once" is no longer true of the served HTML, exactly as with the
+        timetable's grid/agenda pair.
+        """
+        self._seed()
+        self._tutorial("MONDAY", 8, 9, self.hall)
+        resp = self.client.post(
+            "/allocation/preview/",
+            {"semester": self.semester.pk, "scope": "ALL"},
+        )
+        html = resp.content.decode()
+
+        cards = html[html.index('class="tt-plan-mobile'):]
+        cards = cards[: cards.index("hidden lg:block")]
+        table = html[html.index("hidden lg:block overflow-x-auto"):]
+
+        # A card carries every field the table row does, labelled, so nothing is
+        # lost by not showing the table.
+        for field in ("Group", "Course", "Day", "Time", "Venue",
+                      "Groups in session", "Capacity"):
+            self.assertIn(field, cards)
+        self.assertIn("MT161", cards)
+        # And the card list is the table's rows, not a different plan.
+        self.assertIn("MT161", table)
+
+        # Each presentation is hidden at the other's breakpoint, so the two
+        # never both render.
+        self.assertIn("lg:hidden", cards[: cards.index(">")])
+        self.assertTrue(table.startswith("hidden lg:block overflow-x-auto"))
+
+    def test_the_page_wrapper_cannot_be_pushed_wider_than_the_screen(self):
+        """A grid/flex item defaults to `min-width: auto`.
+
+        That is what let the plan's wide table widen the whole page instead of
+        scrolling inside `overflow-x-auto`, so the container itself has to opt
+        out. Asserted because the fix is a class that looks incidental.
+        """
+        self._seed()
+        resp = self.client.get("/allocation/")
+        html = resp.content.decode()
+        self.assertIn('class="max-w-7xl mx-auto space-y-4 min-w-0 overflow-x-hidden"', html)
 
     def test_apply_then_revert_through_the_views(self):
         self._seed()
@@ -9067,15 +9850,296 @@ class GroupProgressBoardTests(AllocationTestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.context["rows"], [])
 
+    def test_the_widest_cell_is_constrained_so_a_phone_is_not_scrolled_sideways(self):
+        """The board is one row of facts per group, so it stays a table at every width.
+
+        That makes the "Still needed" list the thing to watch: left unbounded it
+        is the widest thing in the row, and the table ends up far wider than a
+        phone, so the page has to be dragged sideways to read it. Constraining
+        that one cell (rather than only wrapping the container in an
+        `overflow-x-auto`, which does nothing while a child is that wide) is
+        what keeps the scroll to the table's own box.
+        """
+        html = self._board().content.decode()
+        self.assertIn("max-w-[16rem] sm:max-w-none", html)
+        self.assertIn("text-amber-800 break-safe", html)
+        # min-w-0 on the fragment and the scroll box, for the same reason
+        # min-width:auto would otherwise let the table widen the page.
+        self.assertIn('id="allocation-groups-board"\n     class="space-y-4 min-w-0"', html)
+        self.assertIn('class="overflow-x-auto min-w-0"', html)
+
+    def test_a_row_opens_that_group_in_the_slide_panel_from_anywhere_on_it(self):
+        """A tap anywhere on a row is enough -- the last column is not the way in.
+
+        The board is the working view, so reaching the placement form should not
+        mean travelling to the end of the row, or to another page.
+        """
+        row = self._board().context["rows"][0]
+        self.assertEqual(
+            row.slide_url,
+            f"/allocation/group/{row.group.pk}/slide/"
+            f"?semester={self.semester.pk}&scope=ALL",
+        )
+        resp = self._board()
+        self.assertContains(
+            resp, f'hx-get="{row.slide_url.replace("&", "&amp;")}"'
+        )
+        self.assertContains(resp, 'hx-target="#slide-content"')
+        self.assertContains(resp, '@click="slideOpen = true"')
+
+    def test_the_row_keeps_its_own_link_without_opening_the_panel_over_it(self):
+        row = self._board().context["rows"][0]
+        self.assertContains(self._board(), "@click.stop")
+
+    def test_the_slide_serves_the_group_panel_the_page_would_show(self):
+        row = self._board().context["rows"][0]
+        resp = self.client.get(row.slide_url, HTTP_HX_REQUEST="true")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.context["group"], row.group)
+        self.assertContains(resp, 'id="allocation-requirements"')
+        self.assertContains(resp, self.a1.code)
+        # The programme the narrow-screen table drops is named in the panel.
+        self.assertContains(resp, self.a1.programme.name)
+        # And there is still a way through to the full page.
+        self.assertContains(resp, f"/allocation/group/{row.group.pk}/")
+
+    def test_the_programme_column_is_scoped_away_on_a_narrow_screen_not_dropped(self):
+        resp = self._board()
+        # Hidden below md, back from md up -- a phone loses the width, not the
+        # column, and the panel still names the programme.
+        self.assertContains(resp, "hidden md:table-cell")
+        self.assertContains(resp, self.a1.programme.code)
+        self.assertContains(resp, "hidden sm:table-cell")
+
+    def test_the_board_is_served_on_its_own_so_a_placement_can_redraw_it(self):
+        resp = self.client.get(
+            f"/allocation/groups/?semester={self.semester.pk}&scope=ALL",
+            HTTP_HX_REQUEST="true",
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertTemplateUsed(resp, "core/_allocation_groups_board.html")
+        # The fragment carries the filters it is showing, so a refresh cannot
+        # quietly redraw the board against a different semester.
+        self.assertContains(resp, 'id="allocation-groups-board"')
+        self.assertContains(
+            resp,
+            f'hx-get="/allocation/groups/?semester={self.semester.pk}&amp;scope=ALL"',
+        )
+
+    def test_a_placement_made_from_the_panel_asks_the_board_to_redraw(self):
+        """Otherwise the row the panel was opened from keeps claiming the work."""
+        row = self._board().context["rows"][0]
+        entry = self.client.get(
+            row.slide_url, HTTP_HX_REQUEST="true"
+        ).context["status"].entries[0]
+        resp = self.client.post(
+            "/allocation/assign/",
+            {
+                "group": self.a1.pk,
+                "session": entry.options[0].session.pk,
+                "panel": "1",
+                "semester": self.semester.pk,
+                "scope": "ALL",
+            },
+            HTTP_HX_REQUEST="true",
+        )
+        self.assertIn("refresh-table", resp["HX-Trigger"])
+
     def test_the_sidebar_lights_up_group_progress_here_and_the_allocator_elsewhere(self):
         board = self._board()
         nav = board.context["nav"]
         self.assertEqual(nav, "allocation-progress")
-        self.assertContains(board, "Group Progress")
+        # The link is labelled "Group Progress", and it lives inside the
+        # collapsible Allocation section rather than beside the allocator.
+        self.assertContains(board, ">Group Progress<")
+        self.assertContains(board, 'aria-label="Group Progress"')
         # The allocator link must not be the one that looks active.
         self.assertEqual(
             self.client.get("/allocation/").context["nav"], "allocation"
         )
+
+
+class AllocationDefaultsToCurrentSemesterTests(AllocationTestCase):
+    """A bare visit to an allocation page means the term the app is working in.
+
+    These pages used to fall back to ``Semester.objects.all()[0]`` -- an
+    unordered queryset, so which term the coordinator landed on was the
+    database's row order rather than a decision. The dashboard already defaults
+    to the current semester; the allocator and the progress board now do the
+    same, so every page agrees about which term it is showing.
+
+    ``_seed`` creates 2026/2027 semester 1 first and semester 2 second, so the
+    *newest* term and the *first-created* term are different rows. Marking
+    semester 2 current therefore distinguishes "honours the current semester"
+    from the old "whichever row came out first", instead of passing by accident.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # These are management pages, so the client has to be a staff member --
+        # StaffAccessMiddleware 302s an anonymous one before the view runs, and
+        # a test that never reaches the view verifies nothing.
+        self.client.force_login(
+            User.objects.create_user(
+                "allocation-tester", password="pw", is_staff=True
+            )
+        )
+        self._seed(requirements={"TUTORIAL": 1})
+        self.tutorial = self._tutorial("MONDAY", 8, 9, self.hall)
+
+    def test_the_progress_board_opens_on_the_current_semester(self):
+        Semester.set_current(self.other_semester)
+        self.assertEqual(
+            self.client.get("/allocation/groups/").context["semester"],
+            self.other_semester,
+        )
+
+    def test_the_allocator_opens_on_the_current_semester(self):
+        Semester.set_current(self.other_semester)
+        self.assertEqual(
+            self.client.get("/allocation/").context["semester"],
+            self.other_semester,
+        )
+
+    def test_a_group_page_opens_on_the_current_semester(self):
+        Semester.set_current(self.other_semester)
+        self.assertEqual(
+            self.client.get(f"/allocation/group/{self.a1.pk}/").context["semester"],
+            self.other_semester,
+        )
+
+    def test_the_slide_and_the_panel_agree_with_the_page(self):
+        """A placement from a board row must not redraw against another term."""
+        Semester.set_current(self.other_semester)
+        for url in (
+            f"/allocation/group/{self.a1.pk}/slide/",
+            f"/allocation/group/{self.a1.pk}/panel/",
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(
+                    self.client.get(url).context["semester"], self.other_semester
+                )
+
+    def test_an_explicit_picker_still_wins_over_the_current_semester(self):
+        Semester.set_current(self.other_semester)
+        self.assertEqual(
+            self.client.get(
+                f"/allocation/groups/?semester={self.semester.pk}"
+            ).context["semester"],
+            self.semester,
+        )
+
+    def test_with_no_current_semester_it_falls_back_to_the_newest(self):
+        """The documented default, and now ordered rather than incidental."""
+        Semester.set_current(None)
+        self.assertEqual(
+            self.client.get("/allocation/groups/").context["semester"],
+            self.other_semester,
+        )
+
+    def test_a_current_semester_with_no_data_is_still_honoured(self):
+        """Unlike the exports, which skip an empty term to avoid a blank sheet.
+
+        An empty board is the honest answer for a term nothing has been
+        imported into; quietly listing a *different* term's groups is not.
+        """
+        empty = Semester.objects.create(academic_year="2025/2026", semester=2)
+        Semester.set_current(empty)
+        resp = self.client.get("/allocation/groups/")
+        self.assertEqual(resp.context["semester"], empty)
+        self.assertEqual(resp.context["rows"], [])
+
+    def test_a_database_with_no_semesters_at_all_is_still_graceful(self):
+        Semester.objects.all().delete()
+        for url in ("/allocation/", "/allocation/groups/"):
+            with self.subTest(url=url):
+                self.assertEqual(self.client.get(url).status_code, 200)
+
+
+class AllocationScopePickerTests(AllocationTestCase):
+    def setUp(self):
+        super().setUp()
+        self.client.force_login(
+            User.objects.create_user(
+                "scope-picker-tester", password="pw", is_staff=True
+            )
+        )
+        self._seed()
+
+    def test_the_widest_scope_option_is_just_all_activities(self):
+        """It sat in a bare flex row, so the longest option set the page width."""
+        for url in (
+            "/allocation/",
+            "/allocation/groups/",
+            f"/allocation/group/{self.a1.pk}/",
+        ):
+            with self.subTest(url=url):
+                resp = self.client.get(url)
+                self.assertContains(resp, "All activities")
+                self.assertNotContains(resp, "All configured activities")
+
+    def test_the_navigation_bar_cannot_widen_the_page(self):
+        """The nav bar's own component, and the one thing that actually bounds it.
+
+        Its tracks are `minmax(0, 1fr)`, not `1fr`. A bare `1fr` in CSS grid is
+        really `minmax(auto, 1fr)`, and the `auto` minimum is the content's
+        min-content size -- a <select> wants to be as wide as its widest
+        option, so that minimum sets the track's floor, the track outgrows the
+        container and the document scrolls sideways. Zeroing the minimum is the
+        fix; per-element `min-w-0` alone never was, because it bounds the
+        control without bounding the track it sits in.
+
+        Asserted on the partial, so the two pages cannot drift apart, plus on
+        each served page, so the partial cannot be quietly dropped.
+        """
+        partial = (
+            Path(settings.BASE_DIR) / "templates" / "core" / "_allocation_nav.html"
+        ).read_text(encoding="utf-8")
+        # The layout classes, not the whole file: the note above them explains
+        # the rule in prose and would otherwise be counted as more tracks.
+        form = re.search(r'<form method="get".*?>', partial, re.S).group(0)
+        tight = re.search(r'class="([^"]*)"', form, re.S).group(1)
+        tight = "".join(tight.split())
+        self.assertIn("minmax(0,1fr)", tight)
+        self.assertEqual(
+            tight.count("1fr"),
+            tight.count("minmax(0,1fr)"),
+            "a grid track is not minmax(0, 1fr)",
+        )
+
+        for url in (
+            "/allocation/groups/",
+            f"/allocation/group/{self.a1.pk}/",
+        ):
+            with self.subTest(url=url):
+                html = self.client.get(url).content.decode()
+                self.assertIn("minmax(0,1fr)", html.replace(" ", ""))
+                for name in ("scope", "semester"):
+                    tag = re.search(
+                        r"<select name=\"%s\".*?>" % name, html, re.S
+                    ).group(0)
+                    self.assertIn("w-full", tag)
+                    self.assertIn("min-w-0", tag)
+
+    def test_the_navigation_bar_is_its_own_component(self):
+        """One partial, included by both pages, so the fix lives in one place."""
+        for page in ("allocation_groups.html", "allocation_group.html"):
+            with self.subTest(page=page):
+                body = (
+                    Path(settings.BASE_DIR) / "templates" / "core" / page
+                ).read_text(encoding="utf-8")
+                self.assertIn('_allocation_nav.html', body)
+                # The pages must not carry their own copy of the pickers.
+                self.assertNotIn('<select name="scope"', body)
+
+    def test_the_navigation_button_is_the_same_height_as_the_pickers(self):
+        """The bar read as a misaligned strip because the button was taller."""
+        html = self.client.get("/allocation/groups/").content.decode()
+        button = re.search(r"<a [^>]*?>\s*Run the allocator", html, re.S)
+        self.assertIsNotNone(button, "the allocator button is missing")
+        tag = re.search(r"<a [^>]*>", button.group(0), re.S).group(0)
+        # Same vertical padding as the selects, or the row is a ragged edge.
+        self.assertIn("py-2.5", tag)
 
 
 class GroupPlacementPageTests(AllocationTestCase):
@@ -9897,3 +10961,171 @@ class AllocationAppearsInExportsTests(AllocationTestCase):
         out = io.BytesIO()
         render_group_timetable(self.a1, self.semester, out=out)
         self.assertGreater(len(out.getvalue()), 1000)
+
+class CurrentSemesterTests(TestCase):
+    """One current semester, set from the semesters list and used as the default.
+
+    Staff were previously told to pick a term on every page, and the only
+    persisted default lived in the student-portal settings, reachable only
+    through the Django admin and only for superusers. These cover the value
+    being single, being settable from the list, and being the fallback the
+    dashboard, the exports and the portal actually read.
+    """
+
+    def setUp(self):
+        self.staff = User.objects.create_user(
+            "semester-tester", password="pw", is_staff=True
+        )
+        self.client = Client()
+        self.client.force_login(self.staff)
+        self.old = Semester.objects.create(academic_year="2025/2026", semester=2)
+        self.new = Semester.objects.create(academic_year="2026/2027", semester=1)
+
+    def test_no_semester_is_current_until_one_is_chosen(self):
+        self.assertIsNone(Semester.current())
+        Semester.set_current(self.new)
+        self.assertEqual(Semester.current(), self.new)
+        self.assertEqual(Semester.objects.filter(is_current=True).count(), 1)
+
+    def test_setting_a_second_semester_never_leaves_two_current(self):
+        Semester.set_current(self.new)
+        Semester.set_current(self.old)
+        self.assertEqual(Semester.current(), self.old)
+        self.assertFalse(Semester.objects.get(pk=self.new.pk).is_current)
+
+    def test_clearing_leaves_nothing_current_rather_than_guessing(self):
+        Semester.set_current(self.new)
+        Semester.set_current(None)
+        self.assertIsNone(Semester.current())
+        self.assertEqual(Semester.objects.filter(is_current=True).count(), 0)
+
+    def test_the_database_refuses_a_second_current_semester(self):
+        """The flag is not merely checked in Python: the constraint is the backstop.
+
+        Every in-app writer goes through set_current, but a raw save() -- a
+        management command, a fixture, a future view -- must not be able to
+        leave a page reading two different "current" terms.
+        """
+        Semester.objects.filter(pk=self.new.pk).update(is_current=True)
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            Semester.objects.filter(pk=self.old.pk).update(is_current=True)
+
+    def _post(self, semester):
+        return self.client.post(
+            "/semesters/%d/current/" % semester.pk, HTTP_HX_REQUEST="true"
+        )
+
+    def test_the_list_offers_a_make_and_an_unset_action_per_row(self):
+        html = self.client.get("/semesters/").content.decode()
+        # The action states what it will do, so a second click cannot silently
+        # clear the term the app is working in.
+        self.assertIn("Make current", html)
+        self.assertIn('hx-post="/semesters/%d/current/"' % self.new.pk, html)
+        self.assertIn("No current semester set", html)
+
+    def test_the_current_row_offers_unset_instead_of_make(self):
+        Semester.set_current(self.new)
+        html = self.client.get("/semesters/").content.decode()
+        self.assertIn("Current semester: 2026/2027 - Semester 1", html)
+        self.assertIn("Unset current", html)
+
+    def test_the_action_sets_the_semester_and_logs_it(self):
+        resp = self._post(self.new)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(Semester.current(), self.new)
+        self.assertEqual(resp["HX-Trigger"], "close-modal,refresh-table")
+        self.assertTrue(
+            ActivityLog.objects.filter(
+                message__icontains="as the current semester"
+            ).exists()
+        )
+
+    def test_the_action_twice_clears_the_flag(self):
+        self._post(self.new)
+        self._post(self.new)
+        self.assertIsNone(Semester.current())
+        self.assertTrue(
+            ActivityLog.objects.filter(
+                message__icontains="Unset the current semester"
+            ).exists()
+        )
+
+    def test_a_get_only_bounces_to_the_list(self):
+        resp = self.client.get("/semesters/%d/current/" % self.new.pk)
+        self.assertEqual(resp.status_code, 302)
+        self.assertIsNone(Semester.current())
+
+    def test_the_dashboard_defaults_to_the_current_semester(self):
+        Semester.set_current(self.old)
+        resp = self.client.get("/staff/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.context["selected_semester"], self.old)
+
+    def test_the_dashboard_still_answers_to_an_explicit_picker(self):
+        Semester.set_current(self.old)
+        resp = self.client.get("/staff/", {"semester": self.new.pk})
+        self.assertEqual(resp.context["selected_semester"], self.new)
+
+    def test_the_import_form_preselects_the_current_semester(self):
+        """The master-timetable import writes to exactly the semester named here,
+        so the default has to be the term staff are working in, not row one."""
+        Semester.set_current(self.old)
+        html = self.client.get("/import/master-timetable/").content.decode()
+        self.assertIn(
+            '<option value="%d" selected' % self.old.pk, html
+        )
+
+    def test_an_export_falls_back_to_the_current_semester_when_it_has_data(self):
+        Semester.set_current(self.new)
+        venue = Venue.objects.create(name="LH1", capacity=80)
+        Session.objects.create(
+            semester=self.new,
+            course_code="MT161",
+            activity_type=ActivityType.LECTURE,
+            day=Day.MONDAY,
+            start_time=time(8, 0),
+            end_time=time(10, 0),
+            venue=venue,
+        )
+        self.assertEqual(_latest_semester_with_data(), self.new)
+
+    def test_a_current_semester_with_no_data_does_not_export_a_blank_sheet(self):
+        """Marking a term current before importing into it must not make the
+        exports hand the reader an empty timetable: the newest semester that
+        holds data still wins."""
+        Session.objects.create(
+            semester=self.old,
+            course_code="MT161",
+            activity_type=ActivityType.LECTURE,
+            day=Day.MONDAY,
+            start_time=time(8, 0),
+            end_time=time(10, 0),
+        )
+        Semester.set_current(self.new)
+        self.assertEqual(_latest_semester_with_data(), self.old)
+
+    def test_the_portal_reads_the_app_wide_current_semester(self):
+        from student_portal.views import current_semester
+
+        Semester.set_current(self.old)
+        self.assertEqual(current_semester(), self.old)
+
+    def test_an_empty_portal_settings_row_does_not_mask_the_current_semester(self):
+        """A settings row is a required, singleton override -- creating one is a
+        deliberate act, so a fresh database leaves the portal on the app-wide
+        current semester rather than on nothing."""
+        from student_portal.models import PortalSettings
+        from student_portal.views import current_semester
+
+        self.assertEqual(PortalSettings.objects.count(), 0)
+        Semester.set_current(self.old)
+        self.assertEqual(current_semester(), self.old)
+
+    def test_the_portal_override_still_wins_when_it_names_a_semester(self):
+        """The portal can be pointed at a different term than the staff tools."""
+        from student_portal.models import PortalSettings
+        from student_portal.views import current_semester
+
+        Semester.set_current(self.old)
+        PortalSettings.objects.create(current_semester=self.new)
+        self.assertEqual(current_semester(), self.new)

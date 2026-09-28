@@ -9,20 +9,21 @@
     <style>
         :root{--ink:#172b3b;--muted:#526675;--blue:#315d83;--blue-dark:#244b6b;--blue-pale:#eaf1f6;--green:#16836f;--green-dark:#126956;--green-pale:#e9f5f1;--line:#d8e1e7;--surface:#fff;--canvas:#f2f5f7;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color:var(--ink);background:var(--canvas);font-synthesis:none}
         *{box-sizing:border-box}body{margin:0;min-height:100vh}a{color:var(--blue)}button,input,select,textarea{font:inherit}
-        .top{background:var(--blue-dark);color:#fff;padding:.7rem max(1rem,env(safe-area-inset-left));box-shadow:0 2px 10px #18364c24}
+        .top{background:var(--blue-dark);color:#fff;padding:.7rem max(1rem,env(safe-area-inset-left));box-shadow:0 2px 10px #18364c24;position:fixed;top:0;left:0;right:0;z-index:100}
         .top-inner,.wrap{width:min(100%,64rem);margin:auto}.top-inner{display:flex;align-items:center;justify-content:space-between;gap:1rem}.brand{font-size:1.08rem;font-weight:750;color:white;text-decoration:none;letter-spacing:.01em}.menu{position:relative}.menu summary{list-style:none;cursor:pointer;min-height:2.8rem;display:flex;align-items:center;gap:.45rem;padding:.5rem .8rem;border:1px solid #ffffff65;border-radius:.65rem;font-weight:650}.menu summary::-webkit-details-marker{display:none}.menu summary:focus-visible,.menu a:focus-visible{outline:3px solid #c7e5df;outline-offset:2px}.menu nav{position:absolute;z-index:5;right:0;top:calc(100% + .5rem);width:min(17rem,calc(100vw - 2rem));padding:.4rem;background:#fff;color:var(--ink);border:1px solid var(--line);border-radius:.75rem;box-shadow:0 12px 28px #102a4326}.menu nav a{display:block;padding:.8rem .75rem;border-radius:.5rem;text-decoration:none;font-weight:600;color:var(--blue-dark)}.menu nav a:hover,.menu nav a:focus-visible{background:var(--blue-pale);color:var(--blue-dark)}
-        main{padding:1rem;padding-bottom:calc(2rem + env(safe-area-inset-bottom))}.card{background:var(--surface);border:1px solid var(--line);border-radius:1rem;padding:1.1rem;box-shadow:0 5px 18px #18364c0c;margin:0 0 1rem}
+        main{padding:1rem;padding-top:5rem;padding-bottom:calc(2rem + env(safe-area-inset-bottom))}.card{background:var(--surface);border:1px solid var(--line);border-radius:1rem;padding:1.1rem;box-shadow:0 5px 18px #18364c0c;margin:0 0 1rem}
         h1{font-size:1.45rem;line-height:1.2;margin:0 0 .45rem;color:var(--ink)}h2{font-size:1.1rem;margin:0 0 .5rem;color:var(--ink)}.muted{color:var(--muted);font-size:.93rem;line-height:1.55;margin:.25rem 0 1rem}
-        .field{display:block;margin:1rem 0}.field label{display:block;font-weight:650;font-size:.92rem;margin-bottom:.4rem}.field-control{display:block;width:100%;min-height:3rem;padding:.7rem .8rem;border:1px solid #aabac5;border-radius:.65rem;background:#fff;color:var(--ink)}.field-control:focus{outline:3px solid #b8d8e8;outline-offset:1px;border-color:var(--blue)}.field-control:disabled{background:#f1f4f6;color:#62717a}.small-note{font-size:.82rem;color:var(--muted);margin:.45rem 0}
-        .button{width:100%;min-height:3.1rem;border:0;border-radius:.7rem;background:var(--blue);color:white;font-weight:700;text-align:center;padding:.8rem 1rem;text-decoration:none;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:background .15s,transform .15s}.button:hover:not(:disabled){background:var(--blue-dark);transform:translateY(-1px)}.form-grid{display:grid;gap:0 1rem}@media(min-width:640px){.form-grid{grid-template-columns:1fr 1fr}.form-grid .field-wide{grid-column:1/-1}}.button:disabled{opacity:.52;cursor:not-allowed}.button.secondary{background:var(--green-pale);color:var(--green-dark);border:1px solid #b9ddd1}.button.secondary:hover:not(:disabled){background:#d9eee6}.links{display:grid;gap:.7rem}.error{color:#9b1c1c;background:#fff1f1;border:1px solid #fecaca;border-radius:.6rem;padding:.65rem;margin:.35rem 0;font-size:.9rem}.notice{border-left:4px solid var(--green);background:var(--green-pale);padding:.8rem;border-radius:.4rem;font-size:.9rem}.actions{display:grid;gap:.7rem;margin-top:1.2rem}.foot{text-align:center;font-size:.82rem;color:var(--muted);padding:1rem}.ref{font-size:1.08rem;font-weight:750;overflow-wrap:anywhere}
+        .field{display:block;margin:1rem 0}.field label{display:block;font-weight:650;font-size:.92rem;margin-bottom:.4rem}.field-control{display:block;width:100%;min-height:3rem;padding:.7rem .8rem;border:1px solid #aabac5;border-radius:.65rem;background:#fff;color:var(--ink)}.field-control:focus{outline:3px solid #b8d8e8;outline-offset:1px;border-color:var(--blue)}.field-control:disabled{background:#f1f4f6;color:#62717a;cursor:not-allowed}.small-note{font-size:.82rem;color:var(--muted);margin:.45rem 0}.hidden-input{display:none}
+        .custom-select{position:relative;width:100%;display:block}.select-button{display:flex;justify-content:space-between;align-items:center;width:100%;min-height:3rem;padding:.7rem .8rem;border:1px solid #aabac5;border-radius:.65rem;background:#fff;color:var(--ink);font:inherit;cursor:pointer;text-align:left;transition:border-color .15s,box-shadow .15s}.select-button:hover:not(:disabled){border-color:var(--blue)}.select-button:focus{outline:3px solid #b8d8e8;outline-offset:1px;border-color:var(--blue)}.select-button:disabled{background:#f1f4f6;color:#62717a;cursor:not-allowed}.select-button .selected-value{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.select-button .arrow{width:0;height:0;border-left:5px solid transparent;border-right:5px solid transparent;border-top:6px solid var(--blue);transition:transform .2s;flex-shrink:0;margin-left:.5rem}.select-button[aria-expanded="true"] .arrow{transform:rotate(180deg)}.select-dropdown{position:absolute;top:calc(100% + .25rem);left:0;width:100%;border:1px solid #aabac5;border-radius:.65rem;background:#fff;list-style:none;padding:.25rem;margin:0;box-shadow:0 8px 24px #18364c1c;max-height:16rem;overflow-y:auto;z-index:1000;display:none}.select-dropdown.visible{display:block}.select-dropdown::-webkit-scrollbar{width:6px}.select-dropdown::-webkit-scrollbar-track{background:#f1f4f6;border-radius:3px}.select-dropdown::-webkit-scrollbar-thumb{background:#c4cdd4;border-radius:3px}.select-dropdown li{padding:.7rem .9rem;cursor:pointer;display:flex;align-items:center;border-radius:.5rem;margin:.1rem;transition:background-color .15s}.select-dropdown li:hover:not(.selected):not([aria-selected="true"]){background:var(--green-pale)}.select-dropdown li.selected{background:var(--green);color:#fff;font-weight:600}.select-dropdown li[aria-selected="true"]{background:var(--green-pale);color:var(--green-dark);font-weight:600}.select-dropdown .placeholder{color:var(--muted);font-style:italic;pointer-events:none}
+        .button{width:100%;min-height:3.1rem;border:0;border-radius:.7rem;background:var(--blue);color:white;font-weight:700;text-align:center;padding:.8rem 1rem;text-decoration:none;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:background .15s,transform .15s}.button:hover:not(:disabled){background:var(--blue-dark);transform:translateY(-1px)}.form-grid{display:grid;gap:0 1rem}@media(min-width:640px){.form-grid{grid-template-columns:1fr 1fr}.form-grid .field-wide{grid-column:1/-1}}.button:disabled{opacity:.52;cursor:not-allowed}.button.secondary{background:var(--green-pale);color:var(--green-dark);border:1px solid #b9ddd1}.button.secondary:hover:not(:disabled){background:#d9eee6}.links{display:grid;gap:.7rem}.error{color:#9b1c1c;background:#fff1f1;border:1px solid #fecaca;border-radius:.6rem;padding:.65rem;margin:.35rem 0;font-size:.9rem}.notice{border-left:4px solid var(--green);background:var(--green-pale);padding:.8rem;border-radius:.4rem;font-size:.9rem}.actions{display:grid;gap:.7rem;margin-top:1.2rem}.foot{text-align:center;font-size:.82rem;color:var(--muted);padding:1rem}.foot p{margin:0}.foot .credit{margin-top:.4rem;font-size:.78rem;opacity:.85}.ref{font-size:1.08rem;font-weight:750;overflow-wrap:anywhere}
         .hero{display:grid;gap:1.25rem;margin:0 0 1rem}.hero-copy{padding:.35rem .1rem}.eyebrow{color:var(--green-dark);font-size:.78rem;font-weight:750;letter-spacing:.12em;text-transform:uppercase;margin:0 0 .6rem}.hero h1{font-size:clamp(1.8rem,5vw,2.6rem);line-height:1.08;letter-spacing:-.035em;max-width:17ch}.hero-copy .muted{max-width:38rem;font-size:1rem}.hero-links{display:flex;flex-wrap:wrap;gap:.65rem}.hero-links .button{width:auto;min-height:2.8rem}.hero-image{position:relative;margin:0;overflow:hidden;border-radius:1rem;min-height:13rem;background:linear-gradient(135deg,#dce8ef,#b8cbd8);box-shadow:0 8px 24px #18364c1c}.hero-image img{display:block;width:100%;height:100%;min-height:13rem;object-fit:cover;object-position:center 48%}.hero-image figcaption{position:absolute;inset:auto 0 0;padding:2.5rem 1rem .8rem;background:linear-gradient(transparent,#142c42c9);color:#fff;font-size:.8rem;font-weight:600}.section-kicker{color:var(--green-dark);font-size:.78rem;text-transform:uppercase;letter-spacing:.1em;font-weight:750;margin:0 0 .3rem}
-        @media(min-width:760px){main{padding:2.5rem 1.25rem}.card{padding:1.5rem}.actions{grid-template-columns:1fr 1fr}.button{width:auto}.links{grid-template-columns:1fr 1fr}.hero{grid-template-columns:1fr .95fr;align-items:center;gap:2.5rem;margin-bottom:2rem}.hero-image,.hero-image img{min-height:20rem}.hero-copy{padding:.5rem 0}}
+        @media(min-width:760px){main{padding:2.5rem 1.25rem;padding-top:6.5rem}.card{padding:1.5rem}.actions{grid-template-columns:1fr 1fr}.button{width:auto}.links{grid-template-columns:1fr 1fr}.hero{grid-template-columns:1fr .95fr;align-items:center;gap:2.5rem;margin-bottom:2rem}.hero-image,.hero-image img{min-height:20rem}.hero-copy{padding:.5rem 0}}.hero-image::after{content:'';position:absolute;inset:0;background:linear-gradient(135deg,rgba(36,75,107,0.4),rgba(36,75,107,0.2));z-index:0}.hero-image figcaption{z-index:1}@media(max-width:639px){.form-grid{grid-template-columns:1fr}.actions{grid-template-columns:1fr}.select-dropdown{max-height:12rem}}
     </style>
 </head>
 <body>
 <header class="top"><div class="top-inner">
     <a class="brand" href="/">CoET Timetable</a>
-    <details class="menu"><summary aria-label="Open navigation menu"><span aria-hidden="true">☰</span> Menu</summary>
+    <details class="menu" id="main-menu"><summary aria-label="Open navigation menu"><span aria-hidden="true">☰</span> Menu</summary>
         <nav aria-label="Main menu">
             <a href="/">Home</a>
             <a href="/#timetable">Download timetable</a>
@@ -35,7 +36,150 @@
     </details>
 </div></header>
 <main><div class="wrap">{% block content %}{% endblock %}</div></main>
-<footer class="foot">College of Engineering and Technology · University of Dar es Salaam</footer>
+<footer class="foot">
+    <p>College of Engineering and Technology · University of Dar es Salaam</p>
+    <p class="credit">&copy; 2026. Made with &#10084;&#65039; by Kodin Softwares.</p>
+</footer>
 </body>
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    const menu = document.getElementById('main-menu');
+    if (menu) {
+        document.addEventListener('click', (event) => {
+            if (!menu.contains(event.target) && menu.open) {
+                menu.removeAttribute('open');
+            }
+        });
+    }
+
+    const nativeSelects = document.querySelectorAll('select.field-control');
+
+    nativeSelects.forEach(nativeSelect => {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'custom-select';
+        nativeSelect.parentNode.insertBefore(wrapper, nativeSelect);
+
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'select-button';
+        button.setAttribute('aria-haspopup', 'listbox');
+        button.setAttribute('aria-expanded', 'false');
+
+        const selectedValue = document.createElement('span');
+        selectedValue.className = 'selected-value';
+        const arrow = document.createElement('span');
+        arrow.className = 'arrow';
+        button.appendChild(selectedValue);
+        button.appendChild(arrow);
+
+        const dropdown = document.createElement('ul');
+        dropdown.className = 'select-dropdown';
+        dropdown.setAttribute('role', 'listbox');
+
+        const options = nativeSelect.querySelectorAll('option');
+        options.forEach(option => {
+            const li = document.createElement('li');
+            li.setAttribute('role', 'option');
+            li.dataset.value = option.value;
+            li.textContent = option.textContent;
+            if (option.selected) {
+                li.setAttribute('aria-selected', 'true');
+                selectedValue.textContent = option.textContent;
+            }
+            dropdown.appendChild(li);
+        });
+
+        wrapper.appendChild(button);
+        wrapper.appendChild(dropdown);
+        wrapper.appendChild(nativeSelect);
+        nativeSelect.classList.add('hidden-input');
+
+        let focusedIndex = -1;
+        const dropdownOptions = dropdown.querySelectorAll('li[role="option"]');
+
+        const toggleDropdown = (expand = null) => {
+            const isOpen = expand !== null ? expand : !dropdown.classList.contains('visible');
+            dropdown.classList.toggle('visible', isOpen);
+            button.setAttribute('aria-expanded', isOpen);
+
+            if (isOpen) {
+                focusedIndex = [...dropdownOptions].findIndex(option => option.classList.contains('selected') || option.getAttribute('aria-selected') === 'true');
+                focusedIndex = focusedIndex === -1 ? 0 : focusedIndex;
+                updateFocus();
+            } else {
+                focusedIndex = -1;
+                button.focus();
+            }
+        };
+
+        const updateFocus = () => {
+            dropdownOptions.forEach((option, index) => {
+                option.setAttribute('tabindex', index === focusedIndex ? '0' : '-1');
+                if (index === focusedIndex) option.focus();
+            });
+        };
+
+        const handleOptionSelect = (option) => {
+            dropdownOptions.forEach(opt => {
+                opt.classList.remove('selected');
+                opt.removeAttribute('aria-selected');
+            });
+            option.classList.add('selected');
+            option.setAttribute('aria-selected', 'true');
+            selectedValue.textContent = option.textContent.trim();
+            nativeSelect.value = option.dataset.value || '';
+        };
+
+        dropdownOptions.forEach(option => {
+            option.addEventListener('click', () => {
+                handleOptionSelect(option);
+                toggleDropdown(false);
+            });
+        });
+
+        button.addEventListener('click', () => {
+            toggleDropdown();
+        });
+
+        button.addEventListener('keydown', event => {
+            if (event.key === 'ArrowDown') {
+                event.preventDefault();
+                toggleDropdown(true);
+            } else if (event.key === 'Escape') {
+                toggleDropdown(false);
+            }
+        });
+
+        dropdown.addEventListener('keydown', event => {
+            if (event.key === 'ArrowDown') {
+                event.preventDefault();
+                focusedIndex = (focusedIndex + 1) % dropdownOptions.length;
+                updateFocus();
+            } else if (event.key === 'ArrowUp') {
+                event.preventDefault();
+                focusedIndex = (focusedIndex - 1 + dropdownOptions.length) % dropdownOptions.length;
+                updateFocus();
+            } else if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                handleOptionSelect(dropdownOptions[focusedIndex]);
+                toggleDropdown(false);
+            } else if (event.key === 'Escape') {
+                toggleDropdown(false);
+            }
+        });
+    });
+
+    document.addEventListener('click', (event) => {
+        document.querySelectorAll('.custom-select').forEach(wrapper => {
+            const dropdown = wrapper.querySelector('.select-dropdown');
+            if (dropdown && dropdown.classList.contains('visible') && !wrapper.contains(event.target)) {
+                dropdown.classList.remove('visible');
+                const button = wrapper.querySelector('.select-button');
+                if (button) button.setAttribute('aria-expanded', 'false');
+            }
+        });
+    });
+});
+</script>
 </html>
 

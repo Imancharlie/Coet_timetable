@@ -3,5 +3,10 @@
     <div class="tt-line head">{{ entry.type_label|activity_label }}, {{ entry.start }}-{{ entry.end }}, {{ entry.day|slice:":3"|title }}</div>
     <div class="tt-line">Course: {{ entry.name }}</div>
     <div class="tt-line">Venue: {{ entry.venue }}</div>
-    <div class="tt-line groups">Assigned groups: {{ entry.groups }}</div>
+    {% comment %}A whole-cohort LECTURE is not "assigned" to anyone: the room is the
+    lecture, not a list of who is in it. Printing "ALL" (or any group list)
+    on a lecture is noise, so the line is left out entirely. Every other
+    activity keeps it — a tutorial/seminar/practical is precisely "these
+    groups, here" — and the PDF exports already say the same thing.{% endcomment %}
+    {% if entry.kind != "lecture" %}<div class="tt-line groups">Assigned groups: {{ entry.groups }}</div>{% endif %}
 </div>

@@ -2,8 +2,12 @@
 {% load core_tags %}
 
 {% block content %}
-<div class="max-w-7xl mx-auto space-y-4">
-    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+{% comment %}min-w-0 on the wrapper and the single-column grid: a grid/flex item's
+     default min-width:auto lets a wide descendant (the plan tables) push the
+     track past the viewport instead of scrolling inside it. That is what made
+     this page wider than the screen on a phone.{% endcomment %}
+<div class="max-w-7xl mx-auto space-y-4 min-w-0 overflow-x-hidden">
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4 min-w-0">
         <form method="post" action="{{ preview_url }}"
               hx-post="{{ preview_url }}" hx-target="#allocation-plan" hx-swap="innerHTML"
               hx-disabled-elt="#allocate-btn"
@@ -31,20 +35,14 @@
                     class="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-wait">
                 <span class="tt-idle-label inline-flex items-center gap-2">
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"/></svg>
-                    Calculate Allocation
+                    Simulate Allocation
                 </span>
                 <span class="tt-status-label">
                     <svg class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-                    Calculating...
+                    Simulating&hellip;
                 </span>
             </button>
         </form>
-        <p class="mt-3 text-xs text-gray-500">
-            Groups count as {{ 30 }} students each. Workshops are not allocated here, but they
-            are checked when a group's availability is worked out. Allocation priority is
-            seminar, then tutorial, then practical; earlier choices are revisited when a
-            later one cannot be completed.
-        </p>
     </div>
 
     {% if no_semesters %}
@@ -68,23 +66,18 @@
         </a>
     </div>
 
-    <div id="allocation-plan">
+    <div id="allocation-plan" class="min-w-0">
         {% if plan %}{% include "core/_allocation_plan.html" %}{% endif %}
     </div>
 
-    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 min-w-0">
         <!-- Manual assignment: same validator as an automatic run -->
-        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
-            <h2 class="text-sm font-semibold text-gray-800">Assign a group by hand</h2>
-            <p class="text-xs text-gray-500 mt-0.5 mb-3">
-                Checked with exactly the rules an automatic run applies: course
-                eligibility, timetable clashes (lectures, workshops, technical
-                drawings and this run's own proposals) and venue capacity.
-            </p>
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4 min-w-0">
+            <h2 class="text-sm font-semibold text-gray-800 mb-3">Assign a group by hand</h2>
             <form method="post" action="{{ assign_url }}"
                   hx-post="{{ assign_url }}" hx-target="#allocation-manual-result" hx-swap="innerHTML"
                   hx-disabled-elt="this"
-                  class="space-y-3" x-data="{ submitting: false }" @submit="submitting = true">
+                  class="space-y-3 min-w-0" x-data="{ submitting: false }" @submit="submitting = true">
                 {% csrf_token %}
                 <div>
                     <label for="manual-group" class="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1.5">Group</label>
@@ -118,22 +111,18 @@
         </div>
 
         <!-- Run history -->
-        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
-            <h2 class="text-sm font-semibold text-gray-800">Recent runs</h2>
-            <p class="text-xs text-gray-500 mt-0.5 mb-3">
-                Every applied run can be reverted. A revert is refused when an
-                assignment has been edited since the run was applied.
-            </p>
-            <div class="space-y-2 max-h-80 overflow-y-auto">
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4 min-w-0">
+            <h2 class="text-sm font-semibold text-gray-800 mb-3">Recent runs</h2>
+            <div class="space-y-2 max-h-80 overflow-y-auto min-w-0">
                 {% for r in runs %}
-                <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border border-gray-200 rounded-lg px-3 py-2">
+                <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border border-gray-200 rounded-lg px-3 py-2 min-w-0">
                     <div class="min-w-0">
                         <a href="{{ allocation_url }}?run={{ r.pk }}&semester={{ r.semester_id }}"
                            class="text-sm font-medium text-gray-800 truncate block hover:text-blue-700">
-                            {{ r.semester }} · {{ r.get_scope_display }}
+                            {{ r.semester }} &middot; {{ r.get_scope_display }}
                         </a>
-                        <p class="text-xs text-gray-500">
-                            {{ r.created_at|date:"Y-m-d H:i" }} ·
+                        <p class="text-xs text-gray-500 break-safe">
+                            {{ r.created_at|date:"Y-m-d H:i" }} &middot;
                             {{ r.assigned }} added, {{ r.moved }} moved, {{ r.retained }} kept,
                             {{ r.unresolved }} unresolved
                         </p>

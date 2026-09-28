@@ -1,4 +1,5 @@
 {% extends "student_portal/base.html" %}
+{% load static %}
 {% block title %}Student Timetable · CoET{% endblock %}
 {% block content %}
 <section class="hero" aria-labelledby="portal-title">
@@ -19,61 +20,276 @@
     {% if current_semester %}
     <form method="get" action="{% url 'student-timetable-pdf' %}">
         <input type="hidden" name="scope" value="group">
-        <input type="hidden" name="programme" id="programme-id">
         <div class="field"><label for="programme">Programme</label>
-            <select id="programme" class="field-control" required>
-                <option value="">Select programme</option>
-                {% for programme in programmes %}<option value="{{ programme.pk }}" data-group-count="{{ programme.student_groups.all|length }}">{{ programme.code }} — {{ programme.name }}</option>{% endfor %}
-            </select>
+            <div class="custom-select" id="programme-select">
+                <button type="button" class="select-button" id="programme-button" aria-haspopup="listbox" aria-expanded="false">
+                    <span class="selected-value">Select programme</span>
+                    <span class="arrow"></span>
+                </button>
+                <ul class="select-dropdown" role="listbox" id="programme-dropdown">
+                    <li role="option" class="placeholder" data-value="">Select programme</li>
+                    {% for programme in programmes %}<li role="option" data-value="{{ programme.pk }}" data-group-count="{{ programme.student_groups.all|length }}">{{ programme.name }}</li>{% endfor %}
+                </ul>
+                <input type="hidden" name="programme" id="programme" required>
+            </div>
         </div>
         <div class="field"><label for="group">Group or programme</label>
-            <select id="group" name="group" class="field-control" required disabled>
-                <option value="">Select a programme first</option>
-                {% for programme in programmes %}{% for group in programme.student_groups.all %}
-                <option value="{{ group.pk }}" data-programme="{{ programme.pk }}">{{ programme.code }} {{ group.code }}</option>
-                {% endfor %}{% endfor %}
-            </select>
+            <div class="custom-select" id="group-select">
+                <button type="button" class="select-button" id="group-button" aria-haspopup="listbox" aria-expanded="false" disabled>
+                    <span class="selected-value">Select a programme first</span>
+                    <span class="arrow"></span>
+                </button>
+                <ul class="select-dropdown" role="listbox" id="group-dropdown">
+                    <li role="option" class="placeholder" data-value="">Select a programme first</li>
+                    {% for programme in programmes %}{% for group in programme.student_groups.all %}
+                    <li role="option" data-value="{{ group.pk }}" data-programme="{{ programme.pk }}">{{ group.code }}</li>
+                    {% endfor %}{% endfor %}
+                </ul>
+                <input type="hidden" name="group" id="group" required>
+            </div>
             <p id="group-note" class="small-note" hidden></p>
         </div>
         <div class="field"><label for="semester">Semester / academic year</label>
-            <select id="semester" name="semester" class="field-control" required>
-                {% for semester in semesters %}<option value="{{ semester.pk }}" {% if semester.pk == current_semester.pk %}selected{% endif %}>{{ semester.academic_year }} · Semester {{ semester.semester }}{% if semester.pk == current_semester.pk %} (Current){% endif %}</option>{% endfor %}
-            </select>
+            <div class="custom-select" id="semester-select">
+                <button type="button" class="select-button" id="semester-button" aria-haspopup="listbox" aria-expanded="false">
+                    <span class="selected-value">Select semester</span>
+                    <span class="arrow"></span>
+                </button>
+                <ul class="select-dropdown" role="listbox" id="semester-dropdown">
+                    {% for semester in semesters %}<li role="option" data-value="{{ semester.pk }}" {% if semester.pk == current_semester.pk %}aria-selected="true"{% endif %}>{{ semester.academic_year }} · Semester {{ semester.semester }}{% if semester.pk == current_semester.pk %} (Current){% endif %}</li>{% endfor %}
+                </ul>
+                <input type="hidden" name="semester" id="semester" required>
+            </div>
         </div>
         <div class="field"><label for="year">Year of study</label>
-            <select id="year" name="year" class="field-control">{% for year in year_options %}<option value="{{ year }}">Year {{ year }}</option>{% endfor %}</select>
+            <div class="custom-select" id="year-select">
+                <button type="button" class="select-button" id="year-button" aria-haspopup="listbox" aria-expanded="false">
+                    <span class="selected-value">Year 1</span>
+                    <span class="arrow"></span>
+                </button>
+                <ul class="select-dropdown" role="listbox" id="year-dropdown">
+                    <li role="option" data-value="1" aria-selected="true">Year 1</li>
+                </ul>
+                <input type="hidden" name="year" id="year" value="1">
+            </div>
         </div>
         <button id="download-button" class="button" type="submit" disabled>Download PDF</button>
     </form>
     <script>
     (()=>{
-        const programme=document.getElementById('programme');
-        const programmeId=document.getElementById('programme-id');
-        const group=document.getElementById('group');
-        const note=document.getElementById('group-note');
-        const download=document.getElementById('download-button');
-        const groups=[...group.querySelectorAll('option[data-programme]')];
-        programme.addEventListener('change',()=>{
-            group.value=''; programmeId.value=programme.value; note.hidden=true; note.textContent='';
-            download.disabled=true;
-            const placeholder=group.options[0];
-            group.replaceChildren(placeholder);
-            group.disabled=!programme.value;
-            const selected=programme.options[programme.selectedIndex];
-            const count=Number(selected?.dataset.groupCount||0);
-            group.options[0].textContent=programme.value?'Choose a group or all groups':'Select a programme first';
-            if(!programme.value)return;
-            if(count===0){
-                group.disabled=true;
-                group.options[0].textContent='No groups registered';
-                note.textContent='No groups are registered for this programme. Ask the coordinator to add its groups.';
-                note.hidden=false;
-                return;
+        document.addEventListener('DOMContentLoaded', () => {
+            const customSelects = document.querySelectorAll('.custom-select');
+
+            customSelects.forEach(customSelect => {
+                const button = customSelect.querySelector('.select-button');
+                const dropdown = customSelect.querySelector('.select-dropdown');
+                const options = dropdown.querySelectorAll('li[role="option"]');
+                const selectedValue = button.querySelector('.selected-value');
+                const hiddenInput = customSelect.querySelector('input[type="hidden"]');
+                let focusedIndex = -1;
+
+                const toggleDropdown = (expand = null) => {
+                    const isOpen = expand !== null ? expand : !dropdown.classList.contains('visible');
+                    dropdown.classList.toggle('visible', isOpen);
+                    button.setAttribute('aria-expanded', isOpen);
+
+                    if (isOpen) {
+                        focusedIndex = [...options].findIndex(option => option.classList.contains('selected') || option.getAttribute('aria-selected') === 'true');
+                        focusedIndex = focusedIndex === -1 ? 0 : focusedIndex;
+                        updateFocus();
+                    } else {
+                        focusedIndex = -1;
+                        button.focus();
+                    }
+                };
+
+                const updateFocus = () => {
+                    options.forEach((option, index) => {
+                        option.setAttribute('tabindex', index === focusedIndex ? '0' : '-1');
+                        if (index === focusedIndex) option.focus();
+                    });
+                };
+
+                const handleOptionSelect = (option) => {
+                    options.forEach(opt => {
+                        opt.classList.remove('selected');
+                        opt.removeAttribute('aria-selected');
+                    });
+                    option.classList.add('selected');
+                    option.setAttribute('aria-selected', 'true');
+                    selectedValue.textContent = option.textContent.trim();
+                    if (hiddenInput) hiddenInput.value = option.dataset.value || '';
+
+                    if (option.classList.contains('placeholder')) {
+                        selectedValue.textContent = button.dataset.placeholder || option.textContent.trim();
+                        if (hiddenInput) hiddenInput.value = '';
+                    }
+                };
+
+                options.forEach(option => {
+                    option.addEventListener('click', () => {
+                        handleOptionSelect(option);
+                        toggleDropdown(false);
+                        button.dispatchEvent(new Event('change', { bubbles: true }));
+                    });
+                });
+
+                button.addEventListener('click', () => {
+                    if (!button.disabled) toggleDropdown();
+                });
+
+                button.addEventListener('keydown', event => {
+                    if (event.key === 'ArrowDown' && !button.disabled) {
+                        event.preventDefault();
+                        toggleDropdown(true);
+                    } else if (event.key === 'Escape') {
+                        toggleDropdown(false);
+                    }
+                });
+
+                dropdown.addEventListener('keydown', event => {
+                    if (event.key === 'ArrowDown') {
+                        event.preventDefault();
+                        focusedIndex = (focusedIndex + 1) % options.length;
+                        updateFocus();
+                    } else if (event.key === 'ArrowUp') {
+                        event.preventDefault();
+                        focusedIndex = (focusedIndex - 1 + options.length) % options.length;
+                        updateFocus();
+                    } else if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        handleOptionSelect(options[focusedIndex]);
+                        toggleDropdown(false);
+                        button.dispatchEvent(new Event('change', { bubbles: true }));
+                    } else if (event.key === 'Escape') {
+                        toggleDropdown(false);
+                    }
+                });
+
+                document.addEventListener('click', event => {
+                    if (!customSelect.contains(event.target) && dropdown.classList.contains('visible')) {
+                        toggleDropdown(false);
+                    }
+                });
+            });
+
+            const programmeSelect = document.getElementById('programme-select');
+            const groupSelect = document.getElementById('group-select');
+            const programmeButton = document.getElementById('programme-button');
+            const groupButton = document.getElementById('group-button');
+            const programmeDropdown = document.getElementById('programme-dropdown');
+            const groupDropdown = document.getElementById('group-dropdown');
+            const programmeInput = document.getElementById('programme');
+            const groupInput = document.getElementById('group');
+            const note = document.getElementById('group-note');
+            const download = document.getElementById('download-button');
+            const groupOptions = [...groupDropdown.querySelectorAll('li[data-programme]')];
+
+            const selectedSemester = document.querySelector('#semester-dropdown li[aria-selected="true"]');
+            if (selectedSemester) {
+                const semesterButton = document.getElementById('semester-button');
+                const semesterValue = semesterButton.querySelector('.selected-value');
+                const semesterInput = document.getElementById('semester');
+                semesterValue.textContent = selectedSemester.textContent.trim();
+                semesterInput.value = selectedSemester.dataset.value;
             }
-            group.add(new Option('All groups — whole programme','all'));
-            groups.filter(option=>option.dataset.programme===programme.value).forEach(option=>group.add(option));
+
+            const selectedYear = document.querySelector('#year-dropdown li[aria-selected="true"]');
+            if (selectedYear) {
+                const yearButton = document.getElementById('year-button');
+                const yearValue = yearButton.querySelector('.selected-value');
+                const yearInput = document.getElementById('year');
+                yearValue.textContent = selectedYear.textContent.trim();
+                yearInput.value = selectedYear.dataset.value;
+            }
+
+            programmeButton.addEventListener('change', () => {
+                const programmeValue = programmeInput.value;
+                groupInput.value = '';
+                note.hidden = true;
+                note.textContent = '';
+                download.disabled = true;
+
+                const groupPlaceholder = groupDropdown.querySelector('.placeholder');
+                const groupSelectedValue = groupButton.querySelector('.selected-value');
+                groupSelectedValue.textContent = 'Select a programme first';
+                groupDropdown.querySelectorAll('li:not(.placeholder)').forEach(li => li.remove());
+                groupButton.disabled = !programmeValue;
+
+                if (!programmeValue) return;
+
+                const selectedProgramme = programmeDropdown.querySelector(`li[data-value="${programmeValue}"]`);
+                const count = Number(selectedProgramme?.dataset.groupCount || 0);
+                const programmeName = selectedProgramme?.textContent.trim() || '';
+
+                groupSelectedValue.textContent = programmeValue ? 'Choose a group or all groups' : 'Select a programme first';
+
+                if (count === 0) {
+                    groupButton.disabled = true;
+                    groupSelectedValue.textContent = 'No groups registered';
+                    note.textContent = 'No groups are registered for this programme. Ask the coordinator to add its groups.';
+                    note.hidden = false;
+                    return;
+                }
+
+                const allGroupsOption = document.createElement('li');
+                allGroupsOption.setAttribute('role', 'option');
+                allGroupsOption.dataset.value = 'all';
+                allGroupsOption.textContent = 'All groups — whole programme';
+                allGroupsOption.addEventListener('click', () => {
+                    groupDropdown.querySelectorAll('li').forEach(li => {
+                        li.classList.remove('selected');
+                        li.removeAttribute('aria-selected');
+                    });
+                    allGroupsOption.classList.add('selected');
+                    allGroupsOption.setAttribute('aria-selected', 'true');
+                    groupSelectedValue.textContent = allGroupsOption.textContent.trim();
+                    groupInput.value = 'all';
+                    groupDropdown.classList.remove('visible');
+                    groupButton.setAttribute('aria-expanded', 'false');
+                    download.disabled = false;
+                });
+                groupDropdown.appendChild(allGroupsOption);
+
+                groupOptions.filter(option => option.dataset.programme === programmeValue).forEach(option => {
+                    const newOption = document.createElement('li');
+                    newOption.setAttribute('role', 'option');
+                    newOption.dataset.value = option.dataset.value;
+                    newOption.dataset.programme = option.dataset.programme;
+                    newOption.textContent = option.textContent.trim();
+                    newOption.addEventListener('click', () => {
+                        groupDropdown.querySelectorAll('li').forEach(li => {
+                            li.classList.remove('selected');
+                            li.removeAttribute('aria-selected');
+                        });
+                        newOption.classList.add('selected');
+                        newOption.setAttribute('aria-selected', 'true');
+                        groupSelectedValue.textContent = newOption.textContent.trim();
+                        groupInput.value = newOption.dataset.value;
+                        groupDropdown.classList.remove('visible');
+                        groupButton.setAttribute('aria-expanded', 'false');
+                        download.disabled = false;
+                    });
+                    groupDropdown.appendChild(newOption);
+                });
+            });
+
+            groupButton.addEventListener('change', () => {
+                download.disabled = !programmeInput.value || !groupInput.value;
+            });
+
+            const semesterButton = document.getElementById('semester-button');
+            const semesterInput = document.getElementById('semester');
+            semesterButton.addEventListener('change', () => {
+                download.disabled = !programmeInput.value || !groupInput.value;
+            });
+
+            const yearButton = document.getElementById('year-button');
+            const yearInput = document.getElementById('year');
+            yearButton.addEventListener('change', () => {
+                download.disabled = !programmeInput.value || !groupInput.value;
+            });
         });
-        group.addEventListener('change',()=>{download.disabled=!group.value;});
     })();
     </script>
     {% else %}<div class="notice">Timetables are not available yet.</div>{% endif %}

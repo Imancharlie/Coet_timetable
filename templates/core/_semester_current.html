@@ -1,0 +1,37 @@
+{% comment %}
+The current-semester control for the semesters list.
+
+"Current" is a single value across the whole app, so it needs one obvious home
+rather than a dropdown on every page: this panel says which semester is current,
+what that changes, and -- when nothing is set -- says so plainly instead of
+letting a page quietly fall back to some other term.
+{% endcomment %}
+<div class="mb-4 rounded-xl border p-4 {% if current_semester %}border-emerald-200 bg-emerald-50{% else %}border-amber-200 bg-amber-50{% endif %}">
+    <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div class="flex items-start gap-3 min-w-0">
+            <span class="shrink-0 mt-0.5 inline-flex items-center justify-center w-8 h-8 rounded-lg {% if current_semester %}bg-emerald-100 text-emerald-700{% else %}bg-amber-100 text-amber-700{% endif %}">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+            </span>
+            <div class="min-w-0">
+                <p class="text-sm font-semibold {% if current_semester %}text-emerald-900{% else %}text-amber-900{% endif %}">
+                    {% if current_semester %}
+                    Current semester: {{ current_semester }}
+                    {% else %}
+                    No current semester set
+                    {% endif %}
+                </p>
+                <p class="text-xs {% if current_semester %}text-emerald-800{% else %}text-amber-800{% endif %} mt-1">
+                    {% if current_semester %}
+                    Used as the default by the dashboard, the timetable, the PDF exports and the
+                    student portal, and preselected on the import forms. Use
+                    <strong>Make current</strong> on another row to switch to it.
+                    {% else %}
+                    Nothing is marked current, so pages fall back to the newest semester that
+                    holds data and the student portal offers the newest one. Use
+                    <strong>Make current</strong> on a row to set it.
+                    {% endif %}
+                </p>
+            </div>
+        </div>
+    </div>
+</div>

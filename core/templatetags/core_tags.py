@@ -1,6 +1,6 @@
 from django import template
 
-from core.models import ALLOCATED_ACTIVITY_TYPES, ActivityLog, ActivityType
+from core.models import ALLOCATED_ACTIVITY_TYPES, ActivityType
 
 register = template.Library()
 
@@ -95,6 +95,7 @@ _NAV_SECTIONS = {
     "export": "exports",
     "timetable": "timetable",
     "activity": "activity",
+    "danger": "danger",
 }
 
 
@@ -114,20 +115,24 @@ def nav_section(context):
 
 
 @register.filter
+def nav_is_any(nav_section_value, sections):
+    """True when the active section is one of a comma-separated list.
+
+    Used to light up the header of a collapsible section when one of the links
+    inside it is the current page. The header deliberately does *not* get the
+    same ``bg-slate-800 text-white`` the child links use, so a single sidebar
+    item is never highlighted twice.
+    """
+    wanted = {s.strip() for s in str(sections).split(",") if s.strip()}
+    return bool(nav_section_value) and nav_section_value in wanted
+
+
+@register.filter
 def active_cls(nav_section_value, section):
     """Sidebar link classes for the given section if it is the active one."""
     if nav_section_value == section:
         return "bg-slate-800 text-white"
     return "hover:bg-slate-800/60 text-slate-300"
-
-
-@register.simple_tag
-def activity_logs(limit=10):
-    """Latest activity log entries for the sidebar."""
-    try:
-        return list(ActivityLog.objects.all()[: int(limit)])
-    except (TypeError, ValueError):
-        return list(ActivityLog.objects.all()[:10])
 
 
 @register.filter
@@ -137,6 +142,7 @@ def log_badge_cls(action):
         "CREATE": "bg-emerald-500",
         "UPDATE": "bg-blue-500",
         "DELETE": "bg-rose-500",
+        "CLEAR": "bg-rose-700",
         "IMPORT": "bg-indigo-500",
         "ASSIGN": "bg-purple-500",
         "REMOVE": "bg-amber-500",

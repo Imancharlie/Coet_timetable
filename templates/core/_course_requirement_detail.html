@@ -29,11 +29,6 @@
         <p class="text-sm font-semibold text-amber-800">
             {{ name_variants|length }} other name{{ name_variants|length|pluralize }} found for this course code
         </p>
-        <p class="text-xs text-amber-700 mt-0.5">
-            The source data spelled this course several ways. One name was kept
-            ({{ item.course.name }}); review the alternatives and correct the
-            source file so the next import does not change it again.
-        </p>
         <ul class="mt-2 space-y-1">
             {% for variant in name_variants %}
             <li class="text-xs text-amber-700">&bull; {{ variant }}</li>

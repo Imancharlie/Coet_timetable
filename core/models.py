@@ -1,6 +1,6 @@
 from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.db import models
+from django.db import models, transaction
 
 
 class ActivityType(models.TextChoices):
@@ -52,13 +52,63 @@ class TimePeriod(models.TextChoices):
 class Semester(models.Model):
     academic_year = models.CharField(max_length=20)
     semester = models.PositiveSmallIntegerField()
+    #: The one semester the whole app works in by default: the dashboard, the
+    #: timetable and the PDF exports fall back to it, the import form
+    #: preselects it, and the student portal offers it as the current term. It
+    #: is set from the semesters list, never in a form, and the partial unique
+    #: constraint below is what makes "the current semester" a single value
+    #: rather than a guess -- so a page can never have two of them.
+    is_current = models.BooleanField(
+        default=False,
+        help_text=(
+            "Checked on at most one semester: the term staff and students are "
+            "working in. Left unset, pages fall back to the newest semester "
+            "that holds data."
+        ),
+    )
 
     class Meta:
         ordering = ["-academic_year", "-semester"]
         unique_together = ["academic_year", "semester"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["is_current"],
+                condition=models.Q(is_current=True),
+                name="core_semester_only_one_current",
+            )
+        ]
 
     def __str__(self):
         return f"{self.academic_year} - Semester {self.semester}"
+
+    @classmethod
+    def current(cls):
+        """The semester staff marked as current, or ``None``.
+
+        Ordering is irrelevant in practice (the constraint allows one row) but
+        keeps the answer deterministic if a database is ever restored without
+        the index.
+        """
+        return (
+            cls.objects.filter(is_current=True)
+            .order_by("-academic_year", "-semester")
+            .first()
+        )
+
+    @classmethod
+    def set_current(cls, semester):
+        """Make ``semester`` the single current one; ``None`` clears the flag.
+
+        Clearing is explicit and never implied: "no current semester" is a
+        state the dashboard, the exports and the student portal all have to
+        handle, and quietly promoting the newest row instead would hide a
+        coordinator's mistake. The clear-then-set runs in one transaction so a
+        failed write cannot leave the flag on two rows.
+        """
+        with transaction.atomic():
+            cls.objects.update(is_current=False)
+            if semester is not None:
+                cls.objects.filter(pk=semester.pk).update(is_current=True)
 
 
 class Programme(models.Model):

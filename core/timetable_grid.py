@@ -153,6 +153,7 @@ def _by_label(entries):
 #   - `_slot`            → builds the hourly column labels for the PDF/classic grid
 #   - `_screen_slot`     → builds the on-screen header labels (07:00-07:55, 08:00-08:55...)
 #   - `_partition_lanes` → splits a day's sessions into band sub-rows
+#   - `_chronological`   → flattens one day into reading order (narrow-screen agenda)
 #   - `build_day_time_grid` → the entry point (used by core/views.py)
 # ─────────────────────────────────────────────────────────────
 def _slot(hour):
@@ -310,6 +311,26 @@ def _partition_lanes(entries, slots):
     return lanes
 
 
+def _chronological(entries):
+    """One day's sessions in reading order, for the narrow-screen agenda.
+
+    The band lanes deliberately interleave (a lane is a set of non-overlapping
+    sessions, not a time order), so the agenda cannot walk them directly —
+    sorting by the first hour the session covers, then by its clock time, gives
+    the order a reader expects. Course code and key break remaining ties so the
+    same data always renders the same way.
+    """
+    return sorted(
+        entries,
+        key=lambda e: (
+            min(e["hours"]) if e["hours"] else GRID_HOUR_START,
+            str(e.get("start") or ""),
+            e.get("course_code") or "",
+            str(e["key"]),
+        ),
+    )
+
+
 def build_day_time_grid(entries):
     """Transposed weekly grid for the default on-screen timetable view.
 
@@ -323,8 +344,12 @@ def build_day_time_grid(entries):
     sliced into one box per hour column.
 
     Returns ``{"slots", "days", "rows"}``. ``rows`` is one dict per day:
-    ``{"day", "label", "lanes"}`` where ``label`` is the full weekday name,
-    and ``lanes`` is the list of band rows from ``_partition_lanes``.
+    ``{"day", "label", "lanes", "entries"}`` where ``label`` is the full
+    weekday name, ``lanes`` is the list of band rows from ``_partition_lanes``,
+    and ``entries`` is the same day's sessions flattened into one chronological
+    list. ``entries`` is what the narrow-screen agenda view renders (a grid
+    this wide cannot be read on a phone), and it is derived from the very
+    entries the lanes are built from, so the two views can never disagree.
     """
     if not entries:
         return {"slots": [], "days": [], "rows": []}
@@ -352,11 +377,13 @@ def build_day_time_grid(entries):
 
     rows = []
     for day in day_order:
+        day_entries = by_day.get(day, [])
         rows.append(
             {
                 "day": day,
                 "label": Day(day).label,
-                "lanes": _partition_lanes(by_day.get(day, []), slots),
+                "lanes": _partition_lanes(day_entries, slots),
+                "entries": _chronological(day_entries),
             }
         )
 

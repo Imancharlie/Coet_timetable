@@ -1,0 +1,13 @@
+{% comment %}The CoET wordmark, in the only form the app states it: "CoET" in the
+cream accent beside "Timetable" in white. The sidebar and the top bar both
+include this rather than each typing the colour split, because the one thing
+that must not drift is the pairing itself -- a second copy is how the dashboard
+ends up wearing a wordmark the rail does not have.
+
+Only `brand_size` is a caller's to choose: the sidebar and the top bar sit at
+different points in the page's type scale, but the colours, weight and tracking
+are the brand. Sizing the span rather than a wrapper is deliberate -- the
+caller's own element is the one that has to truncate (an inline span cannot),
+and both call sites are flex items, so `truncate` there does work.
+{% endcomment %}
+<span class="tt-brand-text font-bold text-white tracking-tight {% if brand_size %}{{ brand_size }}{% else %}text-lg{% endif %}"><span class="tt-brand-accent">CoET</span> Timetable</span>

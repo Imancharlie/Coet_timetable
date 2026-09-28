@@ -233,6 +233,197 @@ def _clear_all(
     return _write_response(request, "close-modal,refresh-table", redirect_name)
 
 
+# Every "clear all" in the app, in one place.
+#
+# The Danger Zone lists these; each entry is also the single source of truth for
+# its own `*_clear_all` view, so a target cannot be described one way on the
+# board and deleted another way in the modal. ``summary`` is the one line the
+# board shows -- everything else is what the confirmation modal already says.
+CLEAR_ALL_TARGETS = {
+    "programmes": {
+        "summary": "Every programme, and with it its student groups, programme course links and session links.",
+        "model": Programme,
+        "list_url": "/programmes/",
+        "clear_url": "/programmes/clear-all/",
+        "page_title": "Programmes",
+        "primary_label": "Programmes",
+        "log_resource": "Programme",
+        "redirect_name": "programme-list",
+        "related_count": (
+            (StudentGroup.objects.all(), "Student groups"),
+            (ProgrammeCourse.objects.all(), "Programme courses"),
+            (SessionGroup.objects.all(), "Session-group links"),
+        ),
+        "kept_note": (
+            "Linked student groups and programme courses are deleted with their "
+            "programmes. Sessions and semesters are kept."
+        ),
+    },
+    "groups": {
+        "summary": "Every student group, and every session link that group holds.",
+        "model": StudentGroup,
+        "list_url": "/groups/",
+        "clear_url": "/groups/clear-all/",
+        "page_title": "Student Groups",
+        "primary_label": "Student Groups",
+        "log_resource": "Student Group",
+        "redirect_name": "group-list",
+        "related_count": ((SessionGroup.objects.all(), "Session-group links"),),
+        "kept_note": "Sessions, programmes, courses, semesters and venues are kept.",
+    },
+    "programme-courses": {
+        "summary": "Every programme–course mapping. The programmes and the shared courses themselves are kept.",
+        "model": ProgrammeCourse,
+        "list_url": "/courses/",
+        "clear_url": "/courses/clear-all/",
+        "page_title": "Programme Courses",
+        "primary_label": "Programme Courses",
+        "log_resource": "Programme Course",
+        "redirect_name": "course-list",
+        "kept_note": "Programme, student group, session, semester and venue records are kept.",
+    },
+    "courses": {
+        "summary": "Every shared course, with its programme links and its allocation requirements.",
+        "model": Course,
+        "list_url": "/course-requirements/",
+        "clear_url": "/course-requirements/clear-all/",
+        "page_title": "Courses",
+        "primary_label": "Courses",
+        "log_resource": "Course",
+        "redirect_name": "course-requirement-list",
+        "related_count": (
+            (ProgrammeCourse.objects.all(), "Programme course links"),
+            (CourseActivityRequirement.objects.all(), "Activity requirements"),
+        ),
+        "kept_note": (
+            "Programmes, student groups, sessions, semesters and venues are "
+            "kept; the sessions keep their course code text."
+        ),
+    },
+    "venues": {
+        "summary": "Every venue. Sessions are kept, but lose the venue they were booked into.",
+        "model": Venue,
+        "list_url": "/venues/",
+        "clear_url": "/venues/clear-all/",
+        "page_title": "Venues",
+        "primary_label": "Venues",
+        "log_resource": "Venue",
+        "redirect_name": "venue-list",
+        "detached_count": ((Session.objects.filter(venue__isnull=False), "sessions"),),
+        "kept_note": (
+            "Sessions are kept and will simply have their venue reference "
+            "cleared. Semesters, programmes, courses and student groups are kept."
+        ),
+    },
+    "sessions": {
+        "summary": "Every session in the master timetable, and every group link made from it.",
+        "model": Session,
+        "list_url": "/sessions/",
+        "clear_url": "/sessions/clear-all/",
+        "page_title": "Master Timetable",
+        "primary_label": "Sessions",
+        "log_resource": "Session",
+        "redirect_name": "session-list",
+        "related_count": ((SessionGroup.objects.all(), "Session-group links"),),
+        "kept_note": "Semesters, programmes, courses, student groups and venues are kept.",
+    },
+    "workshops": {
+        "summary": "Every workshop allocation. Nothing outside this list is touched.",
+        "model": WorkshopAllocation,
+        "list_url": "/workshops/",
+        "clear_url": "/workshops/clear-all/",
+        "page_title": "Workshop Allocations",
+        "primary_label": "Workshop Allocations",
+        "log_resource": "Workshop Allocation",
+        "redirect_name": "workshop-list",
+        "kept_note": (
+            "Sessions, semesters, programmes, courses, student groups and venues are kept."
+        ),
+    },
+    "td": {
+        "summary": "Every technical drawing allocation. Nothing outside this list is touched.",
+        "model": TechnicalDrawingAllocation,
+        "list_url": "/td/",
+        "clear_url": "/td/clear-all/",
+        "page_title": "Technical Drawing Allocations",
+        "primary_label": "Technical Drawing Allocations",
+        "log_resource": "TD Allocation",
+        "redirect_name": "td-list",
+        "kept_note": (
+            "Sessions, semesters, programmes, courses, student groups and venues are kept."
+        ),
+    },
+}
+
+# The Danger Zone reads in the same order as the sidebar, so a coordinator finds
+# each target where they just saw its page.
+CLEAR_ALL_GROUPS = (
+    ("Reference Data", ("programmes", "groups", "programme-courses", "courses", "venues")),
+    ("Timetable", ("sessions",)),
+    ("Allocations", ("workshops", "td")),
+)
+
+
+def _clear_all_kwargs(key):
+    """The `_clear_all` arguments for one registry entry.
+
+    ``summary`` belongs to the Danger Zone board and is not an argument, so it
+    is dropped here rather than at every call site.
+    """
+    target = dict(CLEAR_ALL_TARGETS[key])
+    target.pop("summary", None)
+    return target
+
+
+def danger_zone(request):
+    """The one page holding every 'clear all' action.
+
+    Each card opens the same confirmation modal the resource's own button used
+    to open, so nothing about the deletion itself changes -- only where it is
+    reached from. The counts here are live, because a board that says "0
+    sessions" is the difference between a deliberate reset and a data loss.
+    """
+    groups = []
+    for label, keys in CLEAR_ALL_GROUPS:
+        targets = []
+        for key in keys:
+            target = CLEAR_ALL_TARGETS[key]
+            related = [
+                {"label": name, "count": qs.count()}
+                for qs, name in target.get("related_count", ())
+            ]
+            detached = [
+                {"label": name, "count": qs.count()}
+                for qs, name in target.get("detached_count", ())
+            ]
+            count = target["model"].objects.count()
+            related_total = sum(row["count"] for row in related)
+            detached_total = sum(row["count"] for row in detached)
+            targets.append(
+                {
+                    "key": key,
+                    "label": target["primary_label"],
+                    "summary": target["summary"],
+                    "list_url": target["list_url"],
+                    "clear_url": target["clear_url"],
+                    "count": count,
+                    "related": related,
+                    "related_total": related_total,
+                    "detached_total": detached_total,
+                    "has_records": bool(count or related_total or detached_total),
+                }
+            )
+        groups.append({"label": label, "targets": targets})
+    ctx = {
+        "page_title": "Danger Zone",
+        "groups": groups,
+        "target_count": sum(len(group["targets"]) for group in groups),
+    }
+    if _htmx(request):
+        return render(request, "core/_danger_zone_body.html", ctx)
+    return render(request, "core/danger_zone.html", ctx)
+
+
 def _search(qs, q, fields):
     if not q:
         return qs
@@ -282,7 +473,18 @@ def dashboard(request):
     if semester_id:
         semester = semesters.filter(pk=semester_id).first()
     if semester is None:
-        semester = configured_semester.current_semester if configured_semester else semesters.first()
+        # The semesters list decides which term staff are working in. The portal
+        # setting is a narrower, student-facing choice, so it only wins when it
+        # actually names a semester; otherwise the app-wide current semester
+        # does, and failing that the newest one.
+        portal_semester = (
+            configured_semester.current_semester if configured_semester else None
+        )
+        semester = (
+            portal_semester
+            or Semester.current()
+            or semesters.first()
+        )
     sessions = Session.objects.all()
     if semester:
         sessions = sessions.filter(semester=semester)
@@ -312,6 +514,7 @@ def dashboard(request):
         "recent_sessions": sessions.select_related(
             "semester", "venue"
         ).order_by("-pk")[:10],
+        "latest_import": ImportHistory.objects.first(),
     }
     log_id = request.GET.get("log", "")
     if log_id:
@@ -379,7 +582,6 @@ def programme_list(request):
         "page_title": "Programmes",
         "list_url": "/programmes/",
         "create_url": "/programmes/create/",
-        "clear_all_url": "/programmes/clear-all/",
         "edit_name": "programme-edit",
         "delete_name": "programme-delete",
         "detail_name": "programme-detail",
@@ -468,29 +670,20 @@ def programme_delete(request, pk):
 
 def programme_clear_all(request):
     """Clear every Programme (cascading its courses and student groups)."""
-    return _clear_all(
-        request,
-        model=Programme,
-        list_url="/programmes/",
-        clear_url="/programmes/clear-all/",
-        page_title="Programmes",
-        primary_label="Programmes",
-        log_resource="Programme",
-        redirect_name="programme-list",
-        related_count=(
-            (StudentGroup.objects.all(), "Student groups"),
-            (ProgrammeCourse.objects.all(), "Programme courses"),
-            (SessionGroup.objects.all(), "Session-group links"),
-        ),
-        kept_note=(
-            "Linked student groups and programme courses are deleted with their "
-            "programmes. Sessions and semesters are kept."
-        ),
-    )
+    return _clear_all(request, **_clear_all_kwargs("programmes"))
 
 
 def _latest_semester_with_data():
-    """Most recent semester that holds any timetable data, else the latest one."""
+    """The current semester if it holds data, else the most recent one that does.
+
+    A current semester is honoured only when it has timetable data: an export
+    with no `?semester=` must not hand the reader a blank sheet because a term
+    was marked current before anything was imported into it. With no current
+    semester this is the original "newest with data, else newest" rule.
+    """
+    current = Semester.current()
+    if current is not None and _semester_has_data(current):
+        return current
     return (
         Semester.objects.filter(
             Q(sessions__isnull=False)
@@ -501,6 +694,18 @@ def _latest_semester_with_data():
         .distinct()
         .first()
         or Semester.objects.order_by("-academic_year", "-semester").first()
+    )
+
+
+def _semester_has_data(semester):
+    return (
+        Semester.objects.filter(pk=semester.pk)
+        .filter(
+            Q(sessions__isnull=False)
+            | Q(workshop_allocations__isnull=False)
+            | Q(td_allocations__isnull=False)
+        )
+        .exists()
     )
 
 
@@ -716,7 +921,8 @@ def timetable_view(request):
         "groups_for_programme": groups_for_programme,
         "active_semester": active_semester,
         "year": year,
-        "year_options": [1, 2, 3, 4],
+        # No year_options: only first year is timetabled, so the toolbar states
+        # the year instead of offering a menu of years that have no timetable.
         "year_ordinal": ordinal.get(year, f"{year}th"),
         "grid": grid,
         "entry_count": len(entries),
@@ -781,7 +987,6 @@ def studentgroup_list(request):
         "page_title": "Student Groups",
         "list_url": "/groups/",
         "create_url": "/groups/create/",
-        "clear_all_url": "/groups/clear-all/",
         "edit_name": "group-edit",
         "delete_name": "group-delete",
         "detail_name": "group-detail",
@@ -884,18 +1089,7 @@ def studentgroup_delete(request, pk):
 
 def group_clear_all(request):
     """Clear every StudentGroup, removing its SessionGroup links."""
-    return _clear_all(
-        request,
-        model=StudentGroup,
-        list_url="/groups/",
-        clear_url="/groups/clear-all/",
-        page_title="Student Groups",
-        primary_label="Student Groups",
-        log_resource="Student Group",
-        redirect_name="group-list",
-        related_count=((SessionGroup.objects.all(), "Session-group links"),),
-        kept_note="Sessions, programmes, courses, semesters and venues are kept.",
-    )
+    return _clear_all(request, **_clear_all_kwargs("groups"))
 
 
 # ──────────────────────────────────────────────
@@ -940,7 +1134,6 @@ def venue_list(request):
         "page_title": "Venues",
         "list_url": "/venues/",
         "create_url": "/venues/create/",
-        "clear_all_url": "/venues/clear-all/",
         "edit_name": "venue-edit",
         "delete_name": "venue-delete",
         "detail_name": "venue-detail",
@@ -1037,21 +1230,7 @@ def venue_delete(request, pk):
 
 def venue_clear_all(request):
     """Clear every Venue, clearing its Session references (sessions are kept)."""
-    return _clear_all(
-        request,
-        model=Venue,
-        list_url="/venues/",
-        clear_url="/venues/clear-all/",
-        page_title="Venues",
-        primary_label="Venues",
-        log_resource="Venue",
-        redirect_name="venue-list",
-        detached_count=((Session.objects.filter(venue__isnull=False), "sessions"),),
-        kept_note=(
-            "Sessions are kept and will simply have their venue reference "
-            "cleared. Semesters, programmes, courses and student groups are kept."
-        ),
-    )
+    return _clear_all(request, **_clear_all_kwargs("venues"))
 
 
 def _merge_venues(source, target):
@@ -1308,6 +1487,12 @@ def venue_fix_conflict(request):
 SEM_COLS = [
     {"key": "academic_year", "label": "Academic Year"},
     {"key": "semester", "label": "Semester"},
+    {
+        "key": "is_current",
+        "label": "Current",
+        "badge": True,
+        "badge_label": "Current",
+    },
 ]
 SEM_FIELDS = [
     {"label": "Academic Year", "key": "academic_year"},
@@ -1349,10 +1534,65 @@ def semester_list(request):
         "page": page,
         "pages": pages,
         "total": total,
+        "current_semester": Semester.current(),
+        "row_actions": _semester_row_actions(items),
+        "list_actions_template": "core/_semester_current.html",
     }
     if _htmx(request):
         return render(request, "core/_table_and_cards.html", ctx)
     return render(request, "core/list.html", ctx)
+
+
+def _semester_row_actions(items):
+    """Per-row Make/Unset current buttons for the semesters list.
+
+    The label states the action rather than the state, so a second click can
+    never silently unset the term the whole app is working in.
+    """
+    actions = {}
+    for item in items:
+        actions[item.pk] = [
+            {
+                "url": reverse("semester-set-current", args=[item.pk]),
+                "label": "Unset current" if item.is_current else "Make current",
+                "title": (
+                    "Stop using this semester as the current one"
+                    if item.is_current
+                    else "Use this semester as the current one across the app"
+                ),
+                "active": item.is_current,
+            }
+        ]
+    return actions
+
+
+def semester_set_current(request, pk):
+    """Make one semester the current one, or clear the flag.
+
+    POST only. It is a toggle rather than a plain "set" so the single button
+    can undo itself, which is how the semesters list stays the only place that
+    manages this value.
+    """
+    item = get_object_or_404(Semester, pk=pk)
+    if request.method != "POST":
+        return redirect("/semesters/")
+    if item.is_current:
+        Semester.set_current(None)
+        _log(
+            LogAction.UPDATE,
+            f"Unset the current semester (was {item})",
+            resource="Semester",
+            target=str(item),
+        )
+    else:
+        Semester.set_current(item)
+        _log(
+            LogAction.UPDATE,
+            f"Set {item} as the current semester",
+            resource="Semester",
+            target=str(item),
+        )
+    return _write_response(request, "close-modal,refresh-table", "semester-list")
 
 
 def semester_detail(request, pk):
@@ -1576,7 +1816,6 @@ def session_list(request):
         "list_url": "/sessions/",
         "assignment_url": "/allocation/",
         "create_url": "/sessions/create/",
-        "clear_all_url": "/sessions/clear-all/",
         "edit_name": "session-edit",
         "delete_name": "session-delete",
         "detail_name": "session-detail",
@@ -1804,18 +2043,7 @@ def session_delete(request, pk):
 
 def session_clear_all(request):
     """Clear every Session (cascading its SessionGroup links) from the database."""
-    return _clear_all(
-        request,
-        model=Session,
-        list_url="/sessions/",
-        clear_url="/sessions/clear-all/",
-        page_title="Master Timetable",
-        primary_label="Sessions",
-        log_resource="Session",
-        redirect_name="session-list",
-        related_count=((SessionGroup.objects.all(), "Session-group links"),),
-        kept_note="Semesters, programmes, courses, student groups and venues are kept.",
-    )
+    return _clear_all(request, **_clear_all_kwargs("sessions"))
 
 
 def session_add_group(request, pk):
@@ -1960,7 +2188,6 @@ def workshop_list(request):
         "page_title": "Workshop Allocations",
         "list_url": "/workshops/",
         "create_url": "/workshops/create/",
-        "clear_all_url": "/workshops/clear-all/",
         "edit_name": "workshop-edit",
         "delete_name": "workshop-delete",
         "detail_name": "workshop-detail",
@@ -2086,19 +2313,7 @@ def workshop_delete(request, pk):
 
 def workshop_clear_all(request):
     """Clear every WorkshopAllocation record from the database."""
-    return _clear_all(
-        request,
-        model=WorkshopAllocation,
-        list_url="/workshops/",
-        clear_url="/workshops/clear-all/",
-        page_title="Workshop Allocations",
-        primary_label="Workshop Allocations",
-        log_resource="Workshop Allocation",
-        redirect_name="workshop-list",
-        kept_note=(
-            "Sessions, semesters, programmes, courses, student groups and venues are kept."
-        ),
-    )
+    return _clear_all(request, **_clear_all_kwargs("workshops"))
 
 
 # ──────────────────────────────────────────────
@@ -2173,7 +2388,6 @@ def td_list(request):
         "page_title": "Technical Drawing Allocations",
         "list_url": "/td/",
         "create_url": "/td/create/",
-        "clear_all_url": "/td/clear-all/",
         "edit_name": "td-edit",
         "delete_name": "td-delete",
         "detail_name": "td-detail",
@@ -2274,19 +2488,7 @@ def td_delete(request, pk):
 
 def td_clear_all(request):
     """Clear every TechnicalDrawingAllocation record from the database."""
-    return _clear_all(
-        request,
-        model=TechnicalDrawingAllocation,
-        list_url="/td/",
-        clear_url="/td/clear-all/",
-        page_title="Technical Drawing Allocations",
-        primary_label="Technical Drawing Allocations",
-        log_resource="TD Allocation",
-        redirect_name="td-list",
-        kept_note=(
-            "Sessions, semesters, programmes, courses, student groups and venues are kept."
-        ),
-    )
+    return _clear_all(request, **_clear_all_kwargs("td"))
 
 
 # ──────────────────────────────────────────────
@@ -2350,7 +2552,6 @@ def course_list(request):
         "page_title": "Programme Courses",
         "list_url": "/courses/",
         "create_url": "/courses/create/",
-        "clear_all_url": "/courses/clear-all/",
         "edit_name": "course-edit",
         "delete_name": "course-delete",
         "detail_name": "course-detail",
@@ -2458,17 +2659,7 @@ def course_delete(request, pk):
 
 def course_clear_all(request):
     """Clear every ProgrammeCourse mapping; programmes and other data are kept."""
-    return _clear_all(
-        request,
-        model=ProgrammeCourse,
-        list_url="/courses/",
-        clear_url="/courses/clear-all/",
-        page_title="Programme Courses",
-        primary_label="Programme Courses",
-        log_resource="Programme Course",
-        redirect_name="course-list",
-        kept_note="Programme, student group, session, semester and venue records are kept.",
-    )
+    return _clear_all(request, **_clear_all_kwargs("programme-courses"))
 
 
 # ──────────────────────────────────────────────
@@ -2540,7 +2731,6 @@ def course_requirement_list(request):
         "page_title": "Courses",
         "list_url": "/course-requirements/",
         "create_url": "/course-requirements/create/",
-        "clear_all_url": "/course-requirements/clear-all/",
         "edit_name": "course-requirement-edit",
         "delete_name": "course-requirement-delete",
         "detail_name": "course-requirement-detail",
@@ -2719,27 +2909,7 @@ def course_requirement_clear_all(request):
     Sessions keep their own ``course_code`` text, so timetables and exports are
     untouched; only the requirement data goes.
     """
-    return _clear_all(
-        request,
-        model=Course,
-        list_url="/course-requirements/",
-        clear_url="/course-requirements/clear-all/",
-        page_title="Courses",
-        primary_label="Courses",
-        log_resource="Course",
-        redirect_name="course-requirement-list",
-        related_count=(
-            (ProgrammeCourse.objects.all(), "Programme course links"),
-            (
-                CourseActivityRequirement.objects.all(),
-                "Activity requirements",
-            ),
-        ),
-        kept_note=(
-            "Programmes, student groups, sessions, semesters and venues are "
-            "kept; the sessions keep their course code text."
-        ),
-    )
+    return _clear_all(request, **_clear_all_kwargs("courses"))
 
 
 # ──────────────────────────────────────────────
@@ -2747,7 +2917,7 @@ def course_requirement_clear_all(request):
 # ──────────────────────────────────────────────
 
 ALLOCATION_SCOPES = [
-    (AllocationScope.ALL, "All configured activities"),
+    (AllocationScope.ALL, "All activities"),
     (AllocationScope.SEMINAR, "Seminar"),
     (AllocationScope.TUTORIAL, "Tutorial"),
     (AllocationScope.PRACTICAL, "Practical"),
@@ -2755,7 +2925,7 @@ ALLOCATION_SCOPES = [
 
 
 def _allocation_base_context(request, semester=None, scope=AllocationScope.ALL, run=None):
-    semesters = list(Semester.objects.all())
+    semesters = list(_allocation_semesters())
     return {
         "page_title": "Group Allocation",
         "semesters": semesters,
@@ -2777,15 +2947,35 @@ def _allocation_base_context(request, semester=None, scope=AllocationScope.ALL, 
     }
 
 
+def _allocation_semesters():
+    """The semesters the allocation pages offer, newest first.
+
+    Ordered on purpose: an unordered list is what made a bare visit land on an
+    arbitrary term, so both the dropdown order and the default below came from
+    the database's whim.
+    """
+    return Semester.objects.order_by("-academic_year", "-semester")
+
+
 def _selected_semester(request):
-    """The semester the coordinator is working on (never guessed silently)."""
-    semesters = list(Semester.objects.all())
+    """The semester the coordinator is working on.
+
+    A bare visit means the term the app is working in -- the same default the
+    dashboard gives, so the allocator and the progress board open on the
+    semester the coordinator is actually looking at. ``?semester=`` (or the
+    ``semester`` field a form posts) always wins, so the pickers keep working.
+
+    Unlike the exports, this does not skip a current term that holds no data:
+    an empty board is the honest answer for a term nothing has been imported
+    into, and quietly showing a *different* term's groups would not be.
+    """
+    semesters = list(_allocation_semesters())
     if not semesters:
         return None
     raw = request.POST.get("semester") or request.GET.get("semester") or ""
     if raw:
         return next((s for s in semesters if str(s.pk) == str(raw)), None)
-    return semesters[0]
+    return Semester.current() or semesters[0]
 
 
 def _selected_scope(request):
@@ -2849,12 +3039,19 @@ def allocation_groups(request):
         else []
     )
     statuses = group_statuses(semester, scope, groups) if semester else {}
+    # The board is redrawn against the filters it is showing, so a row must open
+    # against them too -- the panel would otherwise resolve "the semester" itself
+    # and list a different set of sessions.
+    view_query = urlencode({"semester": semester.pk if semester else "", "scope": scope})
     rows = []
     for group in groups:
         status = statuses.get(group.pk)
         if status is None:
             status = GroupStatus(group=group, semester=semester)
         status.detail_url = reverse("allocation-group", args=[group.pk])
+        # Every row opens in the slide-over panel, so a coordinator places a
+        # requirement without travelling to the group's own page first.
+        status.slide_url = f"{reverse('allocation-group-slide', args=[group.pk])}?{view_query}"
         rows.append(status)
     # Most finished first, then most work left, then a stable name order. The
     # first key is "is NOT complete" so that finished groups sort to the top --
@@ -2868,19 +3065,19 @@ def allocation_groups(request):
             s.group.code,
         )
     )
-    return render(
-        request,
-        "core/allocation_groups.html",
-        {
-            **_allocation_base_context(request, semester=semester, scope=scope),
-            "rows": rows,
-            "complete": sum(1 for r in rows if r.is_complete),
-            "partial": sum(1 for r in rows if 0 < r.met < r.total),
-            "unassigned": sum(1 for r in rows if r.total and not r.met),
-            "nothing": sum(1 for r in rows if r.has_nothing_to_do),
-            "outstanding": sum(r.outstanding for r in rows),
-        },
-    )
+    ctx = {
+        **_allocation_base_context(request, semester=semester, scope=scope),
+        "rows": rows,
+        "complete": sum(1 for r in rows if r.is_complete),
+        "partial": sum(1 for r in rows if 0 < r.met < r.total),
+        "unassigned": sum(1 for r in rows if r.total and not r.met),
+        "nothing": sum(1 for r in rows if r.has_nothing_to_do),
+        "outstanding": sum(r.outstanding for r in rows),
+        "board_url": f"{reverse('allocation-groups')}?{view_query}",
+    }
+    if _htmx(request):
+        return render(request, "core/_allocation_groups_board.html", ctx)
+    return render(request, "core/allocation_groups.html", ctx)
 
 
 def _group_panel_context(request, group, semester, scope):
@@ -2925,6 +3122,30 @@ def allocation_group_detail(request, pk):
     )
 
 
+def allocation_group_slide(request, pk):
+    """One group in the slide-over panel, opened out of a board row.
+
+    The same requirement panel the group's own page renders, wrapped in a heading
+    and a way through to that page. Every candidate in it was judged by
+    ``validate_assignment`` and every button posts to the usual endpoint, so
+    placing a requirement from a board row is exactly as safe as doing it on the
+    page.
+    """
+    group = get_object_or_404(
+        StudentGroup.objects.select_related("programme"), pk=pk
+    )
+    return render(
+        request,
+        "core/_allocation_group_slide.html",
+        {
+            **_group_panel_context(
+                request, group, _selected_semester(request), _selected_scope(request)
+            ),
+            "detail_url": reverse("allocation-group", args=[group.pk]),
+        },
+    )
+
+
 def allocation_group_panel(request, pk):
     """The requirement list on its own, so a placement updates in place.
 
@@ -2952,8 +3173,8 @@ def _allocation_panel_response(request, group, session=None):
 
     The semester comes from the request when the form sent one, because the
     panel must re-render the view the coordinator is looking at. Without that,
-    the endpoint would fall back to the latest semester -- and quietly redraw
-    the list against a different set of sessions than the one on screen. When
+    the endpoint would fall back to the current term -- and quietly redraw the
+    list against a different set of sessions than the one on screen. When
     the caller sent nothing at all, the session being placed names the semester
     outright, so use that rather than picking one.
     """
@@ -2970,7 +3191,7 @@ def _allocation_panel_response(request, group, session=None):
             f"{reverse('allocation-group', args=[group.pk])}?"
             f"{urlencode({'semester': semester.pk if semester else ''})}"
         )
-    return render(
+    response = render(
         request,
         "core/_allocation_group_panel.html",
         _group_panel_context(
@@ -2980,6 +3201,24 @@ def _allocation_panel_response(request, group, session=None):
             request.POST.get("scope") or _selected_scope(request),
         ),
     )
+    return response
+
+
+def _panel_response(panel, message, kind):
+    """A panel response, announcing the placement and asking for a redraw.
+
+    ``refresh-table`` is what keeps the progress board honest: the panel is
+    often opened out of a row on it, and a placement made here is also a change
+    to that row's progress, its outstanding count and the list of unassigned
+    sessions behind it.
+    """
+    panel["HX-Trigger"] = json.dumps(
+        {
+            "allocation-toast": {"message": message, "type": kind},
+            "refresh-table": None,
+        }
+    )
+    return panel
 
 
 def allocation_preview(request):
@@ -3119,15 +3358,9 @@ def allocation_assign(request):
     }
     panel = _allocation_panel_response(request, group, session=session)
     if panel is not None:
-        panel["HX-Trigger"] = json.dumps(
-            {
-                "allocation-toast": {
-                    "message": message,
-                    "type": "success" if linked else "error",
-                }
-            }
+        return _panel_response(
+            panel, message, "success" if linked else "error"
         )
-        return panel
     if _htmx(request):
         response = render(request, "core/_allocation_message.html", ctx)
         response["HX-Trigger"] = json.dumps(
@@ -3178,10 +3411,7 @@ def allocation_unassign(request):
     }
     panel = _allocation_panel_response(request, group, session=session)
     if panel is not None:
-        panel["HX-Trigger"] = json.dumps(
-            {"allocation-toast": {"message": message, "type": "info"}}
-        )
-        return panel
+        return _panel_response(panel, message, "info")
     if _htmx(request):
         response = render(request, "core/_allocation_message.html", ctx)
         response["HX-Trigger"] = json.dumps(
@@ -3350,6 +3580,8 @@ IMPORT_TYPES = {
         ),
         "fn": import_workshop_allocation_from_excel,
     },
+    # Hidden from the hub (see HIDDEN_IMPORT_TYPES) but still fully wired: the
+    # `td-allocation` URL, the upload view and the importer all keep working.
     "td-allocation": {
         "title": "TD Allocation",
         "columns": "course_code, group_code, day, start_time, end_time, venue",
@@ -3364,6 +3596,12 @@ IMPORT_TYPES = {
     },
 }
 
+# The TD upload card is withdrawn from the import hub at the coordinator's
+# request. The type stays in IMPORT_TYPES, so the importer, the upload view and
+# the /import/td-allocation/ URL all still work and the card can be brought
+# back by deleting one line.
+HIDDEN_IMPORT_TYPES = {"td-allocation"}
+
 
 def import_hub(request):
     latest_by_type = {}
@@ -3373,7 +3611,12 @@ def import_hub(request):
         )
     ctx = {
         "page_title": "Import Data",
-        "import_types": IMPORT_TYPES,
+        # HIDDEN_IMPORT_TYPES are still importable, just not offered as a card.
+        "import_types": {
+            k: v
+            for k, v in IMPORT_TYPES.items()
+            if k not in HIDDEN_IMPORT_TYPES
+        },
         "latest_imports": latest_by_type,
         "recent_imports": ImportHistory.objects.all()[:8],
         "import_history_count": ImportHistory.objects.count(),
@@ -3389,7 +3632,10 @@ def import_upload(request, import_type):
     semester_choice = info.get("semester", "")
     semesters = Semester.objects.all()
     no_semester = semester_choice == "required" and not semesters
-    active_semester = ""
+    # Preselect the current semester rather than leaving the first option
+    # selected: most imports belong to the term the app is working in, and the
+    # master-timetable import writes to exactly the semester named here.
+    active_semester = str(Semester.current().pk) if Semester.current() else ""
     saved_import = None
     import_status = None
     if request.method == "POST":
