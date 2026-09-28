@@ -19,7 +19,7 @@
     <section aria-label="Semester statistics" class="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <div class="rounded-xl border bg-white p-4"><div class="text-xs font-medium text-slate-500">Sessions</div><div class="mt-1 text-2xl font-bold text-slate-900">{{ dashboard_session_count }}</div></div>
         <div class="rounded-xl border bg-white p-4"><div class="text-xs font-medium text-slate-500">Student groups</div><div class="mt-1 text-2xl font-bold text-slate-900">{{ group_count }}</div></div>
-        <a href="{% url 'allocation-page' %}{% if selected_semester %}?semester={{ selected_semester.pk }}{% endif %}" class="rounded-xl border bg-white p-4 hover:border-amber-300"><div class="text-xs font-medium text-slate-500">Unassigned sessions</div><div class="mt-1 text-2xl font-bold text-amber-700">{{ unassigned_count }}</div></a>
+        <a href="{% url 'session-list' %}{% if selected_semester %}?semester={{ selected_semester.pk }}&assigned=no{% else %}?assigned=no{% endif %}" class="rounded-xl border bg-white p-4 hover:border-amber-300"><div class="text-xs font-medium text-slate-500">Unassigned sessions</div><div class="mt-1 text-2xl font-bold text-amber-700">{{ unassigned_count }}</div></a>
         <a href="{% url 'collision-report-list' %}" class="rounded-xl border bg-white p-4 hover:border-rose-300"><div class="text-xs font-medium text-slate-500">Open clash reports</div><div class="mt-1 text-2xl font-bold text-rose-700">{{ open_collision_count }}</div></a>
     </section>
 

@@ -2741,10 +2741,11 @@ def course_requirement_list(request):
         "missing_examples": [
             row.code for row in rows if not row.has_requirements()
         ][:12],
+        "base_template": "core/_course_list_base.html",
     }
     if _htmx(request):
         return render(request, "core/_table_and_cards.html", ctx)
-    return render(request, "core/list.html", ctx)
+    return render(request, "core/_course_list_base.html", ctx)
 
 
 def _course_row(course):

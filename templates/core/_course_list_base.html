@@ -1,0 +1,96 @@
+{% extends "core/list.html" %}
+
+{% block content %}
+<div class="max-w-7xl mx-auto">
+    <!-- Custom Toolbar with Programme Courses link -->
+    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+        <div class="text-sm text-gray-500" id="record-total">{{ total }} record{{ total|pluralize }}</div>
+        <div class="flex flex-wrap items-center gap-2">
+            <a href="{% url 'course-list' %}" class="hidden sm:inline-flex items-center justify-center gap-2 px-3.5 sm:px-4 py-2 sm:py-2.5 bg-gray-100 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-200 transition">
+                Programme Courses
+            </a>
+            <button onclick="openModal('{{ create_url }}', '{{ "Create " }}{{ page_title }}')"
+                    class="inline-flex items-center justify-center gap-2 px-3.5 sm:px-4 py-2 sm:py-2.5 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+                Add New
+            </button>
+            <a href="{% url 'course-list' %}" class="sm:hidden inline-flex items-center justify-center gap-2 px-3.5 sm:px-4 py-2 sm:py-2.5 bg-gray-100 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-200 transition">
+                Programme Courses
+            </a>
+        </div>
+    </div>
+
+    {# Optional panel a list view supplies for itself (the semesters current-semester control). #}
+    {% if list_actions_template %}{% include list_actions_template %}{% endif %}
+    {% block list_actions %}{% endblock %}
+
+    <!-- Filter bar -->
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-3 sm:p-4 mb-4">
+        <form method="get" action=".">
+            <div class="flex flex-col gap-3">
+                <div class="flex flex-col sm:flex-row gap-2 min-w-0">
+                    <div class="flex-1 min-w-0 relative">
+                    <svg class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+                    <input type="search" name="q" value="{{ q }}" placeholder="Search {{ page_title|lower }}..."
+                           class="block box-border w-full min-w-0 h-11 pl-10 pr-3 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                    </div>
+                    <div class="flex gap-2 shrink-0">
+                        <button type="submit" class="flex-1 sm:flex-none px-4 py-2.5 bg-gray-800 text-white text-sm font-medium rounded-lg hover:bg-gray-900 transition">Search</button>
+                        <a href="?" class="flex-1 sm:flex-none flex items-center justify-center px-4 py-2.5 text-sm font-medium text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 transition">Reset</a>
+                    </div>
+                </div>
+                {% if filters %}
+                <details class="rounded-lg border border-gray-200" {% if advanced_filters_open or not filters_collapsible %}open{% endif %}>
+                    <summary class="flex min-h-10 cursor-pointer list-none items-center gap-2 px-3 text-sm font-medium text-gray-700 hover:bg-gray-50 rounded-lg">
+                        <svg class="h-4 w-4 text-gray-500 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m6 9 6 6 6-6"/></svg>
+                        {% if filters_collapsible %}More filters{% else %}Filters{% endif %}
+                        {% if active_filter_count %}<span class="inline-flex min-w-5 h-5 items-center justify-center rounded-full bg-blue-100 px-1.5 text-xs font-semibold text-blue-700">{{ active_filter_count }}</span>{% endif %}
+                    </summary>
+                    <div class="border-t border-gray-200 p-3 sm:p-4">
+                        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                            {% block filters %}
+                            {% for f in filters %}
+                                {% if f.type == "select" %}
+                                <label class="block min-w-0"><span class="mb-1 block text-xs font-medium text-gray-500">{{ f.label }}</span>
+                                    <select name="{{ f.name }}" class="block w-full min-w-0 px-3 py-2.5 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                                        <option value="">All {{ f.label }}s</option>
+                                        {% for v, label in f.options %}<option value="{{ v }}" {% if f.value == v %}selected{% endif %}>{{ label }}</option>{% endfor %}
+                                    </select>
+                                </label>
+                                {% elif f.type == "time" %}
+                                <label class="block min-w-0"><span class="mb-1 block text-xs font-medium text-gray-500">{{ f.label }}</span><input type="time" name="{{ f.name }}" value="{{ f.value }}" class="block w-full min-w-0 px-3 py-2.5 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"></label>
+                                {% elif f.type == "number" %}
+                                <label class="block min-w-0"><span class="mb-1 block text-xs font-medium text-gray-500">{{ f.label }}</span><input type="number" name="{{ f.name }}" value="{{ f.value }}" class="block w-full min-w-0 px-3 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"></label>
+                                {% else %}
+                                <label class="block min-w-0"><span class="mb-1 block text-xs font-medium text-gray-500">{{ f.label }}</span><input type="text" name="{{ f.name }}" value="{{ f.value }}" class="block w-full min-w-0 px-3 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"></label>
+                                {% endif %}
+                            {% endfor %}
+                            {% endblock %}
+                        </div>
+                        <button type="submit" class="mt-3 px-4 py-2.5 bg-gray-800 text-white text-sm font-medium rounded-lg hover:bg-gray-900 transition">Apply filters</button>
+                    </div>
+                </details>
+                {% endif %}
+            </div>
+        </form>
+    </div>
+
+    <!-- Table + Mobile cards container -->
+    <div class="relative">
+        <div id="data-table-wrap"
+             hx-get="{{ list_url }}{{ query }}"
+             hx-trigger="refresh from:window"
+             hx-swap="innerHTML"
+             hx-settle="220"
+             hx-indicator="#loading-indicator">
+            {% include "core/_table_and_cards.html" %}
+        </div>
+        <div id="loading-indicator"
+             class="htmx-indicator absolute inset-0 z-10 rounded-xl bg-white/60 flex flex-col items-center justify-center gap-2">
+            <svg class="animate-spin w-6 h-6 text-blue-600" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+            <span class="text-sm text-gray-500">Loading data...</span>
+        </div>
+    </div>
+</div>
+
+{% endblock %}

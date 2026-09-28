@@ -1,11 +1,7 @@
 {% extends "base.html" %}
 
 {% block content %}
-{% comment %}Same approach as the allocation page: min-w-0 on every wrapper so
-     nothing sizes itself to its content, overflow-x-hidden on the root as a
-     backstop, and a flex-col -> lg:flex-row control row whose selects are
-     w-full min-w-0 max-w-full so a long <option> can never widen the row.{% endcomment %}
-<div class="max-w-7xl mx-auto space-y-4 min-w-0 overflow-x-hidden">
+<div class="max-w-7xl mx-auto space-y-4 min-w-0 overflow-x-hidden px-2 sm:px-4">
     <div class="min-w-0">
         <h2 class="text-sm font-semibold text-gray-800 break-safe">
             Group progress &mdash; {{ semester|default:"no semester selected" }}
@@ -13,14 +9,15 @@
         </h2>
     </div>
 
-    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4 min-w-0">
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-3 sm:p-4 min-w-0">
         <form method="get" action="."
-              class="flex flex-col lg:flex-row lg:items-end gap-3 min-w-0">
+              class="flex flex-col lg:flex-row lg:items-end gap-2 sm:gap-3 min-w-0">
+            <input type="hidden" name="scope" value="{{ scope }}">
             <div class="flex-1 min-w-0">
                 <label for="board-nav-semester"
                        class="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1.5">Semester</label>
                 <select name="semester" id="board-nav-semester" onchange="this.form.submit()"
-                        class="w-full min-w-0 max-w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                        class="w-full min-w-0 max-w-full px-2 sm:px-3 py-2 sm:py-2.5 border border-gray-300 rounded-lg text-xs sm:text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
                     {% for s in semesters %}
                     <option value="{{ s.pk }}" {% if semester and s.pk == semester.pk %}selected{% endif %}>{{ s }}</option>
                     {% endfor %}
@@ -29,15 +26,15 @@
             <div class="flex-1 min-w-0">
                 <label for="board-nav-scope"
                        class="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1.5">Activities</label>
-                <select name="scope" id="board-nav-scope" onchange="this.form.submit()"
-                        class="w-full min-w-0 max-w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                <select name="scope_select" id="board-nav-scope" onchange="document.querySelector('input[name=\"scope\"]').value = this.value; this.form.submit()"
+                        class="w-full min-w-0 max-w-full px-2 sm:px-3 py-2 sm:py-2.5 border border-gray-300 rounded-lg text-xs sm:text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
                     {% for value, label in scopes %}
                     <option value="{{ value }}" {% if scope == value %}selected{% endif %}>{{ label }}</option>
                     {% endfor %}
                 </select>
             </div>
             <a href="{% url 'allocation-page' %}{% if semester %}?semester={{ semester.pk }}&scope={{ scope }}{% endif %}"
-               class="inline-flex w-full lg:w-auto shrink-0 items-center justify-center gap-1.5 px-4 py-2.5 text-sm font-medium text-center text-gray-700 border border-gray-300 bg-white rounded-lg hover:bg-gray-50 transition">
+               class="inline-flex w-full lg:w-auto shrink-0 items-center justify-center gap-1.5 px-3 sm:px-4 py-2 sm:py-2.5 text-xs sm:text-sm font-medium text-center text-gray-700 border border-gray-300 bg-white rounded-lg hover:bg-gray-50 transition">
                 Run the allocator
             </a>
         </form>
