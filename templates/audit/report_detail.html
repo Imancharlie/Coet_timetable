@@ -1,0 +1,366 @@
+{% extends "base.html" %}
+{% block title %}{{ report.document_title }}{% endblock %}
+{% block content %}
+<div class="px-4 sm:px-6 py-6 max-w-7xl mx-auto min-w-0">
+
+    {# ---- header: what this is, and the two ways out ---- #}
+    <div class="flex flex-wrap items-start justify-between gap-4 mb-6">
+        <div class="min-w-0">
+            <h1 class="text-2xl font-semibold text-slate-900">Post-Allocation Audit</h1>
+            <p class="text-sm text-slate-600 mt-1">
+                {{ report.allocation_run.semester }} &middot; run #{{ report.allocation_run_id }}
+                &middot; version {{ report.version }}
+                &middot; generated {{ report.created_label }}
+            </p>
+            <p class="text-xs text-slate-500 mt-1">
+                data hash <code class="text-slate-600">{{ report.data_hash|truncatechars:16 }}</code>
+                {% if report.generation_seconds %}&middot; {{ report.generation_seconds }}s{% endif %}
+            </p>
+        </div>
+        <div class="flex flex-wrap items-center gap-2">
+            {% if report.status == 'COMPLETE' %}
+            <a href="{% url 'audit-report-pdf' report.pk %}" download
+               class="inline-flex items-center rounded-md bg-blue-700 px-3 py-2 text-sm font-medium text-white hover:bg-blue-800">
+                Download PDF
+            </a>
+            {% elif report.status == 'FAILED' %}
+            <span class="rounded-md bg-red-50 px-3 py-2 text-sm text-red-800">
+                PDF failed: {{ report.error|truncatechars:80 }}
+            </span>
+            {% else %}
+            <span class="rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                {{ report.status }}{% if report.progress %} &mdash; {{ report.progress }}{% endif %}
+            </span>
+            {% endif %}
+            <a href="{% url 'audit-reports' %}"
+               class="rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">
+                All reports
+            </a>
+        </div>
+    </div>
+
+    {# ---- version navigation: a report is a version, so say which one ---- #}
+    {% if previous or newer %}
+    <div class="mb-5 flex flex-wrap items-center gap-3 text-sm">
+        {% if previous %}
+        <a href="{% url 'audit-report-detail' previous.pk %}"
+           class="text-blue-700 hover:underline">&larr; v{{ previous.version }}
+            ({{ previous.created_label }})</a>
+        {% endif %}
+        {% if newer %}
+        <a href="{% url 'audit-report-detail' newer.pk %}"
+           class="text-blue-700 hover:underline">v{{ newer.version }} &rarr;</a>
+        {% endif %}
+    </div>
+    {% endif %}
+
+    {# ---- verdict ---- #}
+    {% if verdict.label %}
+    <div class="mb-6 rounded-lg border-l-4 p-4
+        {% if verdict.colour == 'green' %}border-green-600 bg-green-50
+        {% elif verdict.colour == 'amber' %}border-amber-500 bg-amber-50
+        {% else %}border-red-600 bg-red-50{% endif %}">
+        <p class="text-xs font-semibold uppercase tracking-wide text-slate-600">Overall</p>
+        <p class="text-xl font-semibold
+            {% if verdict.colour == 'green' %}text-green-800
+            {% elif verdict.colour == 'amber' %}text-amber-800
+            {% else %}text-red-800{% endif %}">{{ verdict.label }}</p>
+        <p class="text-sm text-slate-700 mt-1">
+            {{ counts.groups }} groups in scope &middot;
+            {{ counts.issues }} findings, of which {{ counts.validity }} affect validity
+        </p>
+    </div>
+    {% endif %}
+
+    {# ---- headline numbers ---- #}
+    {% with t=report.summary.tfi %}
+    <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-8">
+        <div class="rounded-lg border border-slate-200 bg-white p-3 min-w-0">
+            <p class="text-xs uppercase tracking-wide text-slate-500">Mean TFI</p>
+            <p class="text-lg font-semibold text-slate-900">{{ t.mean|default:"&mdash;" }}</p>
+        </div>
+        <div class="rounded-lg border border-slate-200 bg-white p-3 min-w-0">
+            <p class="text-xs uppercase tracking-wide text-slate-500">Worst TFI</p>
+            <p class="text-lg font-semibold text-slate-900">{{ t.worst|default:"&mdash;" }}</p>
+        </div>
+        <div class="rounded-lg border border-slate-200 bg-white p-3 min-w-0">
+            <p class="text-xs uppercase tracking-wide text-slate-500">Requirements met</p>
+            <p class="text-lg font-semibold text-slate-900">
+                {% if t.completion != None %}{{ t.completion }}%{% else %}&mdash;{% endif %}
+            </p>
+        </div>
+        <div class="rounded-lg border border-slate-200 bg-white p-3 min-w-0">
+            <p class="text-xs uppercase tracking-wide text-slate-500">Groups at D/E</p>
+            <p class="text-lg font-semibold text-slate-900">{{ t.groups_at_de|default:"&mdash;" }}</p>
+        </div>
+        <div class="rounded-lg border border-slate-200 bg-white p-3 min-w-0">
+            <p class="text-xs uppercase tracking-wide text-slate-500">Findings</p>
+            <p class="text-lg font-semibold text-slate-900">{{ counts.issues|default:"&mdash;" }}</p>
+        </div>
+        <div class="rounded-lg border border-red-200 bg-red-50 p-3 min-w-0">
+            <p class="text-xs uppercase tracking-wide text-red-700">Validity</p>
+            <p class="text-lg font-semibold text-red-800">{{ counts.validity|default:"0" }}</p>
+        </div>
+    </div>
+    {% endwith %}
+
+    {# ---- recommendations: the reason the report exists ---- #}
+    <section class="mb-8">
+        <h2 class="text-lg font-semibold text-slate-900 mb-3">Recommendations</h2>
+        <div class="space-y-3 min-w-0">
+            {% for rec in recommendations %}
+            <div class="rounded-lg border border-slate-200 bg-white p-4 border-l-4 min-w-0
+                {% if rec.priority == 'critical' %}border-l-red-600
+                {% elif rec.priority == 'high' %}border-l-orange-600
+                {% elif rec.priority == 'medium' %}border-l-amber-500
+                {% else %}border-l-blue-700{% endif %}">
+                <div class="flex items-start justify-between gap-3 min-w-0">
+                    <h3 class="font-semibold text-slate-900 min-w-0">
+                        <span class="text-slate-400 mr-1">{{ rec.rank }}.</span>{{ rec.title }}
+                    </h3>
+                    <span class="shrink-0 text-xs uppercase tracking-wide rounded-full px-2 py-0.5
+                        {% if rec.priority == 'critical' %}bg-red-100 text-red-800
+                        {% elif rec.priority == 'high' %}bg-orange-100 text-orange-800
+                        {% elif rec.priority == 'medium' %}bg-amber-100 text-amber-800
+                        {% else %}bg-blue-100 text-blue-800{% endif %}">{{ rec.priority }}</span>
+                </div>
+                <p class="text-sm text-slate-700 mt-1">{{ rec.headline }}</p>
+                <p class="text-sm text-slate-800 mt-2"><strong>Do this:</strong> {{ rec.action }}</p>
+
+                {% if rec.evidence %}
+                <details class="mt-2">
+                    <summary class="text-xs text-slate-500 cursor-pointer">Evidence</summary>
+                    <ul class="mt-1 space-y-0.5">
+                        {# Keys are normalised in audit.render._evidence_rows, so
+                           these always exist. A chained |default:item.note would
+                           NOT be safe: resolving the filter's argument still
+                           raises on a missing key. #}
+                        {% for item in rec.evidence %}
+                        <li class="text-xs text-slate-600">
+                            {% if item.label %}<span class="font-medium">{{ item.label }}:</span>{% endif %}
+                            {{ item.detail|default:"&mdash;" }}
+                        </li>
+                        {% endfor %}
+                    </ul>
+                </details>
+                {% endif %}
+
+                {# A table-shaped recommendation renders as a table, not as a
+                   paragraph per group: the reader is scanning for a row, not
+                   reading a narrative. #}
+                {% if rec.presentation == 'table' and rec.alternatives %}
+                <div class="mt-3 overflow-x-auto min-w-0">
+                    <table class="min-w-full text-xs divide-y divide-slate-100 border border-slate-200 rounded">
+                        <thead class="bg-slate-50 text-slate-600">
+                            <tr>
+                                <th class="px-2 py-1.5 text-left font-semibold">Group</th>
+                                <th class="px-2 py-1.5 text-left font-semibold">Problem</th>
+                                <th class="px-2 py-1.5 text-left font-semibold">Suggested</th>
+                                <th class="hidden sm:table-cell px-2 py-1.5 text-left font-semibold">When</th>
+                                <th class="px-2 py-1.5 text-left font-semibold">Room</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-100">
+                            {% for alt in rec.alternatives %}
+                            <tr>
+                                <td class="px-2 py-1.5 font-medium">{{ alt.group }}</td>
+                                <td class="px-2 py-1.5 text-slate-600">{{ alt.problem }}</td>
+                                <td class="px-2 py-1.5 text-slate-700">
+                                    {{ alt.session|default:"No existing session fits" }}
+                                    {% if alt.why %}<span class="block text-xs text-slate-500">{{ alt.why }}</span>{% endif %}
+                                </td>
+                                <td class="hidden sm:table-cell px-2 py-1.5 text-slate-600">
+                                    {{ alt.day }} {{ alt.time }}
+                                </td>
+                                <td class="px-2 py-1.5 text-slate-600">{{ alt.venue|default:"&mdash;" }}</td>
+                            </tr>
+                            {% endfor %}                        </tbody>
+                    </table>
+                </div>
+                {% endif %}
+
+                <p class="mt-2 text-xs text-slate-500">
+                    affects {{ rec.groups }} group(s) &middot; {{ rec.students }} student-attendances
+                    {% if rec.hours %}&middot; {{ rec.hours }} student-hours{% endif %}
+                </p>
+            </div>
+            {% empty %}
+            <p class="text-sm text-slate-500 rounded-lg border border-dashed border-slate-300 p-4">
+                No recommendations. Nothing the analysis found had an action
+                attached to it.
+            </p>
+            {% endfor %}
+        </div>
+    </section>
+
+    {# ---- day pressure ---- #}
+    {% if day_pressure %}
+    <section class="mb-8">
+        <h2 class="text-lg font-semibold text-slate-900 mb-3">Day pressure</h2>
+        <div class="rounded-lg border border-slate-200 bg-white p-4 space-y-2">
+            {% for data in day_pressure %}
+            <div class="flex items-center gap-3 min-w-0">
+                <span class="w-24 shrink-0 text-sm text-slate-700">{{ data.day }}</span>
+                <div class="flex-1 min-w-0 h-2.5 rounded bg-slate-100 overflow-hidden">
+                    <div class="h-full bg-blue-700"
+                         style="width:{% widthratio data.student_hours|default:0 day_peak|default:1 100 %}%"></div>
+                </div>
+                <span class="w-20 shrink-0 text-right text-sm tabular-nums text-slate-700">
+                    {{ data.student_hours|default:"&mdash;" }}
+                </span>
+            </div>
+            {% endfor %}
+        </div>
+    </section>
+    {% endif %}
+
+    {# ---- room estate ---- #}
+    {% if venues %}
+    <section class="mb-8 min-w-0">
+        <h2 class="text-lg font-semibold text-slate-900 mb-3">Room estate</h2>
+        <div class="overflow-x-auto rounded-lg border border-slate-200 bg-white min-w-0">
+            <table class="min-w-full text-sm divide-y divide-slate-100">
+                <thead class="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+                    <tr>
+                        <th class="px-4 py-2 text-left font-semibold">Room</th>
+                        <th class="px-4 py-2 text-right font-semibold">Capacity</th>
+                        <th class="px-4 py-2 text-right font-semibold">Sessions</th>
+                        <th class="hidden sm:table-cell px-4 py-2 text-right font-semibold">Students</th>
+                        <th class="hidden md:table-cell px-4 py-2 text-right font-semibold">Seat use</th>
+                        <th class="px-4 py-2 text-left font-semibold">Note</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-100">
+                    {% for v in venues %}
+                    <tr>
+                        <td class="px-4 py-2 font-medium">{{ v.venue }}</td>
+                        <td class="px-4 py-2 text-right tabular-nums">{{ v.capacity|default:"&mdash;" }}</td>
+                        <td class="px-4 py-2 text-right tabular-nums">{{ v.sessions|default:"&mdash;" }}</td>
+                        <td class="hidden sm:table-cell px-4 py-2 text-right tabular-nums">{{ v.students|default:"&mdash;" }}</td>
+                        <td class="hidden md:table-cell px-4 py-2 text-right tabular-nums">
+                            {% if v.seat_util != None %}{{ v.seat_util|floatformat:2 }}{% else %}&mdash;{% endif %}
+                        </td>
+                        <td class="px-4 py-2">
+                            {% if v.over_capacity %}
+                            <span class="text-xs text-red-700 font-medium">
+                                {{ v.over_capacity }} over capacity
+                            </span>
+                            {% elif not v.has_venue %}
+                            <span class="text-xs text-slate-500">no room recorded</span>
+                            {% elif v.capacity == None %}
+                            <span class="text-xs text-slate-500">capacity not recorded</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+    {% endif %}
+
+    {# ---- groups ---- #}
+    <section class="mb-8 min-w-0">
+        <h2 class="text-lg font-semibold text-slate-900 mb-3">Groups</h2>
+        <div class="overflow-x-auto rounded-lg border border-slate-200 bg-white min-w-0">
+            <table class="min-w-full text-sm divide-y divide-slate-100">
+                <thead class="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+                    <tr>
+                        <th class="px-4 py-2 text-left font-semibold">Group</th>
+                        <th class="hidden sm:table-cell px-4 py-2 text-left font-semibold">Programme</th>
+                        <th class="px-4 py-2 text-right font-semibold">Size</th>
+                        <th class="px-4 py-2 text-right font-semibold">Sessions</th>
+                        <th class="px-4 py-2 text-right font-semibold">TFI</th>
+                        <th class="hidden md:table-cell px-4 py-2 text-right font-semibold">Dead ratio</th>
+                        <th class="hidden md:table-cell px-4 py-2 text-right font-semibold">Longest gap</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-100">
+                    {% for g in groups %}
+                    <tr>
+                        <td class="px-4 py-2 font-medium">{{ g.code }}</td>
+                        <td class="hidden sm:table-cell px-4 py-2 text-slate-600 max-w-[14rem] break-words">{{ g.programme }}</td>
+                        <td class="px-4 py-2 text-right tabular-nums">{{ g.size }}</td>
+                        <td class="px-4 py-2 text-right tabular-nums">{{ g.sessions }}</td>
+                        <td class="px-4 py-2 text-right tabular-nums font-semibold
+                            {% if g.grade == 'A' %}text-green-700
+                            {% elif g.grade == 'B' %}text-blue-700
+                            {% elif g.grade == 'C' %}text-amber-700
+                            {% else %}text-red-700{% endif %}">
+                            {{ g.score|default:"&mdash;" }} {{ g.grade|default:"" }}
+                        </td>
+                        <td class="hidden md:table-cell px-4 py-2 text-right tabular-nums">
+                            {% if g.dead_ratio != None %}{{ g.dead_ratio|floatformat:2 }}{% else %}&mdash;{% endif %}
+                        </td>
+                        <td class="hidden md:table-cell px-4 py-2 text-right tabular-nums">
+                            {% if g.longest_gap != None %}{{ g.longest_gap }}m{% else %}&mdash;{% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% if unscored %}
+        <p class="mt-2 text-xs text-slate-500">
+            Not scored: {% for u in unscored %}{{ u.code }}{% if not forloop.last %}, {% endif %}{% endfor %}
+        </p>
+        {% endif %}
+    </section>
+
+    {# ---- finding register ---- #}
+    <section class="mb-8 min-w-0">
+        <h2 class="text-lg font-semibold text-slate-900 mb-3">Finding register</h2>
+        <div class="overflow-x-auto rounded-lg border border-slate-200 bg-white min-w-0">
+            <table class="min-w-full text-sm divide-y divide-slate-100">
+                <thead class="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+                    <tr>
+                        <th class="px-4 py-2 text-left font-semibold">Severity</th>
+                        <th class="hidden sm:table-cell px-4 py-2 text-left font-semibold">Category</th>
+                        <th class="px-4 py-2 text-left font-semibold">Finding</th>
+                        <th class="px-4 py-2 text-right font-semibold">Groups</th>
+                        <th class="hidden md:table-cell px-4 py-2 text-right font-semibold">Students</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-100">
+                    {% for i in issues %}
+                    <tr class="{% if i.affects_validity %}bg-red-50/40{% endif %}">
+                        <td class="px-4 py-2 font-medium {% if i.affects_validity %}text-red-700{% else %}text-slate-600{% endif %}">
+                            {{ i.severity }}
+                        </td>
+                        <td class="hidden sm:table-cell px-4 py-2 text-slate-600">{{ i.category }}</td>
+                        <td class="px-4 py-2 text-slate-800">{{ i.description }}</td>
+                        <td class="px-4 py-2 text-right tabular-nums">{{ i.group_count }}</td>
+                        <td class="hidden md:table-cell px-4 py-2 text-right tabular-nums">{{ i.students|default:"&mdash;" }}</td>
+                    </tr>
+                    {% empty %}
+                    <tr><td colspan="5" class="px-4 py-6 text-center text-slate-500">No findings recorded.</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    {% if observations %}
+    <section class="mb-8">
+        <h2 class="text-lg font-semibold text-slate-900 mb-3">Observations</h2>
+        <ul class="list-disc pl-5 space-y-1 text-sm text-slate-700">
+            {% for o in observations %}
+            <li>
+                {% if o.venue %}<span class="font-medium">{{ o.venue }}</span>{% endif %}
+                {% if o.course %}<span class="text-slate-600">{{ o.course }} {{ o.activity }}</span>{% endif %}
+                {% if o.ratio %}
+                <span class="text-red-700">{{ o.students }} students into {{ o.capacity }} seats ({{ o.ratio }}&times; over)</span>
+                {% elif o.text %}{{ o.text }}{% endif %}
+            </li>
+            {% endfor %}
+        </ul>
+    </section>
+    {% endif %}
+
+    <p class="text-xs text-slate-500 border-t border-slate-200 pt-4">
+        Thresholds applied to this version are recorded in
+        <a href="{% url 'audit-report-json' report.pk %}" class="text-blue-700 hover:underline">the JSON payload</a>,
+        which is the same data the PDF was printed from.
+    </p>
+</div>
+{% endblock %}

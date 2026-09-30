@@ -573,26 +573,50 @@ def build_grid(entries, show_groups=False, markup=False, show_notes=True):
 def render_programme_timetable(
     programme, semester, year_of_study=1, out=None, portal_url=None
 ):
-    """Render the programme timetable PDF to `out` (file-like or a path)."""
+    """Render every group of one programme as a single packed PDF sheet.
+
+    Drawn in the all-programmes master layout -- day names down the first
+    column, hours across the first row -- because a whole-programme sheet is the
+    one case where two blocks genuinely collide: two different groups can be in
+    two different sessions at the same hour, and the old time-row/day-column grid
+    had to merge them into a single cell, so one of them was squeezed into the
+    other. ``_DayFlowable`` packs overlapping blocks side by side instead, so no
+    two sessions can ever overprint. A single group's sheet cannot collide at all,
+    which is why ``render_group_timetable`` stays on the compact portrait grid.
+    """
     entries, rotation_keys = _collect_entries_and_rotations(
         programme, semester, year=year_of_study
     )
     groups = list(StudentGroup.objects.filter(programme=programme))
-    show_groups = len(groups) > 1
     # Fold the records that describe one session before drawing: a workshop and
     # the placeholder practical written for it, and the same course recorded
-    # once per group, become one cell listing every group.
-    entries = fold_for_display(entries, {g.code for g in groups})
-    return _render_grid(
-        entries,
-        title=f"{programme.name.upper()}",
-        subtitle=f"{_ordinal(year_of_study)} YEAR · {semester.academic_year}",
-        semester=semester,
+    # once per group, become one block listing every group.
+    merged = fold_for_display(entries, {g.code for g in groups})
+    if len(groups) < 2:
+        # Nothing to tell apart: a one-group programme's sheet would print the
+        # same code beside every block, which says nothing the title does not.
+        # Blanking the entry's own field is what removes the line, because the
+        # band renderer reads ``groups`` to decide whether to draw it at all.
+        for entry in merged:
+            entry["groups"] = ""
+
+    heading = [
+        programme.name.upper(),
+        f"{_ordinal(year_of_study)} YEAR · SEMESTER {semester.semester} · "
+        f"{semester.academic_year}",
+    ]
+    return _render_day_bands(
+        merged,
+        heading=heading,
         doc_title=f"{programme.name} Timetable",
-        show_groups=show_groups,
-        rotation_keys=rotation_keys,
         out=out,
+        rotation_keys=rotation_keys,
         portal_url=portal_url,
+        # The week range stays on the block. Two groups doing the same workshop
+        # in the same slot but in different week blocks are two separate blocks
+        # here (the range is part of a block's identity in ``fold_same_sessions``),
+        # and the range is the only thing telling them apart.
+        show_notes=True,
     )
 
 
@@ -630,7 +654,7 @@ def render_group_timetable(
     )
 
 
-def _rotation_key_table(rotation_keys, cell_style, head_style):
+def _rotation_key_table(rotation_keys, cell_style, head_style, usable=None):
     """Build the Workshop Rotation Key table flowables.
 
     Exactly three columns -- **Weeks**, **Group**, **Workshop** -- and one row
@@ -647,8 +671,13 @@ def _rotation_key_table(rotation_keys, cell_style, head_style):
     The earlier shape was one row per (group, day) with a column per week block,
     plus Programme and Course/Session columns. The programme was the sheet's own
     title, and in a rotation every workshop is the same course.
+
+    ``usable`` is the width of the frame the key is being dropped into. It
+    defaults to the portrait A4 text width; the landscape band engine passes its
+    own so the key spans the sheet it is printed on instead of sitting narrow in
+    the middle of it.
     """
-    usable = A4[0] - 22 * mm
+    usable = usable or (A4[0] - 22 * mm)
     headers = ["Weeks", "Group", "Workshop"]
     widths = [usable * 0.20, usable * 0.34, usable * 0.46]
 
@@ -727,6 +756,12 @@ def _render_grid(
 ):
     """Render the weekly grid PDF to `out` (file-like or a path).
 
+    A4 **portrait**, column 0 is TIME and columns 1..n are the weekdays, with a
+    session merged over the hours it covers by a real reportlab SPAN. This is
+    the single-group engine: it is correct exactly while at most one block per
+    day-and-hour has to share a cell, which one student group guarantees. A sheet
+    holding many groups has no such guarantee and goes to ``_render_day_bands``.
+
     Programmes/groups with no sessions get a clean "nothing scheduled" notice
     instead of a blank grid section; the Workshop Rotation Key is appended only
     when rotating workshops actually exist.
@@ -793,14 +828,6 @@ def _render_grid(
         alignment=TA_CENTER,
         leading=14,
         spaceBefore=6,
-    )
-    key_title_style = ParagraphStyle(
-        "keytitle",
-        fontName="Helvetica-Bold",
-        fontSize=9,
-        alignment=TA_CENTER,
-        leading=11,
-        spaceAfter=3,
     )
 
     elements = [
@@ -882,26 +909,41 @@ def _render_grid(
     if rotation_keys:
         elements.append(Spacer(1, 5 * mm))
         elements.append(
-            Paragraph("WORKSHOP ROTATION KEY", key_title_style)
+            Paragraph("WORKSHOP ROTATION KEY", KEY_TITLE_STYLE)
         )
-        elements.append(_rotation_key_table(rotation_keys, cell_style, head_style))
+        elements.append(
+            _rotation_key_table(
+                rotation_keys, KEY_CELL_STYLE, KEY_HEAD_STYLE,
+                usable=A4[0] - 22 * mm,
+            )
+        )
 
     doc.build(elements, onFirstPage=page_cb, onLaterPages=page_cb)
     return doc
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STRUCTURE OF THE CODE — ALL-PROGRAMMES (MASTER) TIMETABLE
-# Both the master timetable and the on-screen-format export are built as ONE
-# reportlab `Table`:
-#   - cells are real bordered Table cells, so they cannot visually overlap
-#   - every cell's text is a real `Paragraph`, so line breaks actually render
-#     (a raw string handed to a Table cell is treated as one unstyled line)
-#   - every session cell is padded to a floor of three lines, so a short entry
-#     is never a squeezed sliver and a long one just grows the row
-#   - pagination is reportlab's own Table splitting; no manual page-fitting
-#   - the heading is painted on the canvas via onFirstPage/onLaterPages, so it
-#     repeats on every page however many the table ends up needing
+# STRUCTURE OF THE CODE — WHICH SHEET USES WHICH ENGINE
+# There are two PDF grid engines, and which one a sheet uses is not a matter of
+# taste — it is whether the sheet can hold two blocks that collide in time.
+#
+# `_render_grid` (a reportlab `Table`): column 0 is TIME, columns 1..n are the
+#   weekdays, and a session is a real bordered cell merged with SPAN over the
+#   hours it covers. Cells therefore cannot visually overlap, but two *different*
+#   sessions in the same day-and-hour must share that one cell. That is correct
+#   for ONE student group, which can never be in two places at once, and wrong
+#   for a sheet holding many groups. Used by the single-group export only.
+#
+# `_render_day_bands` (hand-drawn `_DayFlowable` bands, A4 landscape): the day
+#   name is column 0 and the hour is row 0, and the blocks inside a day band are
+#   packed by `_DayFlowable._pack` so overlapping blocks are drawn side by side.
+#   Used by both multi-group sheets — the whole university and one whole
+#   programme — because those are the sheets where two groups really can be in
+#   two sessions at once.
+#
+# In both engines the heading and the footer are painted on the canvas via
+# onFirstPage/onLaterPages, so they repeat on every page however many the sheet
+# ends up needing.
 # ─────────────────────────────────────────────────────────────────────────────
 
 _SEMESTER_WORDS = {
@@ -1544,6 +1586,7 @@ class _DayFlowable(Flowable):
         day_extent=None,
         height=None,
         label_here=True,
+        show_notes=False,
     ):
         super().__init__()
         self.day_entries = day_entries
@@ -1551,6 +1594,7 @@ class _DayFlowable(Flowable):
         self.slots = slots
         self.col_width = col_width
         self.day_width = day_width
+        self.show_notes = show_notes
         # Where this chunk sits inside its day, and how tall the whole day is.
         # An unsplit day is its own extent and starts at zero.
         self.day_offset = day_offset
@@ -1637,6 +1681,30 @@ class _DayFlowable(Flowable):
         )
 
     # -- packing ---------------------------------------------------------
+    def _block_lines(self, entry, inner_w):
+        """One block's text, wrapped to ``inner_w``, each piece keeping its flag.
+
+        The workshop week range is appended when ``show_notes`` is on. A whole
+        programme's sheet needs it: two groups doing the same workshop in the
+        same slot but in *different* week blocks are two separate blocks there
+        (the range is part of a block's identity in ``fold_same_sessions``), and
+        the range is the only thing telling them apart. The master sheet folds
+        them into one block listing every group, so a range beside it would be a
+        claim about only part of the block's attendees.
+        """
+        parts = list(_entry_parts(entry))
+        if self.show_notes:
+            note = entry.get("note")
+            if note:
+                parts.append((str(note), False))
+        # Each wrapped piece keeps the is_groups flag of the field it came from,
+        # so an emphasised group list survives being wrapped.
+        return [
+            (piece, is_groups)
+            for line, is_groups in parts
+            for piece in _wrap_line(line, inner_w, self.FONT, self.CELL_SIZE)
+        ]
+
     def _pack(self, day_entries):
         """Lay a day's blocks out shortest-first without leaving dead bands.
 
@@ -1667,13 +1735,7 @@ class _DayFlowable(Flowable):
             span = end - start + 1
             columns = list(range(start, start + span))
             inner_w = self.col_width * span - 2 * self.PAD_X
-            # Each wrapped piece keeps the is_groups flag of the field it came
-            # from, so an emphasised group list survives being wrapped.
-            wrapped = [
-                (piece, is_groups)
-                for line, is_groups in _entry_parts(e)
-                for piece in _wrap_line(line, inner_w, self.FONT, self.CELL_SIZE)
-            ]
+            wrapped = self._block_lines(e, inner_w)
             while len(wrapped) < self.MIN_LINES:
                 wrapped.append(("", False))
             height = len(wrapped) * self.LEADING + 2 * self.PAD_Y
@@ -1811,6 +1873,7 @@ class _DayFlowable(Flowable):
             day_extent=day_extent,
             height=height,
             label_here=label_here,
+            show_notes=self.show_notes,
         )
 
     def draw(self):
@@ -1883,7 +1946,7 @@ class _DayFlowable(Flowable):
         canvas.restoreState()
 
 
-def _build_day_flowables(merged_entries, col_width, day_width):
+def _build_day_flowables(merged_entries, col_width, day_width, show_notes=False):
     """Build one flowable per day, in week order, each closed by its own rule.
 
     Consecutive bands carry no spacer between them, so days butt up against
@@ -1904,7 +1967,10 @@ def _build_day_flowables(merged_entries, col_width, day_width):
         day_entries = by_day.get(day, [])
         if day_entries:
             day_label = Day(day).label
-            flowable = _DayFlowable(day_entries, day_label, slots, col_width, day_width)
+            flowable = _DayFlowable(
+                day_entries, day_label, slots, col_width, day_width,
+                show_notes=show_notes,
+            )
             flowables.append(flowable)
     
     return flowables, slots
@@ -1921,12 +1987,36 @@ HEADER_MARGIN = 17.5 * mm
 FOOTER_MARGIN = 13.0 * mm
 FOOTER_TEXT = "Generated from"
 PORTAL_NAME = "CoET Timetable Portal"
+# The day-label column of a packed band, sized to the rotated name and no more,
+# which hands the rest of the width back to the hour columns.
+DAY_COLUMN_WIDTH = 22
+
+# The workshop rotation key's own typography, shared by both sheet engines so
+# the key looks the same wherever it is printed.
+KEY_TITLE_STYLE = ParagraphStyle(
+    "keytitle", fontName="Helvetica-Bold", fontSize=9,
+    alignment=TA_CENTER, leading=11, spaceAfter=3,
+)
+KEY_HEAD_STYLE = ParagraphStyle(
+    "keyhead", fontName="Helvetica-Bold", fontSize=8,
+    alignment=TA_CENTER, leading=10,
+)
+KEY_CELL_STYLE = ParagraphStyle(
+    "keycell", fontName="Helvetica-Bold", fontSize=6.5,
+    leading=8, alignment=TA_CENTER,
+)
+EMPTY_NOTE_STYLE = ParagraphStyle("empty-note", alignment=TA_CENTER)
 
 
 def _draw_master_header(canvas, doc, heading_lines, slots, col_width, day_width):
-    """Paint the title block and the hour-column header above the frame."""
+    """Paint the title block and the hour-column header above the frame.
+
+    The page size comes from ``doc``, for the same reason the footer's does: a
+    sheet that is not landscape A4 would otherwise have its title drawn in the
+    wrong place, and hard-coding the shape here is what would break it.
+    """
     canvas.saveState()
-    pw, ph = landscape(A4)
+    pw, ph = doc.pagesize
     canvas.setFillColor(colors.black)
     canvas.setFont("Helvetica-Bold", 14)
     canvas.drawCentredString(pw / 2, ph - HEADER_TITLE_OFFSET, heading_lines[0])
@@ -2016,14 +2106,36 @@ def _draw_master_footer(canvas, doc, portal_url=None, date_text=""):
     canvas.restoreState()
 
 
-def render_udsm_master_timetable(entries, semester, year_of_study=1, out=None, portal_url=None):
-    all_groups = set(StudentGroup.objects.values_list("code", flat=True))
-    merged_entries = _merge_master_entries(entries, all_groups)
+def _render_day_bands(
+    merged_entries,
+    heading,
+    doc_title,
+    out,
+    rotation_keys=None,
+    portal_url=None,
+    show_notes=False,
+):
+    """Lay one packed day band per weekday onto an A4 **landscape** sheet.
 
-    # A4 landscape, not A3: the grid is thirteen hour columns of short text,
-    # so the old page was far wider than the content needed and had to be
-    # scrolled sideways at 100% zoom. The day-label column is only as wide as
-    # its rotated name needs, which hands the rest back to the hour columns.
+    This is the shared engine behind the two multi-group sheets -- the whole
+    university and one whole programme. The shape is the point: the **day name
+    is column 0 and the hour is row 0**, and inside each day band the blocks are
+    packed by ``_DayFlowable`` so two blocks that overlap in time are drawn side
+    by side rather than fighting over one merged grid cell. A sheet holding many
+    groups therefore cannot overprint itself no matter how two groups' sessions
+    line up.
+
+    A4 landscape, not A3: the grid is thirteen hour columns of short text, so a
+    wider page would only have to be scrolled sideways at 100% zoom. The
+    day-label column is only as wide as its rotated name needs, which hands the
+    rest back to the hour columns.
+
+    ``heading`` is exactly two painted lines -- the title and the subtitle --
+    and both are drawn on *every* page above the hour header, so a page carrying
+    the tail of a split day still says what it is. ``rotation_keys`` is optional:
+    the master sheet has none, and a programme's workshop key is appended below
+    the last band.
+    """
     doc = SimpleDocTemplate(
         out,
         pagesize=landscape(A4),
@@ -2031,33 +2143,58 @@ def render_udsm_master_timetable(entries, semester, year_of_study=1, out=None, p
         rightMargin=8 * mm,
         topMargin=HEADER_MARGIN,
         bottomMargin=FOOTER_MARGIN,
-        title="University Master Timetable",
+        title=doc_title,
     )
 
-    usable_w = landscape(A4)[0] - doc.leftMargin - doc.rightMargin
-    day_width = 22
+    usable_w = doc.width
+    day_width = DAY_COLUMN_WIDTH
     n_slots = GRID_HOUR_END - GRID_HOUR_START + 1
     col_width = (usable_w - day_width) / n_slots
 
-    day_flowables, slots = _build_day_flowables(merged_entries, col_width, day_width)
-    year_note = f" \u00b7 {_ordinal(int(year_of_study)).upper()} YEAR" if year_of_study and int(year_of_study) > 1 else ""
-    subtitle = f"TEACHING TIMETABLE FOR {_semester_word(semester.semester)} SEMESTER {semester.academic_year}{year_note}"
-    heading = [
-        "UNIVERSITY OF DAR ES SALAAM",
-        f"TEACHING TIMETABLE FOR {_semester_word(semester.semester)} SEMESTER "
-        f"{semester.academic_year}{year_note} \u00b7 SEMESTER {semester.semester}",
-    ]
+    day_flowables, slots = _build_day_flowables(
+        merged_entries, col_width, day_width, show_notes=show_notes
+    )
     date_text = datetime.date.today().strftime("%d %B %Y")
 
     def page_cb(canvas, doc_):
         _draw_master_header(canvas, doc_, heading, slots, col_width, day_width)
         _draw_master_footer(canvas, doc_, portal_url=portal_url, date_text=date_text)
 
-    elements = day_flowables if day_flowables else [
+    elements = list(day_flowables) if day_flowables else [
         Paragraph(
             "No timetable sessions scheduled for this selection.",
-            ParagraphStyle("e", alignment=TA_CENTER),
+            EMPTY_NOTE_STYLE,
         )
     ]
+    if rotation_keys:
+        elements.append(Spacer(1, 5 * mm))
+        elements.append(Paragraph("WORKSHOP ROTATION KEY", KEY_TITLE_STYLE))
+        elements.append(
+            _rotation_key_table(
+                rotation_keys, KEY_CELL_STYLE, KEY_HEAD_STYLE, usable=usable_w
+            )
+        )
     doc.build(elements, onFirstPage=page_cb, onLaterPages=page_cb)
     return doc
+
+
+def render_udsm_master_timetable(entries, semester, year_of_study=1, out=None, portal_url=None):
+    all_groups = set(StudentGroup.objects.values_list("code", flat=True))
+    merged_entries = _merge_master_entries(entries, all_groups)
+    year_note = f" · {_ordinal(int(year_of_study)).upper()} YEAR" if year_of_study and int(year_of_study) > 1 else ""
+    heading = [
+        "UNIVERSITY OF DAR ES SALAAM",
+        f"TEACHING TIMETABLE FOR {_semester_word(semester.semester)} SEMESTER "
+        f"{semester.academic_year}{year_note} · SEMESTER {semester.semester}",
+    ]
+    return _render_day_bands(
+        merged_entries,
+        heading=heading,
+        doc_title="University Master Timetable",
+        out=out,
+        portal_url=portal_url,
+        # The master sheet folds one workshop slot into a single block naming
+        # every attending group, so a week range on that block would describe
+        # only part of them. Its rotation mapping is not printed on this sheet.
+        show_notes=False,
+    )

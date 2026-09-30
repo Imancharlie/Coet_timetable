@@ -661,6 +661,11 @@ class AllocationRun(models.Model):
     removed = models.IntegerField(default=0)
     unresolved = models.IntegerField(default=0)
     summary = models.TextField(blank=True)
+    algorithm = models.CharField(
+        max_length=20,
+        choices=[("smart", "Smart (Min-Conflicts)"), ("advanced", "Advanced (OR-Tools)")],
+        default="smart",
+    )
 
     class Meta:
         ordering = ["-created_at"]

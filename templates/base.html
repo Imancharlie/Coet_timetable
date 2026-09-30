@@ -590,13 +590,31 @@ document.body.addEventListener('htmx:sendError', function () {
     var el = document.getElementById('page-loader');
     if (!el) { return; }
     var hideTimer = null;
+    // The overlay comes down on its own if nothing says otherwise. A download
+    // is the reason this is needed at all: the browser answers a PDF export
+    // with Content-Disposition: attachment, starts the file, abandons the
+    // navigation and stays on the same document — so 'beforeunload' has already
+    // armed the overlay and none of 'load', 'pageshow' or 'htmx:afterRequest'
+    // can ever fire to take it down again. The overlay is pointer-events:none,
+    // so the page stays clickable and the symptom is a spinner that never
+    // stops. Every export link therefore carries `download` (which is also what
+    // the click handler below tests), and this is the backstop for anything
+    // that arms the overlay by another route.
+    var MAX_HOLD_MS = 30000;
 
     function showLoader() {
         if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
         el.classList.add('is-loading');
+        if (!showLoader.watchdog) {
+            showLoader.watchdog = setTimeout(hideLoader, MAX_HOLD_MS);
+        }
     }
     function hideLoader() {
         if (hideTimer) { clearTimeout(hideTimer); }
+        if (showLoader.watchdog) {
+            clearTimeout(showLoader.watchdog);
+            showLoader.watchdog = null;
+        }
         // Short grace period so a fast response does not flash the overlay.
         hideTimer = setTimeout(function () {
             el.classList.remove('is-loading');

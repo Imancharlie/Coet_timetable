@@ -1,0 +1,72 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Post-allocation audit — every threshold in one place.
+#
+# The whole file is printed verbatim in Appendix C of the report and stored on
+# every AuditReport row, so any number in the PDF can be traced back to the
+# value that produced it. Copy this file, edit the copy and pass it to
+# `manage.py audit_report --config <path>` to re-audit the same run under
+# different thresholds; that creates a NEW report version, never an overwrite.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# The window a normal teaching day is expected to sit inside. Sessions
+# outside it are reported as invalid times, not silently scored.
+working_day: {start: 480, end: 1080}          # 08:00 - 18:00
+working_days: [0, 1, 2, 3, 4]                  # 0 = Monday .. 4 = Friday
+
+# Two sessions separated by at most this many minutes count as one continuous
+# run, so a 10-minute changeover is not scored as a gap.
+back_to_back_tolerance_min: 15
+
+# A gap of at least this long is *recorded* as a gap and drawn on the group
+# timetable cards in Appendix A.
+gap_min: 60
+# A gap this long scores 0 on the gaps component of the TFI.
+gap_bad_min: 240
+
+# A day with at most this many scheduled hours scores 1.0 on load; the
+# busiest day of the week is scored separately, so one brutal day still shows.
+day_soft_hours: 5.0
+day_hard_hours: 8.0
+
+# Longest continuous run: at most this scores 1.0 on continuity.
+run_soft_hours: 3.0
+run_hard_hours: 6.0
+
+# dead time / contact time at which the gaps component reaches 0.
+dead_ratio_bad: 0.5
+
+# TFI component weights (must sum to 1.0; checked on load).
+weights: {load: 0.30, gaps: 0.30, continuity: 0.20, balance: 0.20}
+
+# Grade floors, ordered best first. Below the last floor is an E.
+grades: {A: 85, B: 70, C: 55, D: 40}
+
+# A group is flagged as a relative outlier at or beyond this robust z-score.
+outlier_z: 2.5
+
+venue:
+  available_hours_per_week: 50               # one venue, whole week
+  low_seat_util: 0.35                         # under this = under-used
+  high_seat_util: 0.95                        # over this = near capacity
+
+# How a programme is read off a group code: "EE C1" -> "EE".
+programme_regex: '^([A-Z]{2,4})\s'
+
+# How a group is turned into a student count. The allocator already owns this
+# constant; the audit reuses it so seat utilisation cannot disagree with the
+# capacity check the allocator performed.
+students_per_group: 30
+
+# Optional exposure metric, reported but weighted 0 by default.
+early_late:
+  enabled: false
+  weight: 0.0
+  early_before: 510                          # sessions starting before 08:30
+  late_after: 1020                            # sessions ending after 17:00
+
+# Report generation limits (edge cases from the spec).
+flags:
+  heatmap_rows_per_figure: 40
+  top_n_groups: 10
+  max_appendix_cards: 12
+  alternatives_per_group: 3

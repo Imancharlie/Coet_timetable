@@ -43,6 +43,8 @@ from .group_allocation import (
     manual_assign,
     manual_unassign,
     plan_allocation,
+    plan_allocation_min_conflicts,
+    plan_allocation_ortools,
     revert_run,
     save_plan,
     STUDENTS_PER_GROUP,
@@ -2927,13 +2929,19 @@ ALLOCATION_SCOPES = [
 
 def _allocation_base_context(request, semester=None, scope=AllocationScope.ALL, run=None):
     semesters = list(_allocation_semesters())
+
     return {
         "page_title": "Group Allocation",
         "semesters": semesters,
         "semester": semester,
         "scope": scope,
         "scopes": ALLOCATION_SCOPES,
-        "runs": AllocationRun.objects.select_related("semester")[:10],
+        # Prefetched because every run row in the template asks for
+        # run.audit_reports.first (the "Audit report vN" link) and
+        # run.audit_reports.exists(); without this that is two queries per row.
+        "runs": AllocationRun.objects.select_related("semester").prefetch_related(
+            "audit_reports"
+        )[:10],
         "run": run,
         "plan": run.plan() if run is not None else None,
         "allocation_url": "/allocation/",
@@ -2985,7 +2993,7 @@ def _selected_scope(request):
 
 
 def allocation_page(request):
-    """The coordinator page: pick a semester, review, apply, revert."""
+    """The coordinator page: pick a semester, review, apply, revert. Uses smart allocation by default."""
     semester = _selected_semester(request)
     scope = _selected_scope(request)
     run = None
@@ -3021,6 +3029,7 @@ def allocation_page(request):
     ctx["no_semesters"] = not Semester.objects.exists()
     ctx["message"] = request.GET.get("msg", "")
     ctx["error"] = request.GET.get("err", "")
+    ctx["default_algorithm"] = "smart"
     return render(request, "core/allocation.html", ctx)
 
 
@@ -3223,31 +3232,51 @@ def _panel_response(panel, message, kind):
 
 
 def allocation_preview(request):
-    """Compute a plan and show it. Nothing is written to the timetable."""
+    """Compute a plan using smart allocation and show it. Nothing is written to the timetable."""
     if request.method != "POST":
         return redirect("allocation-page")
     semester = _selected_semester(request)
     if semester is None:
         return redirect("allocation-page")
     scope = _selected_scope(request)
-    plan = plan_allocation(semester, scope)
-    run = save_plan(plan)
+    
+    # Determine which algorithm to use
+    algorithm = request.POST.get("algorithm", "smart")
+    
+    if algorithm == "advanced":
+        # Use OR-Tools advanced allocation
+        time_limit = int(request.POST.get("time_limit", 30))
+        plan = plan_allocation_ortools(semester, scope, time_limit_seconds=time_limit)
+        allocation_name = "Advanced Allocation (OR-Tools)"
+    else:
+        # Default to smart allocation (min-conflicts)
+        max_iterations = int(request.POST.get("max_iterations", 50000))
+        random_restarts = int(request.POST.get("random_restarts", 5))
+        plan = plan_allocation_min_conflicts(
+            semester, scope, max_iterations=max_iterations, random_restarts=random_restarts
+        )
+        allocation_name = "Smart Allocation (Min-Conflicts)"
+    
+    run = save_plan(plan, algorithm=algorithm)
     _log(
         LogAction.ASSIGN,
-        f"Group allocation preview for {semester} ({scope}): "
+        f"{allocation_name} preview for {semester} ({scope}): "
         f"{plan.added} to add, {plan.moved} to move, {plan.retained} kept, "
         f"{plan.unresolved_count} unresolved",
-        "Group Allocation",
+        allocation_name,
         str(run),
     )
     ctx = _allocation_base_context(request, semester=semester, scope=scope, run=run)
     # The template reads one shape everywhere: the stored snapshot, which is
     # exactly what a later Apply or Revert works from.
     ctx["plan"] = run.plan()
+    ctx["allocation_name"] = allocation_name
+    ctx["has_unresolved"] = plan.unresolved_count > 0
+    
     if _htmx(request):
         response = render(request, "core/_allocation_plan.html", ctx)
         response["HX-Trigger"] = json.dumps(
-            {"allocation-toast": {"message": "Allocation plan ready"}}
+            {"allocation-toast": {"message": f"{allocation_name} plan ready"}}
         )
         return response
     return render(request, "core/allocation.html", ctx)
@@ -3266,7 +3295,7 @@ def allocation_apply(request):
     if result.get("ok"):
         _log(
             LogAction.ASSIGN,
-            f"Applied group allocation run: {result['added']} assignment(s) "
+            f"Applied allocation run: {result['added']} assignment(s) "
             f"added, {result['removed']} removed, {run.unresolved} "
             f"unresolved",
             "Group Allocation",
@@ -3298,15 +3327,9 @@ def _allocation_action_response(request, run, result):
     """Render the plan panel with the outcome of apply/revert."""
     message = result.get("message", "")
     if _htmx(request):
-        ctx = {
-            "page_title": "Group Allocation",
-            "run": run,
-            "plan": run.plan(),
-            "result": result,
-            "message": message,
-            "apply_url": "/allocation/apply/",
-            "revert_url": "/allocation/revert/",
-        }
+        ctx = _allocation_base_context(request, semester=run.semester, scope=run.scope, run=run)
+        ctx["result"] = result
+        ctx["message"] = message
         # The panel replaces #allocation-plan, so the plan markup must not wrap
         # itself in another element with that id.
         response = render(request, "core/_allocation_result.html", ctx)
@@ -3502,13 +3525,13 @@ IMPORT_TYPES = {
     "programmes": {
         "title": "Programmes",
         "columns": "code, name",
-        "hint": "Aliases accepted: 'code', 'programme_code', 'programme', 'program'; 'name', 'programme_name', 'title'.",
+        "hint": "",
         "fn": import_programmes_from_excel,
     },
     "student-groups": {
         "title": "Student Groups",
         "columns": "programme_code, group_code",
-        "hint": "Aliases accepted for both columns. Programme can be a code or a full name.",
+        "hint": "Programme can be a code or a full name.",
         "fn": import_student_groups_from_excel,
     },
     "programme-courses": {
@@ -3518,8 +3541,7 @@ IMPORT_TYPES = {
             "Required Activities (optional)"
         ),
         "hint": (
-            "Aliases accepted ('programme'/'program', 'course_code'/'course', "
-            "'course_name'/'course'). A programme name (e.g. 'BSc. in Chemical and "
+            "A programme name (e.g. 'BSc. in Chemical and "
             "Processing Engineering') is recognised and the missing programme is "
             "created automatically. "
             "REQUIRED ACTIVITIES (optional): the heading 'Required Activities' "
@@ -3538,7 +3560,7 @@ IMPORT_TYPES = {
     "venues": {
         "title": "Venues",
         "columns": "name, capacity",
-        "hint": "Aliases accepted: 'name'/'venue'/'room'; 'capacity'/'seats'.",
+        "hint": "",
         "fn": import_venues_from_excel,
     },
     "master-timetable": {
@@ -3549,8 +3571,7 @@ IMPORT_TYPES = {
             "Set course requirements from these sessions"
         ),
         "hint": (
-            "Readable aliases accepted ('course', 'type', 'start', 'end', 'room', "
-            "'groups', ...). Comma-separated course codes are split into separate "
+            "Comma-separated course codes are split into separate "
             "sessions. Choose the academic Semester this timetable belongs to above — "
             "it is never auto-detected. LECTURE sessions are automatically linked to "
             "every programme group that studies the course. Tick 'Set course "

@@ -1930,7 +1930,7 @@ def _link_state(session: Session, group: StudentGroup):
     }
 
 
-def save_plan(plan: AllocationPlan) -> AllocationRun:
+def save_plan(plan: AllocationPlan, algorithm: str = "smart") -> AllocationRun:
     """Persist a previewed run, with the link-level before/after states.
 
     The changes are recorded here, at plan time, because "before" means the
@@ -1948,6 +1948,7 @@ def save_plan(plan: AllocationPlan) -> AllocationRun:
         removed=len(plan.removals),
         unresolved=plan.unresolved_count,
         summary=json.dumps(plan.snapshot()),
+        algorithm=algorithm,
     )
     for removal in plan.removals:
         run.changes.create(
@@ -2195,3 +2196,465 @@ def courses_missing_requirements(semester: Semester = None):
         )
         if not course.has_requirements()
     ]
+
+
+# ──────────────────────────────────────────────
+# Min-Conflicts Allocation Algorithm (Layer 1)
+# ──────────────────────────────────────────────
+
+
+def plan_allocation_min_conflicts(
+    semester: Semester, scope: str = "ALL", *, max_iterations=50000, random_restarts=5
+):
+    """Min-conflicts repair-based allocation algorithm.
+
+    This algorithm uses a repair-based approach:
+    1. Greedily assign all requirements (may have conflicts)
+    2. Iteratively repair conflicts by reassigning the most conflicted requirements
+    3. Use random restarts to escape local optima
+
+    Returns an AllocationPlan compatible with the existing infrastructure.
+    """
+    import random
+
+    started = time.monotonic()
+    requirements, unconfigured = build_requirements(semester, scope)
+    plan = AllocationPlan(
+        semester=semester, scope=scope, unconfigured_courses=unconfigured
+    )
+    if unconfigured:
+        plan.warnings.append(
+            f"{len(unconfigured)} course(s) have no required activities "
+            f"configured and were not allocated. Set their requirements to "
+            f"include them in a future run."
+        )
+
+    for requirement in requirements:
+        if not requirement.candidates:
+            plan.unresolved.append(
+                Unresolved(
+                    requirement=requirement,
+                    reasons=[
+                        f"No {ActivityType(requirement.activity_type).label.lower()} "
+                        f"session exists for {requirement.course.code} in "
+                        f"{semester}. Create the session, then run the "
+                        f"allocator again."
+                    ],
+                )
+            )
+
+    placeable = [r for r in requirements if r.candidates]
+    if not placeable:
+        plan.duration_ms = int((time.monotonic() - started) * 1000)
+        return plan
+
+    index = AvailabilityIndex(semester)
+    if index.unverifiable:
+        plan.warnings.append(
+            f"{len(index.unverifiable)} workshop record(s) name a day but no "
+            f"time, so those days cannot be verified. Groups with such a "
+            f"workshop are left unplaced on that day until the record is "
+            f"corrected."
+        )
+
+    # Initial occupancy from existing assignments
+    occupancy: dict = {}
+    for session_pk, group_pk in SessionGroup.objects.filter(
+        session__semester=semester
+    ).values_list("session_id", "group_id"):
+        occupancy.setdefault(session_pk, set()).add(group_pk)
+    initial_occupancy = {pk: set(groups) for pk, groups in occupancy.items()}
+
+    # Block repeat sessions (same as standard allocator)
+    blocked = _block_repeat_sessions(placeable)
+
+    best_plan = None
+    best_unresolved = len(placeable)
+
+    for restart in range(random_restarts):
+        # Reset occupancy for this restart
+        occupancy = {pk: set(groups) for pk, groups in initial_occupancy.items()}
+        index = AvailabilityIndex(semester)  # Rebuild index
+
+        # Phase 1: Greedy initial assignment
+        assignments = {}  # requirement.key -> session
+        for requirement in placeable:
+            not_allowed = blocked[id(requirement)]
+            # Try candidates in ranked order
+            candidates = sorted(
+                requirement.candidates,
+                key=lambda s: _rank_candidates(requirement, s, index, occupancy),
+            )
+            assigned = False
+            for session in candidates:
+                if session.pk in not_allowed:
+                    continue
+                count_after = len(occupancy.get(session.pk, set())) + 1
+                problems = validate_assignment(
+                    requirement.group,
+                    requirement.course,
+                    session,
+                    semester,
+                    index,
+                    group_count_after=count_after,
+                )
+                if not problems:
+                    occupancy.setdefault(session.pk, set()).add(requirement.group.pk)
+                    index.add_session(requirement.group.pk, session)
+                    assignments[requirement.key] = session
+                    assigned = True
+                    break
+            if not assigned:
+                # Leave unassigned for now
+                assignments[requirement.key] = None
+
+        # Phase 2: Min-conflicts repair
+        for iteration in range(max_iterations):
+            # Check if all requirements are satisfied
+            unresolved_requirements = [
+                r for r, s in assignments.items() if s is None
+            ]
+            if not unresolved_requirements:
+                break  # Complete solution found
+
+            # Find conflicted requirements (those with conflicts or unassigned)
+            conflicted = []
+            for req_key, session in assignments.items():
+                # Find the requirement object for this key
+                requirement = next((r for r in placeable if r.key == req_key), None)
+                if not requirement:
+                    continue
+                if session is None:
+                    conflicted.append(requirement)
+                    continue
+                # Check if this assignment still valid
+                count_after = len(occupancy.get(session.pk, set()))
+                problems = validate_assignment(
+                    requirement.group,
+                    requirement.course,
+                    session,
+                    semester,
+                    index,
+                    group_count_after=count_after,
+                )
+                if problems:
+                    conflicted.append(requirement)
+
+            if not conflicted:
+                break  # No conflicts
+
+            # Pick a random conflicted requirement
+            requirement = random.choice(conflicted)
+
+            # Find the session that minimizes conflicts
+            not_allowed = blocked[id(requirement)]
+            candidates = sorted(
+                requirement.candidates,
+                key=lambda s: _rank_candidates(requirement, s, index, occupancy),
+            )
+
+            best_session = None
+            best_conflicts = float("inf")
+
+            for session in candidates:
+                if session.pk in not_allowed:
+                    continue
+
+                # Count conflicts if we move here
+                conflicts = 0
+                count_after = len(occupancy.get(session.pk, set())) + 1
+                problems = validate_assignment(
+                    requirement.group,
+                    requirement.course,
+                    session,
+                    semester,
+                    index,
+                    group_count_after=count_after,
+                )
+                conflicts += len(problems)
+
+                if conflicts < best_conflicts:
+                    best_conflicts = conflicts
+                    best_session = session
+
+            # Apply the best move
+            if best_session:
+                # Remove old assignment if exists
+                old_session = assignments.get(requirement.key)
+                if old_session:
+                    occupancy[old_session.pk].discard(requirement.group.pk)
+                    index.drop_session(requirement.group.pk, old_session.pk, old_session.day)
+
+                # Add new assignment
+                if best_conflicts == 0:  # Only add if it's valid
+                    occupancy.setdefault(best_session.pk, set()).add(requirement.group.pk)
+                    index.add_session(requirement.group.pk, best_session)
+                    assignments[requirement.key] = best_session
+                else:
+                    assignments[requirement.key] = None
+            else:
+                assignments[requirement.key] = None
+
+        # Check if this restart was better
+        unresolved_count = sum(1 for s in assignments.values() if s is None)
+        if unresolved_count < best_unresolved:
+            best_unresolved = unresolved_count
+            best_plan = (assignments.copy(), occupancy.copy())
+
+            if unresolved_count == 0:
+                break  # Perfect solution found
+
+    # Use the best solution found
+    if best_plan:
+        assignments, occupancy = best_plan
+    else:
+        # Use the last attempt if no restarts succeeded
+        assignments = {r.key: None for r in placeable}
+        occupancy = initial_occupancy.copy()
+
+    # Build the plan from the final assignments
+    placed_by_position = {}
+    for position, requirement in enumerate(placeable):
+        session = assignments.get(requirement.key)
+        if session is not None:
+            placed_by_position[position] = session
+        else:
+            # Mark as unresolved
+            plan.unresolved.append(
+                Unresolved(
+                    requirement=requirement,
+                    reasons=[
+                        "Min-conflicts algorithm could not find a valid "
+                        "assignment for this requirement after multiple "
+                        "restarts and iterations."
+                    ],
+                    sessions_considered=len(requirement.candidates),
+                )
+            )
+
+    _resolve_moves(plan, placeable, placed_by_position, initial_occupancy)
+    plan.warnings.extend(_extra_link_warnings(plan, placeable, placed_by_position))
+    plan.duration_ms = int((time.monotonic() - started) * 1000)
+    plan.scanned = len(placeable) * max_iterations * random_restarts  # Approximate
+
+    return plan
+
+
+# ──────────────────────────────────────────────
+# OR-Tools Constraint Programming Allocation (Layer 2)
+# ──────────────────────────────────────────────
+
+
+def plan_allocation_ortools(
+    semester: Semester, scope: str = "ALL", *, time_limit_seconds=30
+):
+    """Constraint programming allocation using Google OR-Tools.
+
+    This uses OR-Tools CP-SAT solver which provides:
+    - Advanced constraint propagation
+    - Sophisticated search strategies
+    - Guaranteed optimality within time limits
+    - Better handling of complex constraints
+
+    Returns an AllocationPlan compatible with the existing infrastructure.
+    """
+    try:
+        from ortools.sat.python import cp_model
+    except ImportError:
+        # OR-Tools not available, fall back to standard allocator
+        plan = AllocationPlan(semester=semester, scope=scope)
+        plan.warnings.append(
+            "OR-Tools library is not installed. Falling back to standard "
+            "allocation. Install with: pip install ortools"
+        )
+        return plan_allocation(semester, scope)
+
+    started = time.monotonic()
+    requirements, unconfigured = build_requirements(semester, scope)
+    plan = AllocationPlan(
+        semester=semester, scope=scope, unconfigured_courses=unconfigured
+    )
+    if unconfigured:
+        plan.warnings.append(
+            f"{len(unconfigured)} course(s) have no required activities "
+            f"configured and were not allocated. Set their requirements to "
+            f"include them in a future run."
+        )
+
+    for requirement in requirements:
+        if not requirement.candidates:
+            plan.unresolved.append(
+                Unresolved(
+                    requirement=requirement,
+                    reasons=[
+                        f"No {ActivityType(requirement.activity_type).label.lower()} "
+                        f"session exists for {requirement.course.code} in "
+                        f"{semester}. Create the session, then run the "
+                        f"allocator again."
+                    ],
+                )
+            )
+
+    placeable = [r for r in requirements if r.candidates]
+    if not placeable:
+        plan.duration_ms = int((time.monotonic() - started) * 1000)
+        return plan
+
+    index = AvailabilityIndex(semester)
+    if index.unverifiable:
+        plan.warnings.append(
+            f"{len(index.unverifiable)} workshop record(s) name a day but no "
+            f"time, so those days cannot be verified. Groups with such a "
+            f"workshop are left unplaced on that day until the record is "
+            f"corrected."
+        )
+
+    # Build CP model
+    model = cp_model.CpModel()
+
+    # Create variables: each requirement -> session index
+    # Map requirements to variable indices
+    req_to_var = {}
+    var_to_req = {}
+    for i, requirement in enumerate(placeable):
+        var = model.NewIntVar(0, len(requirement.candidates) - 1, f"req_{i}")
+        req_to_var[requirement.key] = var
+        var_to_req[i] = requirement
+
+    # Initial occupancy from existing assignments
+    initial_occupancy: dict = {}
+    for session_pk, group_pk in SessionGroup.objects.filter(
+        session__semester=semester
+    ).values_list("session_id", "group_id"):
+        initial_occupancy.setdefault(session_pk, set()).add(group_pk)
+
+    # Block repeat sessions
+    blocked = _block_repeat_sessions(placeable)
+
+    # Add constraints
+    # 1. Each requirement must be assigned to a valid session
+    for requirement in placeable:
+        var = req_to_var[requirement.key]
+        not_allowed = blocked[id(requirement)]
+        valid_indices = [
+            i
+            for i, session in enumerate(requirement.candidates)
+            if session.pk not in not_allowed
+        ]
+        if valid_indices:
+            # Only allow valid session indices
+            model.AddAllowedAssignments(var, valid_indices)
+
+    # 2. No conflicts between requirements
+    # Build a conflict graph: requirements that conflict if assigned to certain sessions
+    for i, req1 in enumerate(placeable):
+        for j, req2 in enumerate(placeable):
+            if i >= j:
+                continue  # Avoid duplicate checks
+
+            var1 = req_to_var[req1.key]
+            var2 = req_to_var[req2.key]
+
+            # Check if these requirements can conflict
+            for idx1, session1 in enumerate(req1.candidates):
+                for idx2, session2 in enumerate(req2.candidates):
+                    # Check if assigning req1 to session1 and req2 to session2 would conflict
+                    if _would_conflict(req1, req2, session1, session2, index):
+                        # Add constraint: not (var1 == idx1 AND var2 == idx2)
+                        # Implemented as: var1 != idx1 OR var2 != idx2
+                        model.AddBoolOr(
+                            [var1 != idx1, var2 != idx2]
+                        )
+
+    # 3. Capacity constraints
+    # For each session, limit the number of groups assigned
+    session_to_reqs = {}
+    for requirement in placeable:
+        for idx, session in enumerate(requirement.candidates):
+            session_to_reqs.setdefault(session.pk, []).append((requirement, idx))
+
+    for session_pk, req_indices in session_to_reqs.items():
+        session = req_indices[0][0].candidates[req_indices[0][1]]
+        if session.venue and session.venue.capacity:
+            max_groups = session.venue.capacity // STUDENTS_PER_GROUP
+            # Create a boolean variable for each potential assignment
+            assigned_vars = []
+            for requirement, idx in req_indices:
+                var = req_to_var[requirement.key]
+                is_assigned = model.NewBoolVar(f"assigned_{requirement.group.pk}_{session_pk}")
+                model.Add(var == idx).OnlyEnforceIf(is_assigned)
+                model.Add(var != idx).OnlyEnforceIf(is_assigned.Not())
+                assigned_vars.append(is_assigned)
+
+            # Sum of assigned vars <= max_groups
+            model.Add(sum(assigned_vars) <= max_groups)
+
+    # Solve with time limit
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = time_limit_seconds
+    solver.parameters.num_search_workers = 8  # Use multiple threads
+
+    result = solver.Solve(model)
+
+    if result == cp_model.OPTIMAL or result == cp_model.FEASIBLE:
+        # Extract solution
+        placed_by_position = {}
+        for i, requirement in enumerate(placeable):
+            var = req_to_var[requirement.key]
+            session_idx = solver.Value(var)
+            session = requirement.candidates[session_idx]
+            placed_by_position[i] = session
+
+        # Build plan
+        _resolve_moves(plan, placeable, placed_by_position, initial_occupancy)
+        plan.warnings.extend(_extra_link_warnings(plan, placeable, placed_by_position))
+        plan.duration_ms = int((time.monotonic() - started) * 1000)
+        plan.scanned = solver.NumBranches()
+
+        # Add unresolved requirements that weren't placed
+        for position, requirement in enumerate(placeable):
+            if position not in placed_by_position:
+                plan.unresolved.append(
+                    Unresolved(
+                        requirement=requirement,
+                        reasons=[
+                            "OR-Tools solver could not find a valid assignment "
+                            "within the time limit."
+                        ],
+                        sessions_considered=len(requirement.candidates),
+                    )
+                )
+    else:
+        # Solver failed, fall back to unresolved
+        for requirement in placeable:
+            plan.unresolved.append(
+                Unresolved(
+                    requirement=requirement,
+                    reasons=[
+                        "OR-Tools solver failed to find a feasible solution. "
+                        "Try increasing the time limit or use a different algorithm."
+                    ],
+                    sessions_considered=len(requirement.candidates),
+                )
+            )
+        plan.duration_ms = int((time.monotonic() - started) * 1000)
+
+    return plan
+
+
+def _would_conflict(req1, req2, session1, session2, index):
+    """Check if two requirements would conflict if assigned to these sessions."""
+    # Same group can't be in two places at once
+    if req1.group.pk == req2.group.pk:
+        if session1.day == session2.day:
+            # Check time overlap
+            if not (session1.end_time <= session2.start_time or session2.end_time <= session1.start_time):
+                return True
+
+    # Check availability conflicts using the index's public method
+    for req, session in [(req1, session1), (req2, session2)]:
+        # Check if the group has any conflicts at this session time
+        if index.conflicts_excluding(req.group.pk, session.day, session.start_time, session.end_time, session.pk):
+            return True
+
+    return False

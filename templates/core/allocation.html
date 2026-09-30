@@ -11,7 +11,7 @@
         <form method="post" action="{{ preview_url }}"
               hx-post="{{ preview_url }}" hx-target="#allocation-plan" hx-swap="innerHTML"
               hx-disabled-elt="#allocate-btn"
-              class="flex flex-col lg:flex-row lg:items-end gap-3">
+              class="flex flex-col lg:flex-row lg:items-end gap-3" x-data="{ algorithm: '{{ default_algorithm|default:'smart' }}' }">
             {% csrf_token %}
             <div class="flex-1 min-w-0">
                 <label for="allocation-semester" class="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1.5">Semester</label>
@@ -30,6 +30,29 @@
                     <option value="{{ value }}" {% if scope == value %}selected{% endif %}>{{ label }}</option>
                     {% endfor %}
                 </select>
+            </div>
+            <div class="flex-1 min-w-0">
+                <label for="allocation-algorithm" class="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1.5">Algorithm</label>
+                <select name="algorithm" id="allocation-algorithm" x-model="algorithm"
+                        class="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                    <option value="smart">Smart (Min-Conflicts)</option>
+                    <option value="advanced">Advanced (OR-Tools)</option>
+                </select>
+            </div>
+            <div x-show="algorithm === 'smart'" class="flex-1 min-w-0 lg:hidden">
+                <label for="max-iterations" class="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1.5">Max Iterations</label>
+                <input type="number" name="max_iterations" id="max-iterations" value="50000" min="1000" max="100000"
+                       class="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+            </div>
+            <div x-show="algorithm === 'smart'" class="flex-1 min-w-0 lg:hidden">
+                <label for="random-restarts" class="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1.5">Random Restarts</label>
+                <input type="number" name="random_restarts" id="random-restarts" value="5" min="1" max="20"
+                       class="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+            </div>
+            <div x-show="algorithm === 'advanced'" class="flex-1 min-w-0 lg:hidden">
+                <label for="time-limit" class="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1.5">Time Limit (sec)</label>
+                <input type="number" name="time_limit" id="time-limit" value="30" min="5" max="300"
+                       class="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
             </div>
             <button type="submit" id="allocate-btn"
                     class="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-wait">
@@ -135,6 +158,35 @@
                             {{ r.get_status_display }}
                         </span>
                         {% if r.status == 'APPLIED' %}
+                        {# An applied run is exactly the thing the audit is *for*,
+                           so the button sits beside the run it audits rather than
+                           on a separate page the coordinator has to remember. An
+                           existing report opens directly; only a run that has
+                           never been audited spends a Chrome process. #}
+                        {% with latest=r.audit_reports.first %}
+                        {% if latest %}
+                        <a href="{% url 'audit-report-detail' latest.pk %}"
+                           class="inline-flex items-center px-2.5 py-1 text-xs font-medium text-blue-800 bg-blue-50 hover:bg-blue-100 border border-blue-300 rounded-md"
+                           title="Open audit report v{{ latest.version }} ({{ latest.created_label }})">
+                            Audit report v{{ latest.version }}
+                        </a>
+                        {% endif %}
+                        <form method="post" action="{% url 'allocation-run-audit' r.pk %}"
+                              hx-post="{% url 'allocation-run-audit' r.pk %}"
+                              hx-target="body" hx-swap="none" hx-disabled-elt="this"
+                              x-data="{ busy: false }"
+                              hx-on::before-request="busy = true">
+                            {% csrf_token %}
+                            <input type="hidden" name="run" value="{{ r.pk }}">
+                            <button type="submit"
+                                    class="px-2.5 py-1 text-xs font-medium text-gray-800 bg-white hover:bg-gray-50 border border-gray-300 rounded-md disabled:opacity-60 disabled:cursor-wait"
+                                    :disabled="busy">
+                                {# Synchronous: reads the timetable and prints a
+                                   PDF, so it takes ~20s on a full week. #}
+                                <span x-show="!busy">{% if latest %}Re-audit{% else %}Audit this allocation{% endif %}</span>
+                                <span x-show="busy" x-cloak>Analysing&hellip;</span>
+                            </button>
+                        </form>
                         <form method="post" action="{{ revert_url }}"
                               hx-post="{{ revert_url }}" hx-target="#allocation-plan" hx-swap="innerHTML"
                               hx-disabled-elt="this"
@@ -146,6 +198,7 @@
                                 Revert
                             </button>
                         </form>
+                        {% endwith %}
                         {% endif %}
                     </div>
                 </div>

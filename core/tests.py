@@ -2034,6 +2034,53 @@ class SidebarStructureTests(TestCase):
         for event in ("beforeunload", "load", "pageshow"):
             self.assertIn("addEventListener('%s'" % event, html)
 
+    def test_the_loader_always_comes_back_down(self):
+        """A download never loads a document, so nothing else can clear it.
+
+        A PDF export answers with ``Content-Disposition: attachment``: the browser
+        takes the file, abandons the navigation and stays put. ``beforeunload``
+        has already armed the overlay by then, and ``load``/``pageshow``/
+        ``htmx:afterRequest`` can never fire -- so the spinner sat there for good
+        after every export. The overlay is ``pointer-events:none``, which is why
+        it read as a page that had frozen rather than one that had wedged.
+        """
+        html = self._html("/staff/")
+        # The backstop, for any path that still manages to arm it.
+        self.assertIn("MAX_HOLD_MS", html)
+        self.assertIn("setTimeout(hideLoader, MAX_HOLD_MS)", html)
+        # And the primary fix: a download link is recognised and left alone.
+        self.assertIn("link.hasAttribute('download')", html)
+
+    def test_no_page_arms_the_loader_for_a_pdf_export(self):
+        """Every entry point to a PDF carries ``download``.
+
+        The loader's click handler returns early for a link with the attribute,
+        and a ``download`` click does not navigate at all, so ``beforeunload``
+        never fires either. The export hub used to assign ``window.location``,
+        which *is* a navigation and was the one path that still stuck.
+        """
+        for path in (
+            "/export/",
+            "/timetable/?programme=%s&semester=%s&year=1"
+            % (self.programme.pk, self.semester.pk),
+            # The detail pages carry their own export link (detail.html and
+            # _detail_content.html), so they are a second and third entry point.
+            "/programmes/%s/" % self.programme.pk,
+        ):
+            html = self._html(path)
+            for anchor in re.findall(r"<a\b[^>]*>", html):
+                if "timetable.pdf" not in anchor and "timetable-export" not in anchor:
+                    continue
+                self.assertIn(
+                    "download", anchor, f"export link would stick the loader: {anchor}"
+                )
+
+        hub = self._html("/export/")
+        # Not a navigation, and the click it makes carries the attribute too.
+        self.assertNotIn("window.location.href = url", hub)
+        self.assertIn("a.download = ''", hub)
+        self.assertIn("a.click()", hub)
+
     def test_the_bell_counts_only_unresolved_issues(self):
         from student_portal.models import CollisionReport
 
@@ -5460,6 +5507,200 @@ class MasterTimetableExportTests(TestCase):
         self.assertEqual(response["Content-Type"], "application/pdf")
         self.assertTrue(response.content.startswith(b"%PDF-"))
         self.assertIn("master_timetable_1.pdf", response["Content-Disposition"])
+
+
+class ProgrammeExportLayoutTests(TestCase):
+    """The whole-programme sheet is the master's packed band layout.
+
+    The programme export used to be a classic grid: a cell per hour, with a
+    session spanning five hours drawn as five cells and two sessions in one hour
+    stacked into the one box they share. Both are unreadable for a real
+    programme, where a whole cohort is in a lecture at 08:00 while six groups
+    are in six different rooms at the same hour. It now uses the same
+    ``_DayFlowable`` packing as the all-programmes export -- days down a narrow
+    left column, hours across the top, and each block laid down on the lowest
+    free position across the hours it covers, so nothing is ever sliced or
+    overlapped. The single-group sheet is deliberately left as the classic
+    portrait grid: one group's week has no simultaneous sessions to separate.
+    """
+
+    def setUp(self):
+        self.sem = Semester.objects.create(academic_year="2026/2027", semester=1)
+        self.prog = Programme.objects.create(
+            code="CE", name="BSc. in Civil Engineering"
+        )
+        self.groups = [
+            StudentGroup.objects.create(programme=self.prog, code="C%d" % i)
+            for i in range(1, 8)
+        ]
+        self.venue = Venue.objects.create(name="YOMBO5", capacity=200)
+
+    def _session(self, code, day, start, end, groups=(), activity="LECTURE", venue=None):
+        session = Session.objects.create(
+            semester=self.sem,
+            course_code=code,
+            activity_type=activity,
+            day=day,
+            start_time=start,
+            end_time=end,
+            venue=venue or self.venue,
+        )
+        for group in groups:
+            SessionGroup.objects.create(session=session, group=group)
+        return session
+
+    def _entries(self):
+        return fold_for_display(
+            collect_entries(self.prog, self.sem, year=1), [g.code for g in self.groups]
+        )
+
+    def test_the_programme_sheet_is_the_packed_landscape_layout(self):
+        # Six groups in six rooms at the same hour, plus a cohort lecture on
+        # top: the case the classic grid could not draw at all.
+        for i, group in enumerate(self.groups[:6]):
+            self._session(
+                "AR%d" % (i + 1), "MONDAY", "08:00", "10:55", groups=[group],
+                activity="TUTORIAL", venue=Venue.objects.create(
+                    name="ROOM%d" % i, capacity=40
+                ),
+            )
+        # A whole-cohort lecture has to be linked to every group to be collected
+        # at all -- ``collect_entries`` selects on ``session_groups``, so an
+        # unlinked session belongs to the master sheet, not this one.
+        self._session("MT171", "MONDAY", "08:00", "09:55", groups=self.groups)
+
+        day_flowables, _slots = _build_day_flowables(self._entries(), 60.0, 46)
+        self.assertEqual(len(day_flowables), 1)
+        monday = day_flowables[0]
+        self.assertEqual(monday.day_label, "Monday")
+
+        # Every block is whole: no session is cut into one box per hour, and the
+        # 08:00-09:55 lecture is a single block rather than two.
+        spans = [box["colspan"] for box in monday.boxes]
+        self.assertIn(3, spans, "the 3-hour lecture was not drawn as one block")
+        self.assertEqual(len(monday.boxes), 7)
+
+        # And nothing overlaps. Two blocks may share an hour column only if one
+        # ends before the other starts.
+        for i, upper in enumerate(monday.boxes):
+            for lower in monday.boxes[i + 1:]:
+                same_columns = (
+                    upper["col"] < lower["col"] + lower["colspan"]
+                    and lower["col"] < upper["col"] + upper["colspan"]
+                )
+                if not same_columns:
+                    continue
+                self.assertFalse(
+                    upper["top"] < lower["bottom"] and lower["top"] < upper["bottom"],
+                    f"blocks overlap: {upper['lines']} / {lower['lines']}",
+                )
+
+    def test_the_programme_export_renders_a_packed_pdf_that_keeps_its_key(self):
+        self._session("AR111", "MONDAY", "08:00", "10:55", groups=self.groups[:3])
+        # A real rotation is one *group* doing two *different* workshops in the
+        # same slot on different week blocks. Two groups each on one block is
+        # not a rotation and earns no key row, so the fixture below is the only
+        # shape that can prove the key survived the change of engine.
+        for workshop, (start, end) in (("Carpentry", (1, 7)), ("Welding", (8, 14))):
+            WorkshopAllocation.objects.create(
+                semester=self.sem, group_code="C1", day="TUESDAY",
+                start_time="08:00", end_time="11:00", venue="YOMBO5",
+                workshop=workshop, week_start=start, week_end=end,
+            )
+        buf = io.BytesIO()
+        render_programme_timetable(self.prog, self.sem, 1, out=buf)
+        pdf = buf.getvalue()
+        self.assertTrue(pdf.startswith(b"%PDF-"))
+
+        text = _pdf_text(pdf)
+        self.assertIn("WORKSHOP ROTATION KEY", text)
+        # The key states the mapping the folded cell cannot: which craft runs in
+        # which weeks.
+        self.assertIn("Carpentry", text)
+        self.assertIn("Welding", text)
+        self.assertIn("1-7", text.replace("\\226", "-"))
+        self.assertIn("8-14", text.replace("\\226", "-"))
+        # Packed band, not the classic grid: an hour header naming the columns,
+        # and day names drawn rotated in their own left column.
+        self.assertIn("07:00", text)
+        self.assertIn("Monday", text)
+        # A4 landscape, like the master sheet it now shares an engine with.
+        boxes = re.findall(
+            rb"/MediaBox\s*\[\s*([\d.\-]+)\s+([\d.\-]+)\s+([\d.\-]+)\s+([\d.\-]+)\s*\]",
+            pdf,
+        )
+        self.assertTrue(boxes, "no MediaBox in the PDF")
+        self.assertEqual({round(float(b[2])) for b in boxes}, {842})
+        self.assertEqual({round(float(b[3])) for b in boxes}, {595})
+
+    def test_the_single_group_sheet_still_uses_the_classic_portrait_grid(self):
+        """One group's week has no simultaneity, so the grid is right for it."""
+        self._session("AR111", "MONDAY", "08:00", "10:55", groups=self.groups[:1])
+        buf = io.BytesIO()
+        render_group_timetable(self.groups[0], self.sem, 1, out=buf)
+        pdf = buf.getvalue()
+
+        boxes = re.findall(
+            rb"/MediaBox\s*\[\s*([\d.\-]+)\s+([\d.\-]+)\s+([\d.\-]+)\s+([\d.\-]+)\s*\]",
+            pdf,
+        )
+        self.assertTrue(boxes, "no MediaBox in the PDF")
+        # Portrait, where the master and programme sheets are landscape.
+        self.assertEqual({round(float(b[2])) for b in boxes}, {595})
+        self.assertEqual({round(float(b[3])) for b in boxes}, {842})
+
+    def test_both_packed_exports_share_one_engine(self):
+        """Two renderers, one packer -- so they cannot drift apart."""
+        from reportlab.lib.pagesizes import A4
+        from reportlab.platypus import SimpleDocTemplate
+
+        calls = []
+
+        def fake_bands(*args, **kwargs):
+            calls.append(kwargs)
+            SimpleDocTemplate(io.BytesIO(), pagesize=A4).build([])
+
+        with mock.patch("core.timetable_pdf._render_day_bands", fake_bands):
+            render_programme_timetable(self.prog, self.sem, 1, out=io.BytesIO())
+            render_udsm_master_timetable([], self.sem, 1, out=io.BytesIO())
+
+        self.assertEqual(len(calls), 2)
+        # The programme sheet keeps the workshop week range (two groups in one
+        # slot on different week blocks must stay tellable apart); the master
+        # sheet, which has no rotation key, drops it.
+        self.assertIs(calls[0]["show_notes"], True)
+        self.assertIs(calls[1]["show_notes"], False)
+
+    def test_the_week_range_survives_into_the_programme_cell(self):
+        """The range is the only thing telling two groups in one slot apart.
+
+        ``fold_same_sessions`` buckets on ``(slot, identity, note)``, so a
+        differing week range is a differing block -- the two groups must not be
+        merged into one box, or the cell would keep whichever range was seen
+        first and print "Wk 1-7" against everyone. The packed band draws them
+        as two adjacent blocks, which is also the only way both can be read.
+        """
+        self._session("AR111", "MONDAY", "08:00", "10:55", groups=self.groups[:1])
+        for code, (start, end) in (("C1", (1, 7)), ("C2", (8, 14))):
+            WorkshopAllocation.objects.create(
+                semester=self.sem, group_code=code, day="TUESDAY",
+                start_time="08:00", end_time="11:00", venue="YOMBO5",
+                workshop="Carpentry", week_start=start, week_end=end,
+            )
+        entries = self._entries()
+        workshop = [e for e in entries if e["kind"] == "workshop"]
+        self.assertEqual(len(workshop), 2, "the week range must keep them apart")
+
+        with_notes, _ = _build_day_flowables(entries, 60.0, 46, show_notes=True)
+        without_notes, _ = _build_day_flowables(entries, 60.0, 46, show_notes=False)
+        noted = [ln for f in with_notes for b in f.boxes for ln in b["lines"]]
+        plain = [ln for f in without_notes for b in f.boxes for ln in b["lines"]]
+        # Both ranges, on the programme sheet...
+        self.assertTrue(any("1-7" in ln[0] for ln in noted), noted)
+        self.assertTrue(any("8-14" in ln[0] for ln in noted), noted)
+        # ...and neither on the single-group one, whose key states them instead.
+        self.assertFalse(any("1-7" in ln[0] for ln in plain), plain)
+        self.assertFalse(any("8-14" in ln[0] for ln in plain), plain)
 
 
 class TimetablePageTests(TestCase):
@@ -9210,7 +9451,7 @@ class ManualAssignmentTests(AllocationTestCase):
 class AllocationRunTests(AllocationTestCase):
     def _plan_and_run(self, scope="ALL"):
         plan = plan_allocation(self.semester, scope)
-        return plan, save_plan(plan)
+        return plan, save_plan(plan, algorithm="smart")
 
     def _a_group_pinned_to_monday(self):
         """A group that must be moved off Monday to its Tuesday session.
@@ -10677,7 +10918,7 @@ class AllocationShowsInTheTimetableTests(AllocationTestCase):
         self._tutorial("MONDAY", 8, 9, self.hall)
         self._tutorial("TUESDAY", 8, 9, self.hall)
         plan = plan_allocation(self.semester, scope)
-        return plan, apply_run(save_plan(plan))
+        return plan, apply_run(save_plan(plan, algorithm="smart"))
 
     def test_the_sessions_list_shows_the_assigned_groups(self):
         self._seed()
@@ -10895,7 +11136,7 @@ class AllocationShowsInTheTimetableTests(AllocationTestCase):
         SessionGroup.objects.create(session=lecture, group=self.a1)
         self._session("MT161", ActivityType.SEMINAR, "TUESDAY", 8, 9, self.hall)
         plan = plan_allocation(self.semester, "ALL")
-        apply_run(save_plan(plan))
+        apply_run(save_plan(plan, algorithm="smart"))
         entries, _ = _collect_group_entries_and_rotations(self.a1, self.semester)
         with_groups = fold_for_display(entries, {self.a1.code})
         without = fold_for_display(
@@ -10933,7 +11174,7 @@ class AllocationAppearsInExportsTests(AllocationTestCase):
         self._seed()
         self._tutorial("MONDAY", 8, 9, self.hall)
         plan = plan_allocation(self.semester, "ALL")
-        apply_run(save_plan(plan))
+        apply_run(save_plan(plan, algorithm="smart"))
         entries = collect_group_entries(self.a1, self.semester)
         codes = {e["course_code"] for e in entries}
         self.assertIn("MT161", codes)
@@ -10944,7 +11185,7 @@ class AllocationAppearsInExportsTests(AllocationTestCase):
         # Only A1 is allocated; D1's requirement stays unresolved.
         self._tutorial("MONDAY", 8, 9, self.small)
         plan = plan_allocation(self.semester, "ALL")
-        apply_run(save_plan(plan))
+        apply_run(save_plan(plan, algorithm="smart"))
         self.assertIn(
             "MT161", {e["course_code"] for e in collect_group_entries(self.a1, self.semester)}
         )
@@ -10957,7 +11198,7 @@ class AllocationAppearsInExportsTests(AllocationTestCase):
         self._seed()
         self._tutorial("MONDAY", 8, 9, self.big)
         plan = plan_allocation(self.semester, "ALL")
-        apply_run(save_plan(plan))
+        apply_run(save_plan(plan, algorithm="smart"))
         out = io.BytesIO()
         render_group_timetable(self.a1, self.semester, out=out)
         self.assertGreater(len(out.getvalue()), 1000)
