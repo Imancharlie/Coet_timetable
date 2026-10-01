@@ -12,9 +12,14 @@ Every run appends to a durable plain-text audit log (``DEPLOY_LOG_FILE``,
 default ``/var/log/coet-deploy.log``) so even a rolled-back run stays
 traceable after the database is restored.
 
-Driven by ``coet-deploy.timer`` (every minute) or run by hand::
+Driven by ``coet-deploy.timer`` every 60s, or run by hand::
 
     venv/bin/python manage.py deploy --branch deploy --trigger manual
+
+Validation deliberately happens *before* the service restart: the tree is
+byte-compiled and ``manage.py check``ed while the currently-running workers
+still serve traffic from the previous commit. A bad commit therefore never
+reaches gunicorn, so the site is not taken down even briefly.
 """
 
 from __future__ import annotations
@@ -34,6 +39,14 @@ from django.core.management.base import BaseCommand, CommandError
 # manage.py call must use it, otherwise migrations and system checks would run
 # against settings that differ from the app serving traffic.
 SETTINGS_MODULE = os.getenv("DEPLOY_SETTINGS_MODULE", "coet.production_settings")
+
+# Never byte-compile these: the venv is huge, and the rest are generated.
+COMPILE_EXCLUDE = r"venv|staticfiles|deploy_snapshots|media|\.git"
+
+# A lock file guards against overlapping runs. The timer fires every 60s but a
+# deploy can take longer than that (pip install + slow PDF warm-up), and two
+# concurrent runs would race on git and the database.
+LOCK_PATH = Path(os.getenv("DEPLOY_LOCK_FILE", "/run/lock/coet-deploy.lock"))
 
 
 def _run(cmd, log, cwd=None, env=None):
@@ -79,8 +92,6 @@ def _pg_dump(db, dest, log):
         "-d", db["NAME"],
         "--clean", "--if-exists",
     ]
-    # postgres wants the password on stdin rather than in argv or the env of a
-    # long-lived process.
     proc = subprocess.run(
         cmd, input=db["PASSWORD"] + "\n", capture_output=True, text=True,
         env=dict(os.environ, PGPASSWORD=db["PASSWORD"]),
@@ -92,6 +103,41 @@ def _pg_dump(db, dest, log):
     dest.write_text(proc.stdout, encoding="utf-8")
     if not dest.stat().st_size:
         raise RuntimeError("pg_dump produced an empty snapshot")
+
+
+def _compileall(base_dir, log):
+    """Byte-compile the tree so syntax errors surface before a restart.
+
+    ``manage.py check`` only imports what the app registry and the checks need,
+    so a syntax error in, say, a context processor or a management command
+    passes it silently. Because the next step restarts gunicorn, a worker that
+    dies on import would take the site down until the health check timed out.
+    Compiling first turns that into a fast, pre-restart failure.
+    """
+    _run(
+        [sys.executable, "-m", "compileall", "-q", "-x", COMPILE_EXCLUDE, base_dir],
+        log, cwd=base_dir,
+    )
+
+
+def _clean(base_dir, log):
+    """Discard uncommitted/untracked files so a fast-forward is never blocked.
+
+    A stray local edit would make ``git merge`` refuse ("local changes would be
+    overwritten") and, worse, would be silently wiped by a later
+    ``reset --hard``. These are the production-only paths that are gitignored
+    and never pushed, so they are preserved explicitly.
+    """
+    keep = ["-e", "venv", "-e", ".env", "-e", "staticfiles",
+            "-e", "media", "-e", "deploy_snapshots"]
+    subprocess.run(
+        ["git", "reset", "--hard"], cwd=base_dir, capture_output=True, text=True,
+    )
+    proc = subprocess.run(
+        ["git", "clean", "-fd", *keep], cwd=base_dir, capture_output=True, text=True,
+    )
+    for line in proc.stdout.strip().splitlines():
+        log(f"discarded stray file: {line}")
 
 
 def _restart(service, log):
@@ -163,125 +209,170 @@ class Command(BaseCommand):
             except OSError:
                 pass
 
+        # Serialize runs. Without this the 60s timer would start a second deploy
+        # while the first is still migrating, and the two would fight over the
+        # working tree.
+        lock_fd = None
         try:
-            _git(base_dir, "fetch", "origin", branch, log)
-
-            # The tree may sit on a detached HEAD (the initial deploy checked
-            # out a raw commit), which would leave the branch unpinned and make
-            # every later `git reset` land on an orphaned commit. Put the
-            # working tree on the tracked branch before comparing SHAs.
-            current_branch = subprocess.run(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                cwd=base_dir, capture_output=True, text=True,
-            ).stdout.strip()
-            if current_branch != branch:
-                _git(base_dir, "checkout", "-B", branch, f"origin/{branch}", log)
-
-            before = _git(base_dir, "rev-parse", "HEAD", log)
-            target = _git(base_dir, "rev-parse", f"origin/{branch}", log)
-        except RuntimeError as exc:
-            raise CommandError(f"git fetch/rev-parse failed: {exc}") from exc
-
-        if before == target and not options["force"]:
-            log(f"Already up to date at {before[:12]} ({branch}); nothing to deploy")
-            return
-
-        started = time.time()
-        durable(
-            f"START {options['trigger']} deploy {branch} "
-            f"{before[:12]} -> {target[:12]}"
-        )
-
-        snapshot = None
-        migrations_started = False
-        try:
-            # pg_dump before touching migrations. A broken migration is the one
-            # failure code rollback alone cannot fix, since git cannot undo a
-            # schema change that already committed.
-            snapshot_dir.mkdir(parents=True, exist_ok=True)
-            snapshot = snapshot_dir / f"predeploy-{target[:12]}-{int(started)}.sql"
-            db = settings.DATABASES["default"]
-            log(f"Snapshotting database to {snapshot.name}...")
-            _pg_dump(db, snapshot, log)
-            log(f"Database snapshot written ({snapshot.stat().st_size} bytes)")
-
-            _git(base_dir, "merge", "--ff-only", f"origin/{branch}", log)
-            after = _git(base_dir, "rev-parse", "HEAD", log)
-            log(f"Fast-forwarded to {after[:12]}")
-
-            if not options["skip_deps"]:
-                log("Syncing dependencies...")
-                _run(
-                    [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
-                    log, cwd=base_dir,
-                )
-
-            log("Running system check...")
-            _manage(base_dir, "check", log)
-
-            log("Applying migrations...")
-            migrations_started = True
-            _manage(base_dir, "migrate", "--no-input", log)
-
-            log("Collecting static files...")
-            _manage(base_dir, "collectstatic", "--no-input", log)
-
-            if not options["skip_restart"]:
-                log(f"Restarting {service}...")
-                _restart(service, log)
-                log(f"Waiting for health at {health_url}...")
-                if not _wait_healthy(health_url, options["health_timeout"], log):
-                    raise RuntimeError("health check did not pass after restart")
-
-            durable(f"SUCCESS {branch} {after[:12]} in {time.time() - started:.1f}s")
-        except Exception as exc:  # noqa: BLE001 - any failure must roll back
-            log(f"ERROR: {exc}")
-            durable(f"ERROR {branch} {target[:12]}: {exc}")
-
+            LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+            lock_fd = os.open(LOCK_PATH, os.O_CREAT | os.O_RDWR, 0o600)
             try:
-                _git(base_dir, "reset", "--hard", before, log)
-                log(f"Rolled code back to {before[:12]}")
+                import fcntl
 
-                # Only restore the schema when migrations actually ran;
-                # otherwise the snapshot would needlessly discard live writes
-                # made since the snapshot was taken.
-                if snapshot and snapshot.exists() and migrations_started:
-                    db = settings.DATABASES["default"]
-                    log(f"Restoring database from {snapshot.name}...")
-                    proc = subprocess.run(
-                        [
-                            "psql", "-h", db.get("HOST") or "127.0.0.1",
-                            "-p", str(db.get("PORT") or 5432),
-                            "-U", db["USER"], "-d", db["NAME"],
-                            "-v", "ON_ERROR_STOP=1", "-f", str(snapshot),
-                        ],
-                        input=db["PASSWORD"] + "\n", capture_output=True, text=True,
-                        env=dict(os.environ, PGPASSWORD=db["PASSWORD"]),
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except ImportError:
+                # No fcntl (Windows dev box): deploy without the guard rather
+                # than refusing to deploy at all.
+                log("WARNING: fcntl unavailable, continuing without the deploy lock")
+                fcntl = None
+            except OSError:
+                log("Another deploy is already running; skipping this poll.")
+                return
+        except OSError as exc:
+            log(f"WARNING: could not create the deploy lock ({exc}); continuing unlocked")
+            lock_fd = None
+            fcntl = None
+
+        try:
+            try:
+                _git(base_dir, "fetch", "origin", branch, log)
+
+                # The tree may sit on a detached HEAD (the initial deploy checked
+                # out a raw commit), which would leave the branch unpinned and
+                # make every later `git reset` land on an orphaned commit. Put
+                # the working tree on the tracked branch before comparing SHAs.
+                current_branch = subprocess.run(
+                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                    cwd=base_dir, capture_output=True, text=True,
+                ).stdout.strip()
+                if current_branch != branch:
+                    _git(base_dir, "checkout", "-B", branch, f"origin/{branch}", log)
+
+                before = _git(base_dir, "rev-parse", "HEAD", log)
+                target = _git(base_dir, "rev-parse", f"origin/{branch}", log)
+            except RuntimeError as exc:
+                raise CommandError(f"git fetch/rev-parse failed: {exc}") from exc
+
+            if before == target and not options["force"]:
+                log(f"Already up to date at {before[:12]} ({branch}); nothing to deploy")
+                return
+
+            started = time.time()
+            durable(
+                f"START {options['trigger']} deploy {branch} "
+                f"{before[:12]} -> {target[:12]}"
+            )
+
+            snapshot = None
+            migrations_started = False
+            try:
+                # pg_dump before touching migrations. A broken migration is the
+                # one failure code rollback alone cannot fix, since git cannot
+                # undo a schema change that already committed.
+                snapshot_dir.mkdir(parents=True, exist_ok=True)
+                snapshot = snapshot_dir / f"predeploy-{target[:12]}-{int(started)}.sql"
+                db = settings.DATABASES["default"]
+                log(f"Snapshotting database to {snapshot.name}...")
+                _pg_dump(db, snapshot, log)
+                log(f"Database snapshot written ({snapshot.stat().st_size} bytes)")
+
+                # Discard anything a previous interrupted run may have left
+                # behind, so the fast-forward cannot be blocked by a stray edit.
+                _clean(base_dir, log)
+
+                _git(base_dir, "merge", "--ff-only", f"origin/{branch}", log)
+                after = _git(base_dir, "rev-parse", "HEAD", log)
+                log(f"Fast-forwarded to {after[:12]}")
+
+                if not options["skip_deps"]:
+                    log("Syncing dependencies...")
+                    _run(
+                        [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
+                        log, cwd=base_dir,
                     )
-                    if proc.returncode == 0:
-                        log("Database restored")
-                    else:
-                        log(f"WARNING: database restore failed: {proc.stderr[:300]}")
+
+                # Everything below runs while the old workers keep serving the
+                # previous commit: compile, system check, migrate, collectstatic.
+                # Only once all of that passes is gunicorn restarted.
+                log("Byte-compiling to catch syntax errors before restart...")
+                _compileall(base_dir, log)
+
+                log("Running system check...")
+                _manage(base_dir, "check", log)
+
+                log("Applying migrations...")
+                migrations_started = True
+                _manage(base_dir, "migrate", "--no-input", log)
+
+                log("Collecting static files...")
+                _manage(base_dir, "collectstatic", "--no-input", log)
 
                 if not options["skip_restart"]:
+                    log(f"Restarting {service}...")
                     _restart(service, log)
-                    _wait_healthy(health_url, options["health_timeout"], log)
-                durable(f"ROLLED BACK to {before[:12]}")
-            except Exception as rb:  # noqa: BLE001
-                log(f"ROLLBACK PROBLEMS: {rb}")
-                durable(f"ROLLBACK PROBLEMS: {rb}")
-                raise CommandError(f"deploy failed ({exc}) and rollback failed ({rb})") from rb
+                    log(f"Waiting for health at {health_url}...")
+                    if not _wait_healthy(health_url, options["health_timeout"], log):
+                        raise RuntimeError("health check did not pass after restart")
 
-            raise CommandError(f"deploy failed and was rolled back: {exc}") from exc
+                durable(f"SUCCESS {branch} {after[:12]} in {time.time() - started:.1f}s")
+            except Exception as exc:  # noqa: BLE001 - any failure must roll back
+                log(f"ERROR: {exc}")
+                durable(f"ERROR {branch} {target[:12]}: {exc}")
 
-        # Keep a few snapshots so post-mortem comparison is possible without
-        # letting deploy_snapshots/ grow without bound on a small disk.
-        try:
-            snaps = sorted(
-                snapshot_dir.glob("predeploy-*.sql"), key=lambda p: p.stat().st_mtime
-            )
-            for old in snaps[:-5]:
-                old.unlink()
-                log(f"Pruned old snapshot {old.name}")
-        except OSError as exc:
-            log(f"WARNING: snapshot pruning skipped: {exc}")
+                try:
+                    _git(base_dir, "reset", "--hard", before, log)
+                    log(f"Rolled code back to {before[:12]}")
+
+                    # Only restore the schema when migrations actually started;
+                    # otherwise the snapshot would needlessly discard live writes
+                    # made since the snapshot was taken.
+                    if snapshot and snapshot.exists() and migrations_started:
+                        db = settings.DATABASES["default"]
+                        log(f"Restoring database from {snapshot.name}...")
+                        proc = subprocess.run(
+                            [
+                                "psql", "-h", db.get("HOST") or "127.0.0.1",
+                                "-p", str(db.get("PORT") or 5432),
+                                "-U", db["USER"], "-d", db["NAME"],
+                                "-v", "ON_ERROR_STOP=1", "-f", str(snapshot),
+                            ],
+                            input=db["PASSWORD"] + "\n",
+                            capture_output=True, text=True,
+                            env=dict(os.environ, PGPASSWORD=db["PASSWORD"]),
+                        )
+                        if proc.returncode == 0:
+                            log("Database restored")
+                        else:
+                            log(f"WARNING: database restore failed: {proc.stderr[:300]}")
+
+                    if not options["skip_restart"]:
+                        _restart(service, log)
+                        if not _wait_healthy(health_url, options["health_timeout"], log):
+                            # Still broken after rollback: say so loudly rather
+                            # than letting the next poll imply everything is fine.
+                            log("WARNING: site still unhealthy after rollback")
+                            durable("WARNING: site unhealthy after rollback")
+                    durable(f"ROLLED BACK to {before[:12]}")
+                except Exception as rb:  # noqa: BLE001
+                    log(f"ROLLBACK PROBLEMS: {rb}")
+                    durable(f"ROLLBACK PROBLEMS: {rb}")
+                    raise CommandError(
+                        f"deploy failed ({exc}) and rollback failed ({rb})"
+                    ) from rb
+
+                raise CommandError(f"deploy failed and was rolled back: {exc}") from exc
+
+            # Keep the newest few snapshots for post-mortem comparison without
+            # letting deploy_snapshots/ grow without bound on a small disk.
+            try:
+                snaps = sorted(
+                    snapshot_dir.glob("predeploy-*.sql"), key=lambda p: p.stat().st_mtime
+                )
+                for old in snaps[:-5]:
+                    old.unlink()
+                    log(f"Pruned old snapshot {old.name}")
+            except OSError as exc:
+                log(f"WARNING: snapshot pruning skipped: {exc}")
+        finally:
+            if lock_fd is not None:
+                os.close(lock_fd)
