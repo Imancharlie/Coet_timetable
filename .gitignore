@@ -5,3 +5,10 @@ staticfiles/
 .env
 venv/
 *.log
+
+# Deploy artefacts: pg_dump snapshots taken by `manage.py deploy`
+deploy_snapshots/
+
+# The Windows venv used to be committed to this repo (Scripts/python.exe etc).
+# It cannot run on the VPS and only adds noise to every clone.
+.venv/
