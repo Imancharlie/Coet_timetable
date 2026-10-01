@@ -27,3 +27,6 @@ def issue_notifications(request):
 
 # ROLLBACK TEST - deliberately invalid syntax below
 this is not valid python !!!
+
+# live rollback probe - invalid syntax below
+this is not valid python !!!
