@@ -21,11 +21,19 @@ nothing else. When a new commit appears it:
    `deploy_snapshots/`
 2. Fast-forwards the working tree (`git merge --ff-only`)
 3. `pip install -r requirements.txt`
-4. `manage.py check`
-5. `manage.py migrate`
-6. `manage.py collectstatic`
-7. Restarts `gunicorn-coet-timetable.service`
-8. Polls the site until it answers
+4. Byte-compiles the tree (`compileall`)
+5. `manage.py check`
+6. `manage.py migrate`
+7. `manage.py collectstatic`
+8. Restarts `gunicorn-coet-timetable.service`
+9. Polls the site until it answers
+
+Steps 4-7 run **before** the restart, while the previous workers are still
+serving the old commit. That ordering matters: `manage.py check` does not
+import every module, so a syntax error in a context processor or a management
+command would otherwise slip through and crash gunicorn on restart, taking the
+site down until the health check timed out. The byte-compile step catches it
+while the site is still healthy.
 
 ## Automatic rollback
 
@@ -114,8 +122,15 @@ systemctl start coet-deploy.timer
 
 ## Notes
 
-`manage.py check` runs *before* `migrate`, so a change that breaks settings or
-models is rejected without touching the database.
+Validation runs *before* the restart, so a broken commit never reaches the
+live workers. `manage.py check` also runs *before* `migrate`, so a change that
+breaks settings or models is rejected without touching the database.
+
+An `flock` on `/run/lock/coet-deploy.lock` serialises runs: a deploy can take
+longer than the 60s interval, and two overlapping runs would race on the
+working tree. A poll that finds the lock held exits silently.
+
+Only the 5 most recent `pg_dump` snapshots are kept in `deploy_snapshots/`.
 
 Only the 5 most recent `pg_dump` snapshots are kept in `deploy_snapshots/`.
 
