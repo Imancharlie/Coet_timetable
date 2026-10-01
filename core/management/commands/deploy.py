@@ -48,14 +48,21 @@ def _run(cmd, log, cwd=None, env=None):
     return proc.stdout.strip()
 
 
-def _git(base_dir, *args, log):
-    return _run(["git", *args], log, cwd=base_dir)
+def _split_log(args):
+    """Callers pass the ``log`` callable as the final positional argument."""
+    return args[:-1], args[-1]
 
 
-def _manage(base_dir, *args, log):
+def _git(base_dir, *args):
+    argv, log = _split_log(args)
+    return _run(["git", *argv], log, cwd=base_dir)
+
+
+def _manage(base_dir, *args):
+    argv, log = _split_log(args)
     env = dict(os.environ)
     env["DJANGO_SETTINGS_MODULE"] = SETTINGS_MODULE
-    return _run([sys.executable, "manage.py", *args], log, cwd=base_dir, env=env)
+    return _run([sys.executable, "manage.py", *argv], log, cwd=base_dir, env=env)
 
 
 def _pg_dump(db, dest, log):
@@ -170,8 +177,8 @@ class Command(BaseCommand):
             if current_branch != branch:
                 _git(base_dir, "checkout", "-B", branch, f"origin/{branch}", log)
 
-            before = _git(base_dir, "rev-parse", "HEAD")
-            target = _git(base_dir, "rev-parse", f"origin/{branch}")
+            before = _git(base_dir, "rev-parse", "HEAD", log)
+            target = _git(base_dir, "rev-parse", f"origin/{branch}", log)
         except RuntimeError as exc:
             raise CommandError(f"git fetch/rev-parse failed: {exc}") from exc
 
@@ -199,7 +206,7 @@ class Command(BaseCommand):
             log(f"Database snapshot written ({snapshot.stat().st_size} bytes)")
 
             _git(base_dir, "merge", "--ff-only", f"origin/{branch}", log)
-            after = _git(base_dir, "rev-parse", "HEAD")
+            after = _git(base_dir, "rev-parse", "HEAD", log)
             log(f"Fast-forwarded to {after[:12]}")
 
             if not options["skip_deps"]:
