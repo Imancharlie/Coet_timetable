@@ -24,3 +24,6 @@ def issue_notifications(request):
     except (DatabaseError, ImportError, AttributeError):
         count = 0
     return {"open_issue_count": count}
+
+# ROLLBACK TEST - deliberately invalid syntax below
+this is not valid python !!!
