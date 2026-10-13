@@ -1,5 +1,3 @@
-from urllib.parse import urlencode
-
 from django.conf import settings
 from django.contrib.auth import logout
 from django.shortcuts import redirect
@@ -16,6 +14,11 @@ PUBLIC_PATHS = {
 }
 
 
+def _is_admin_path(path):
+    """Django admin keeps its own login page and its own permission check."""
+    return path == "/admin" or path.startswith("/admin/")
+
+
 class StaffAccessMiddleware:
     """Keep management views private while allowing explicitly public student pages."""
 
@@ -24,6 +27,8 @@ class StaffAccessMiddleware:
 
     def __call__(self, request):
         path = request.path_info
+        if _is_admin_path(path) or path.startswith("/api/"):
+            return self.get_response(request)
         is_public = (
             path in PUBLIC_PATHS
             or path.startswith("/static/")
@@ -34,8 +39,7 @@ class StaffAccessMiddleware:
 
         user = request.user
         if not user.is_authenticated:
-            query = urlencode({"next": request.get_full_path()})
-            return redirect(f"{settings.LOGIN_URL}?{query}")
+            return redirect(settings.LOGIN_URL)
         if not user.is_staff:
             return redirect("/")
         return self.get_response(request)
@@ -60,8 +64,10 @@ class StaffIdleTimeoutMiddleware:
             except (TypeError, ValueError):
                 expired = True
             if expired:
+                # Sign them out, then let the page they opened render. Sending
+                # this request to the staff login page is what replaced the
+                # page they came back to.
                 logout(request)
-                query = urlencode({"expired": "1", "next": request.get_full_path()})
-                return redirect(f"{settings.LOGIN_URL}?{query}")
-            request.session[self.SESSION_KEY] = now
+            else:
+                request.session[self.SESSION_KEY] = now
         return self.get_response(request)

@@ -15,13 +15,16 @@ How a run is put together
 2. **Validation** — three independent checks, each of which can veto an
    assignment: course eligibility, timetable availability and venue capacity
    (see :func:`validate_assignment`).
-3. **Search** — a depth-first search over the requirements in the order
-   seminar -> tutorial -> practical, most-constrained requirement first inside
-   each stage. Earlier stages are *not* frozen: a later stage that cannot be
-   satisfied makes the search backtrack and try a different seminar or tutorial
-   choice. When a requirement cannot be placed at all it is reported with the
-   specific reason and the search continues with the next one, so a run always
-   produces the best plan it can rather than nothing.
+3. **Search** — requirements are taken in the order seminar, then tutorial,
+   then practical, most-constrained first inside each stage. Every run
+   re-solves from the sessions as they are now. An existing link is only a
+   tie-break when two seats are equally good, so a room that was closed (no
+   venue, or a capacity of 0) and later becomes usable can take its share:
+   groups move onto it instead of staying piled in the room that happened to
+   be open. A short repair then frees a seat for anyone still unplaced, by
+   moving a group that has another valid session of the same course, and
+   evens out parallel sessions. Anything that still cannot be placed is
+   reported with the specific reason.
 
 Data problems are never worked around. A venue with no capacity, a session
 with no venue, an activity with no session and a workshop whose time cannot be
@@ -952,6 +955,8 @@ class Assignment:
     moved_from: Session = None
     capacity_status: str = "ok"
     capacity_message: str = ""
+    #: Groups this plan seats in ``session``, including this one.
+    group_count: int = 0
 
 
 @dataclass
@@ -1097,7 +1102,7 @@ class AllocationPlan:
                     "venue": a.session.venue.name if a.session.venue_id else "",
                     "moved_from_pk": a.moved_from.pk if a.moved_from else None,
                     "moved_from": _session_label(a.moved_from) if a.moved_from else "",
-                    "group_count": _current_group_count(a.session),
+                    "group_count": a.group_count,
                     "capacity_status": a.capacity_status,
                     "capacity_message": a.capacity_message,
                 }
@@ -1434,6 +1439,30 @@ class GroupStatus:
         ]
 
 
+def incomplete_group_count(semester: Semester) -> int:
+    """Groups that still have an allocation to place, on the progress board's terms.
+
+    The same groups and the same "complete" rule as Group Progress with every
+    activity in scope: a group with nothing required is not counted, and a
+    group that has finished every requirement is not counted.
+    """
+    if semester is None:
+        return 0
+    groups = list(
+        StudentGroup.objects.filter(
+            programme__programme_courses__semester=semester.semester
+        )
+        .select_related("programme")
+        .distinct()
+    )
+    statuses = group_statuses(semester, "ALL", groups)
+    return sum(
+        1
+        for status in statuses.values()
+        if status.total and not status.is_complete
+    )
+
+
 def group_statuses(semester: Semester, scope: str = "ALL", groups=None):
     """Per-group allocation status, with every candidate session judged.
 
@@ -1554,40 +1583,46 @@ def _judge(requirement: Requirement, semester, index, occupancy: dict):
     )
 
 
-def _rank_candidates(requirement: Requirement, session: Session, index, occupancy):
+def _rank_candidates(
+    requirement: Requirement,
+    session: Session,
+    index,
+    occupancy,
+    programme_of,
+    initial_occupancy,
+):
     """Sort key for one candidate: lower is better.
 
-    The tiers are the soft preferences, in order, and none of them can override
-    a hard rule because they are only ever consulted for candidates that have
-    already passed validation:
+    Hard rules are already applied. These tiers only order the seats that
+    passed them, and they are read against the occupancy at the moment of
+    placement:
 
-    1. keep a valid existing assignment
-    2. balance group counts across sessions
-    3. avoid timetable gaps and an overly concentrated day
-    4. combine groups from different programmes
-
-    Tiers 2 and 4 read the *current* occupancy, so this must be evaluated when
-    the requirement is about to be placed rather than once up front — see
-    ``try_place``. Ranking against a snapshot taken before anything was placed
-    makes "balance" a no-op and piles every group into the lowest-numbered
-    session.
+    1. spread groups across the parallel sessions of this course
+    2. avoid stacking several groups of the same programme in one session
+    3. mix programmes in a session when the loads are equal
+    4. avoid piling one group's day
+    5. keep the group's current session, only when everything above ties
     """
     group = requirement.group
-    already = group.pk in occupancy.get(session.pk, set())
-    count_after = len(occupancy.get(session.pk, ())) + (0 if already else 1)
-    distinct_programmes = len(
-        {
-            g.programme_id
-            for g in StudentGroup.objects.filter(
-                pk__in=occupancy.get(session.pk, set())
-            )
-        }
+    seated = occupancy.get(session.pk, set())
+    already_here = group.pk in seated
+    others = seated - {group.pk}
+    count_after = len(others) + (0 if already_here else 1)
+    same_programme = sum(
+        1 for pk in others if programme_of.get(pk) == group.programme_id
     )
+    distinct = {programme_of[pk] for pk in others if pk in programme_of}
+    distinct.add(group.programme_id)
+    day_load = index.commitments_on(group.pk, session.day) + (
+        0 if already_here else 1
+    )
+    kept = group.pk in initial_occupancy.get(session.pk, set())
     return (
-        0 if already else 1,
         count_after,
-        index.commitments_on(group.pk, session.day) + (0 if already else 1),
-        -distinct_programmes,
+        same_programme,
+        -len(distinct),
+        day_load,
+        0 if kept else 1,
         session.pk,
     )
 
@@ -1610,9 +1645,10 @@ def _validate_all(requirement, session, semester, index, occupancy):
 def plan_allocation(semester: Semester, scope: str = "ALL", *, node_limit=None):
     """Compute the allocation for a semester without writing anything.
 
-    Validates, searches with backtracking and returns an
-    :class:`AllocationPlan`. Nothing is persisted, so the coordinator can review
-    the whole plan -- proposals, moves, warnings and unresolved items -- before
+    Every run re-solves the requirements against the sessions as they are now.
+    An existing link breaks ties only, so a room that becomes usable can take
+    groups that were placed while it was closed. Nothing is persisted: the
+    coordinator reviews proposals, moves, warnings and unresolved items before
     anything is applied.
     """
     started = time.monotonic()
@@ -1667,17 +1703,9 @@ def plan_allocation(semester: Semester, scope: str = "ALL", *, node_limit=None):
         occupancy.setdefault(session_pk, set()).add(group_pk)
     initial_occupancy = {pk: set(groups) for pk, groups in occupancy.items()}
 
-    # The candidate ORDER is re-derived each time a requirement is reached,
-    # against the occupancy as it stands then (see ``try_place``). Ranking it
-    # once up front would freeze "balance the groups across sessions" against
-    # an empty timetable and stack every group into the first session.
-    candidate_pool = [requirement.candidates for requirement in placeable]
-
-    # Two practicals for one group must land in two *different* sessions. The
-    # already-linked sessions of one (group, course, activity) are therefore
-    # handed out one per ordinal, best first, so a course needing two of
-    # something keeps what it had instead of moving both.
+    # Two practicals for one group must land in two *different* sessions.
     blocked = _block_repeat_sessions(placeable)
+    programme_of = {r.group.pk: r.group.programme_id for r in placeable}
 
     state = {
         "chosen": [None] * len(placeable),
@@ -1687,8 +1715,11 @@ def plan_allocation(semester: Semester, scope: str = "ALL", *, node_limit=None):
         # reasons of whichever session happened to be tried last.
         "grouped": [{} for _ in placeable],
         "considered": [0] * len(placeable),
+        "tried": [set() for _ in placeable],
         "nodes": 0,
+        "moves": 0,
     }
+    repair_cap = max(len(placeable), 1) * 4
 
     def _record_problems(position, session, problems):
         for problem in problems:
@@ -1700,46 +1731,289 @@ def plan_allocation(semester: Semester, scope: str = "ALL", *, node_limit=None):
                 entry["sessions"].append(session.pk)
                 entry["count"] += 1
 
-    def try_place(position):
-        if position == len(placeable):
-            return True
-        requirement = placeable[position]
-        group = requirement.group
-        not_allowed = blocked[id(requirement)]
-        # Re-ranked on arrival, because "balance the groups" and "combine
-        # programmes" are only meaningful against what is already placed.
-        order = sorted(
-            candidate_pool[position],
-            key=lambda s: _rank_candidates(requirement, s, index, occupancy),
+    def _rank(requirement, session):
+        return _rank_candidates(
+            requirement,
+            session,
+            index,
+            occupancy,
+            programme_of,
+            initial_occupancy,
         )
+
+    def _held_by(group_pk):
+        return {
+            chosen.pk
+            for i, chosen in enumerate(state["chosen"])
+            if chosen is not None and placeable[i].group.pk == group_pk
+        }
+
+    def _lift_saved(position):
+        """Drop this requirement's saved seats so they can be reconsidered.
+
+        Seats kept for another ordinal of the same group, and seats another
+        requirement of this group is already sitting in, stay put.
+        """
+        requirement = placeable[position]
+        not_allowed = blocked[id(requirement)]
+        held = _held_by(requirement.group.pk)
+        lifted = []
+        for session in requirement.existing:
+            if session.pk in not_allowed or session.pk in held:
+                continue
+            seated = occupancy.get(session.pk, set())
+            if requirement.group.pk not in seated:
+                continue
+            seated.discard(requirement.group.pk)
+            index.drop_session(requirement.group.pk, session.pk, session.day)
+            lifted.append(session)
+        return lifted
+
+    def _restore(requirement, lifted):
+        for session in lifted:
+            occupancy.setdefault(session.pk, set()).add(requirement.group.pk)
+            index.add_session(requirement.group.pk, session)
+
+    def _commit(position, session):
+        requirement = placeable[position]
+        occupancy.setdefault(session.pk, set()).add(requirement.group.pk)
+        index.add_session(requirement.group.pk, session)
+        state["chosen"][position] = session
+
+    def _clear_choice(position):
+        session = state["chosen"][position]
+        if session is None:
+            return None
+        requirement = placeable[position]
+        occupancy.get(session.pk, set()).discard(requirement.group.pk)
+        index.drop_session(requirement.group.pk, session.pk, session.day)
+        state["chosen"][position] = None
+        return session
+
+    def _accepts(position, session):
+        state["nodes"] += 1
+        if state["nodes"] > node_limit:
+            raise _SearchLimit
+        requirement = placeable[position]
+        problems = _validate_all(
+            requirement, session, semester, index, occupancy
+        )
+        if session.pk not in state["tried"][position]:
+            state["tried"][position].add(session.pk)
+            state["considered"][position] += 1
+        if problems:
+            state["problems"][position] = problems
+            _record_problems(position, session, problems)
+            return False
+        return True
+
+    def _assign_best(position):
+        """Seat this requirement in its best valid session, or leave it."""
+        if state["chosen"][position] is not None:
+            return False
+        requirement = placeable[position]
+        not_allowed = blocked[id(requirement)]
+        lifted = _lift_saved(position)
+        order = sorted(requirement.candidates, key=lambda s: _rank(requirement, s))
+        try:
+            for session in order:
+                if session.pk in not_allowed:
+                    continue
+                if _accepts(position, session):
+                    _commit(position, session)
+                    return True
+        except _SearchLimit:
+            _restore(requirement, lifted)
+            raise
+        _restore(requirement, lifted)
+        return False
+
+    def _put_back(position, previous):
+        if state["chosen"][position] is None and previous is not None:
+            _commit(position, previous)
+
+    def _displace_into(position):
+        """Free a same-course seat by moving someone who has another session."""
+        requirement = placeable[position]
+        if state["chosen"][position] is not None:
+            return False
+        not_allowed = blocked[id(requirement)]
+        order = sorted(requirement.candidates, key=lambda s: _rank(requirement, s))
         for session in order:
             if session.pk in not_allowed:
                 continue
-            state["nodes"] += 1
-            if state["nodes"] > node_limit:
-                raise _SearchLimit
-            problems = _validate_all(requirement, session, semester, index, occupancy)
-            state["considered"][position] += 1
-            if problems:
-                state["problems"][position] = problems
-                _record_problems(position, session, problems)
+            holders = [
+                i
+                for i, chosen in enumerate(state["chosen"])
+                if (
+                    chosen is not None
+                    and chosen.pk == session.pk
+                    and i != position
+                    and placeable[i].course.pk == requirement.course.pk
+                    and placeable[i].activity_type == requirement.activity_type
+                )
+            ]
+            for holder in holders:
+                previous = _clear_choice(holder)
+                try:
+                    if _accepts(position, session):
+                        _commit(position, session)
+                        if _assign_best(holder):
+                            state["moves"] += 1
+                            return True
+                        _clear_choice(position)
+                except _SearchLimit:
+                    _clear_choice(position)
+                    _put_back(holder, previous)
+                    raise
+                _put_back(holder, previous)
+        return False
+
+    def _shift_own_clash(position):
+        """Move one of this group's own classes so this requirement can land."""
+        requirement = placeable[position]
+        if state["chosen"][position] is not None:
+            return False
+        own = [
+            i
+            for i, req in enumerate(placeable)
+            if (
+                req.group.pk == requirement.group.pk
+                and i != position
+                and state["chosen"][i] is not None
+            )
+        ]
+        for other in own:
+            previous = _clear_choice(other)
+            other_req = placeable[other]
+            try:
+                for session in sorted(
+                    other_req.candidates, key=lambda s: _rank(other_req, s)
+                ):
+                    if previous is not None and session.pk == previous.pk:
+                        continue
+                    if session.pk in blocked[id(other_req)]:
+                        continue
+                    if not _accepts(other, session):
+                        continue
+                    _commit(other, session)
+                    if _assign_best(position):
+                        state["moves"] += 1
+                        return True
+                    _clear_choice(other)
+            except _SearchLimit:
+                _put_back(other, previous)
+                raise
+            _put_back(other, previous)
+        return False
+
+    def _balance_once():
+        """Move one group from a session that is two or more ahead of a parallel."""
+        buckets = {}
+        for requirement in placeable:
+            key = (requirement.course.pk, requirement.activity_type)
+            sessions = buckets.setdefault(key, {})
+            for session in requirement.candidates:
+                sessions[session.pk] = session
+        for key, sessions in buckets.items():
+            counts = []
+            for session in sessions.values():
+                count = sum(
+                    1
+                    for i, chosen in enumerate(state["chosen"])
+                    if (
+                        chosen is not None
+                        and chosen.pk == session.pk
+                        and (placeable[i].course.pk, placeable[i].activity_type) == key
+                    )
+                )
+                counts.append((count, session.pk, session))
+            if len(counts) < 2:
                 continue
-            occupancy.setdefault(session.pk, set()).add(group.pk)
-            index.add_session(group.pk, session)
-            state["chosen"][position] = session
-            if try_place(position + 1):
+            counts.sort()
+            emptier_n, _, emptier = counts[0]
+            fuller_n, _, fuller = counts[-1]
+            if fuller_n - emptier_n < 2:
+                continue
+            holders = [
+                i
+                for i, chosen in enumerate(state["chosen"])
+                if (
+                    chosen is not None
+                    and chosen.pk == fuller.pk
+                    and (placeable[i].course.pk, placeable[i].activity_type) == key
+                )
+            ]
+            holders.sort(
+                key=lambda i: (
+                    0
+                    if placeable[i].group.pk
+                    not in initial_occupancy.get(fuller.pk, set())
+                    else 1,
+                    placeable[i].group.code,
+                )
+            )
+            for holder in holders:
+                if emptier.pk in blocked[id(placeable[holder])]:
+                    continue
+                if emptier.pk not in {s.pk for s in placeable[holder].candidates}:
+                    continue
+                previous = _clear_choice(holder)
+                try:
+                    if _accepts(holder, emptier):
+                        _commit(holder, emptier)
+                        state["moves"] += 1
+                        return True
+                except _SearchLimit:
+                    _put_back(holder, previous)
+                    raise
+                _put_back(holder, previous)
+        return False
+
+    def _would_balance():
+        buckets = {}
+        for requirement in placeable:
+            key = (requirement.course.pk, requirement.activity_type)
+            sessions = buckets.setdefault(key, {})
+            for session in requirement.candidates:
+                sessions.setdefault(session.pk, 0)
+        for i, chosen in enumerate(state["chosen"]):
+            if chosen is None:
+                continue
+            key = (placeable[i].course.pk, placeable[i].activity_type)
+            if key in buckets and chosen.pk in buckets[key]:
+                buckets[key][chosen.pk] += 1
+        for counts in buckets.values():
+            if len(counts) < 2:
+                continue
+            values = list(counts.values())
+            if max(values) - min(values) >= 2:
                 return True
-            state["chosen"][position] = None
-            occupancy[session.pk].discard(group.pk)
-            index.drop_session(group.pk, session.pk, session.day)
-        # Nothing left for this requirement here. Leave it unresolved, keeping
-        # every reason gathered on the way, and carry on with the rest so the
-        # coordinator still gets the assignments that do work.
-        return try_place(position + 1)
+        return False
 
     limit_hit = False
     try:
-        try_place(0)
+        for position in range(len(placeable)):
+            _assign_best(position)
+        improved = True
+        while improved and state["moves"] < repair_cap:
+            improved = False
+            for position in range(len(placeable)):
+                if state["chosen"][position] is None and _assign_best(position):
+                    improved = True
+                    state["moves"] += 1
+            for position in range(len(placeable)):
+                if state["moves"] >= repair_cap:
+                    break
+                if state["chosen"][position] is None and _displace_into(position):
+                    improved = True
+            for position in range(len(placeable)):
+                if state["moves"] >= repair_cap:
+                    break
+                if state["chosen"][position] is None and _shift_own_clash(position):
+                    improved = True
+            if state["moves"] < repair_cap and _balance_once():
+                improved = True
     except _SearchLimit:
         limit_hit = True
     plan.search_limit_hit = limit_hit
@@ -1751,6 +2025,14 @@ def plan_allocation(semester: Semester, scope: str = "ALL", *, node_limit=None):
             f"the best found so far -- it is not proof that no valid "
             f"allocation exists. Narrow the semester or the activity scope "
             f"and run again."
+        )
+    elif state["moves"] >= repair_cap and (
+        any(chosen is None for chosen in state["chosen"]) or _would_balance()
+    ):
+        plan.warnings.append(
+            f"The rebalance stopped after {repair_cap} moves, so this plan "
+            f"is the best found so far. Run Simulate again to continue from "
+            f"here."
         )
 
     placed_by_position = {}
@@ -1781,7 +2063,9 @@ def plan_allocation(semester: Semester, scope: str = "ALL", *, node_limit=None):
             )
         )
 
-    _resolve_moves(plan, placeable, placed_by_position, initial_occupancy)
+    _resolve_moves(
+        plan, placeable, placed_by_position, initial_occupancy, occupancy
+    )
     plan.warnings.extend(_extra_link_warnings(plan, placeable, placed_by_position))
     plan.duration_ms = int((time.monotonic() - started) * 1000)
     return plan
@@ -1815,7 +2099,7 @@ def _block_repeat_sessions(placeable) -> dict:
     return blocked
 
 
-def _resolve_moves(plan, placeable, placed, initial_occupancy):
+def _resolve_moves(plan, placeable, placed, initial_occupancy, occupancy=None):
     """Work out which placements are retained/added/moved, and what to unlink.
 
     "Moved" means the group already sat in a *different* eligible session for
@@ -1823,6 +2107,9 @@ def _resolve_moves(plan, placeable, placed, initial_occupancy):
     new one. A pre-existing link that is simply not used any more (the group
     was double-allocated) is reported but never removed: pruning links the
     coordinator did not ask about is not this feature's job.
+
+    Capacity is read from the plan's own occupancy, so the review states how
+    many groups this run actually seats, not how many were there before it.
     """
     by_key: dict = {}
     for position, requirement in enumerate(placeable):
@@ -1859,9 +2146,13 @@ def _resolve_moves(plan, placeable, placed, initial_occupancy):
             replacement = pairings.get(id(requirement))
             if was_linked:
                 status = "retained"
-                count_after = len(initial_occupancy.get(session.pk, set()))
             else:
                 status = "moved" if replacement is not None else "added"
+            if occupancy is not None:
+                count_after = len(occupancy.get(session.pk, set()))
+            elif was_linked:
+                count_after = len(initial_occupancy.get(session.pk, set()))
+            else:
                 count_after = len(initial_occupancy.get(session.pk, set())) + 1
             cap_status, cap_message = capacity_status(session, count_after)
             assignment = Assignment(
@@ -1871,6 +2162,7 @@ def _resolve_moves(plan, placeable, placed, initial_occupancy):
                 moved_from=replacement,
                 capacity_status=cap_status,
                 capacity_message=cap_message,
+                group_count=count_after,
             )
             plan.assignments.append(assignment)
             if assignment.moved_from is not None:
@@ -1930,7 +2222,7 @@ def _link_state(session: Session, group: StudentGroup):
     }
 
 
-def save_plan(plan: AllocationPlan) -> AllocationRun:
+def save_plan(plan: AllocationPlan, algorithm: str = "smart") -> AllocationRun:
     """Persist a previewed run, with the link-level before/after states.
 
     The changes are recorded here, at plan time, because "before" means the
@@ -1948,6 +2240,7 @@ def save_plan(plan: AllocationPlan) -> AllocationRun:
         removed=len(plan.removals),
         unresolved=plan.unresolved_count,
         summary=json.dumps(plan.snapshot()),
+        algorithm=algorithm,
     )
     for removal in plan.removals:
         run.changes.create(
@@ -2195,3 +2488,465 @@ def courses_missing_requirements(semester: Semester = None):
         )
         if not course.has_requirements()
     ]
+
+
+# ──────────────────────────────────────────────
+# Min-Conflicts Allocation Algorithm (Layer 1)
+# ──────────────────────────────────────────────
+
+
+def plan_allocation_min_conflicts(
+    semester: Semester, scope: str = "ALL", *, max_iterations=50000, random_restarts=5
+):
+    """Min-conflicts repair-based allocation algorithm.
+
+    This algorithm uses a repair-based approach:
+    1. Greedily assign all requirements (may have conflicts)
+    2. Iteratively repair conflicts by reassigning the most conflicted requirements
+    3. Use random restarts to escape local optima
+
+    Returns an AllocationPlan compatible with the existing infrastructure.
+    """
+    import random
+
+    started = time.monotonic()
+    requirements, unconfigured = build_requirements(semester, scope)
+    plan = AllocationPlan(
+        semester=semester, scope=scope, unconfigured_courses=unconfigured
+    )
+    if unconfigured:
+        plan.warnings.append(
+            f"{len(unconfigured)} course(s) have no required activities "
+            f"configured and were not allocated. Set their requirements to "
+            f"include them in a future run."
+        )
+
+    for requirement in requirements:
+        if not requirement.candidates:
+            plan.unresolved.append(
+                Unresolved(
+                    requirement=requirement,
+                    reasons=[
+                        f"No {ActivityType(requirement.activity_type).label.lower()} "
+                        f"session exists for {requirement.course.code} in "
+                        f"{semester}. Create the session, then run the "
+                        f"allocator again."
+                    ],
+                )
+            )
+
+    placeable = [r for r in requirements if r.candidates]
+    if not placeable:
+        plan.duration_ms = int((time.monotonic() - started) * 1000)
+        return plan
+
+    index = AvailabilityIndex(semester)
+    if index.unverifiable:
+        plan.warnings.append(
+            f"{len(index.unverifiable)} workshop record(s) name a day but no "
+            f"time, so those days cannot be verified. Groups with such a "
+            f"workshop are left unplaced on that day until the record is "
+            f"corrected."
+        )
+
+    # Initial occupancy from existing assignments
+    occupancy: dict = {}
+    for session_pk, group_pk in SessionGroup.objects.filter(
+        session__semester=semester
+    ).values_list("session_id", "group_id"):
+        occupancy.setdefault(session_pk, set()).add(group_pk)
+    initial_occupancy = {pk: set(groups) for pk, groups in occupancy.items()}
+
+    # Block repeat sessions (same as standard allocator)
+    blocked = _block_repeat_sessions(placeable)
+
+    best_plan = None
+    best_unresolved = len(placeable)
+
+    for restart in range(random_restarts):
+        # Reset occupancy for this restart
+        occupancy = {pk: set(groups) for pk, groups in initial_occupancy.items()}
+        index = AvailabilityIndex(semester)  # Rebuild index
+
+        # Phase 1: Greedy initial assignment
+        assignments = {}  # requirement.key -> session
+        for requirement in placeable:
+            not_allowed = blocked[id(requirement)]
+            # Try candidates in ranked order
+            candidates = sorted(
+                requirement.candidates,
+                key=lambda s: _rank_candidates(requirement, s, index, occupancy),
+            )
+            assigned = False
+            for session in candidates:
+                if session.pk in not_allowed:
+                    continue
+                count_after = len(occupancy.get(session.pk, set())) + 1
+                problems = validate_assignment(
+                    requirement.group,
+                    requirement.course,
+                    session,
+                    semester,
+                    index,
+                    group_count_after=count_after,
+                )
+                if not problems:
+                    occupancy.setdefault(session.pk, set()).add(requirement.group.pk)
+                    index.add_session(requirement.group.pk, session)
+                    assignments[requirement.key] = session
+                    assigned = True
+                    break
+            if not assigned:
+                # Leave unassigned for now
+                assignments[requirement.key] = None
+
+        # Phase 2: Min-conflicts repair
+        for iteration in range(max_iterations):
+            # Check if all requirements are satisfied
+            unresolved_requirements = [
+                r for r, s in assignments.items() if s is None
+            ]
+            if not unresolved_requirements:
+                break  # Complete solution found
+
+            # Find conflicted requirements (those with conflicts or unassigned)
+            conflicted = []
+            for req_key, session in assignments.items():
+                # Find the requirement object for this key
+                requirement = next((r for r in placeable if r.key == req_key), None)
+                if not requirement:
+                    continue
+                if session is None:
+                    conflicted.append(requirement)
+                    continue
+                # Check if this assignment still valid
+                count_after = len(occupancy.get(session.pk, set()))
+                problems = validate_assignment(
+                    requirement.group,
+                    requirement.course,
+                    session,
+                    semester,
+                    index,
+                    group_count_after=count_after,
+                )
+                if problems:
+                    conflicted.append(requirement)
+
+            if not conflicted:
+                break  # No conflicts
+
+            # Pick a random conflicted requirement
+            requirement = random.choice(conflicted)
+
+            # Find the session that minimizes conflicts
+            not_allowed = blocked[id(requirement)]
+            candidates = sorted(
+                requirement.candidates,
+                key=lambda s: _rank_candidates(requirement, s, index, occupancy),
+            )
+
+            best_session = None
+            best_conflicts = float("inf")
+
+            for session in candidates:
+                if session.pk in not_allowed:
+                    continue
+
+                # Count conflicts if we move here
+                conflicts = 0
+                count_after = len(occupancy.get(session.pk, set())) + 1
+                problems = validate_assignment(
+                    requirement.group,
+                    requirement.course,
+                    session,
+                    semester,
+                    index,
+                    group_count_after=count_after,
+                )
+                conflicts += len(problems)
+
+                if conflicts < best_conflicts:
+                    best_conflicts = conflicts
+                    best_session = session
+
+            # Apply the best move
+            if best_session:
+                # Remove old assignment if exists
+                old_session = assignments.get(requirement.key)
+                if old_session:
+                    occupancy[old_session.pk].discard(requirement.group.pk)
+                    index.drop_session(requirement.group.pk, old_session.pk, old_session.day)
+
+                # Add new assignment
+                if best_conflicts == 0:  # Only add if it's valid
+                    occupancy.setdefault(best_session.pk, set()).add(requirement.group.pk)
+                    index.add_session(requirement.group.pk, best_session)
+                    assignments[requirement.key] = best_session
+                else:
+                    assignments[requirement.key] = None
+            else:
+                assignments[requirement.key] = None
+
+        # Check if this restart was better
+        unresolved_count = sum(1 for s in assignments.values() if s is None)
+        if unresolved_count < best_unresolved:
+            best_unresolved = unresolved_count
+            best_plan = (assignments.copy(), occupancy.copy())
+
+            if unresolved_count == 0:
+                break  # Perfect solution found
+
+    # Use the best solution found
+    if best_plan:
+        assignments, occupancy = best_plan
+    else:
+        # Use the last attempt if no restarts succeeded
+        assignments = {r.key: None for r in placeable}
+        occupancy = initial_occupancy.copy()
+
+    # Build the plan from the final assignments
+    placed_by_position = {}
+    for position, requirement in enumerate(placeable):
+        session = assignments.get(requirement.key)
+        if session is not None:
+            placed_by_position[position] = session
+        else:
+            # Mark as unresolved
+            plan.unresolved.append(
+                Unresolved(
+                    requirement=requirement,
+                    reasons=[
+                        "Min-conflicts algorithm could not find a valid "
+                        "assignment for this requirement after multiple "
+                        "restarts and iterations."
+                    ],
+                    sessions_considered=len(requirement.candidates),
+                )
+            )
+
+    _resolve_moves(plan, placeable, placed_by_position, initial_occupancy)
+    plan.warnings.extend(_extra_link_warnings(plan, placeable, placed_by_position))
+    plan.duration_ms = int((time.monotonic() - started) * 1000)
+    plan.scanned = len(placeable) * max_iterations * random_restarts  # Approximate
+
+    return plan
+
+
+# ──────────────────────────────────────────────
+# OR-Tools Constraint Programming Allocation (Layer 2)
+# ──────────────────────────────────────────────
+
+
+def plan_allocation_ortools(
+    semester: Semester, scope: str = "ALL", *, time_limit_seconds=30
+):
+    """Constraint programming allocation using Google OR-Tools.
+
+    This uses OR-Tools CP-SAT solver which provides:
+    - Advanced constraint propagation
+    - Sophisticated search strategies
+    - Guaranteed optimality within time limits
+    - Better handling of complex constraints
+
+    Returns an AllocationPlan compatible with the existing infrastructure.
+    """
+    try:
+        from ortools.sat.python import cp_model
+    except ImportError:
+        # OR-Tools not available, fall back to standard allocator
+        plan = AllocationPlan(semester=semester, scope=scope)
+        plan.warnings.append(
+            "OR-Tools library is not installed. Falling back to standard "
+            "allocation. Install with: pip install ortools"
+        )
+        return plan_allocation(semester, scope)
+
+    started = time.monotonic()
+    requirements, unconfigured = build_requirements(semester, scope)
+    plan = AllocationPlan(
+        semester=semester, scope=scope, unconfigured_courses=unconfigured
+    )
+    if unconfigured:
+        plan.warnings.append(
+            f"{len(unconfigured)} course(s) have no required activities "
+            f"configured and were not allocated. Set their requirements to "
+            f"include them in a future run."
+        )
+
+    for requirement in requirements:
+        if not requirement.candidates:
+            plan.unresolved.append(
+                Unresolved(
+                    requirement=requirement,
+                    reasons=[
+                        f"No {ActivityType(requirement.activity_type).label.lower()} "
+                        f"session exists for {requirement.course.code} in "
+                        f"{semester}. Create the session, then run the "
+                        f"allocator again."
+                    ],
+                )
+            )
+
+    placeable = [r for r in requirements if r.candidates]
+    if not placeable:
+        plan.duration_ms = int((time.monotonic() - started) * 1000)
+        return plan
+
+    index = AvailabilityIndex(semester)
+    if index.unverifiable:
+        plan.warnings.append(
+            f"{len(index.unverifiable)} workshop record(s) name a day but no "
+            f"time, so those days cannot be verified. Groups with such a "
+            f"workshop are left unplaced on that day until the record is "
+            f"corrected."
+        )
+
+    # Build CP model
+    model = cp_model.CpModel()
+
+    # Create variables: each requirement -> session index
+    # Map requirements to variable indices
+    req_to_var = {}
+    var_to_req = {}
+    for i, requirement in enumerate(placeable):
+        var = model.NewIntVar(0, len(requirement.candidates) - 1, f"req_{i}")
+        req_to_var[requirement.key] = var
+        var_to_req[i] = requirement
+
+    # Initial occupancy from existing assignments
+    initial_occupancy: dict = {}
+    for session_pk, group_pk in SessionGroup.objects.filter(
+        session__semester=semester
+    ).values_list("session_id", "group_id"):
+        initial_occupancy.setdefault(session_pk, set()).add(group_pk)
+
+    # Block repeat sessions
+    blocked = _block_repeat_sessions(placeable)
+
+    # Add constraints
+    # 1. Each requirement must be assigned to a valid session
+    for requirement in placeable:
+        var = req_to_var[requirement.key]
+        not_allowed = blocked[id(requirement)]
+        valid_indices = [
+            i
+            for i, session in enumerate(requirement.candidates)
+            if session.pk not in not_allowed
+        ]
+        if valid_indices:
+            # Only allow valid session indices
+            model.AddAllowedAssignments(var, valid_indices)
+
+    # 2. No conflicts between requirements
+    # Build a conflict graph: requirements that conflict if assigned to certain sessions
+    for i, req1 in enumerate(placeable):
+        for j, req2 in enumerate(placeable):
+            if i >= j:
+                continue  # Avoid duplicate checks
+
+            var1 = req_to_var[req1.key]
+            var2 = req_to_var[req2.key]
+
+            # Check if these requirements can conflict
+            for idx1, session1 in enumerate(req1.candidates):
+                for idx2, session2 in enumerate(req2.candidates):
+                    # Check if assigning req1 to session1 and req2 to session2 would conflict
+                    if _would_conflict(req1, req2, session1, session2, index):
+                        # Add constraint: not (var1 == idx1 AND var2 == idx2)
+                        # Implemented as: var1 != idx1 OR var2 != idx2
+                        model.AddBoolOr(
+                            [var1 != idx1, var2 != idx2]
+                        )
+
+    # 3. Capacity constraints
+    # For each session, limit the number of groups assigned
+    session_to_reqs = {}
+    for requirement in placeable:
+        for idx, session in enumerate(requirement.candidates):
+            session_to_reqs.setdefault(session.pk, []).append((requirement, idx))
+
+    for session_pk, req_indices in session_to_reqs.items():
+        session = req_indices[0][0].candidates[req_indices[0][1]]
+        if session.venue and session.venue.capacity:
+            max_groups = session.venue.capacity // STUDENTS_PER_GROUP
+            # Create a boolean variable for each potential assignment
+            assigned_vars = []
+            for requirement, idx in req_indices:
+                var = req_to_var[requirement.key]
+                is_assigned = model.NewBoolVar(f"assigned_{requirement.group.pk}_{session_pk}")
+                model.Add(var == idx).OnlyEnforceIf(is_assigned)
+                model.Add(var != idx).OnlyEnforceIf(is_assigned.Not())
+                assigned_vars.append(is_assigned)
+
+            # Sum of assigned vars <= max_groups
+            model.Add(sum(assigned_vars) <= max_groups)
+
+    # Solve with time limit
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = time_limit_seconds
+    solver.parameters.num_search_workers = 8  # Use multiple threads
+
+    result = solver.Solve(model)
+
+    if result == cp_model.OPTIMAL or result == cp_model.FEASIBLE:
+        # Extract solution
+        placed_by_position = {}
+        for i, requirement in enumerate(placeable):
+            var = req_to_var[requirement.key]
+            session_idx = solver.Value(var)
+            session = requirement.candidates[session_idx]
+            placed_by_position[i] = session
+
+        # Build plan
+        _resolve_moves(plan, placeable, placed_by_position, initial_occupancy)
+        plan.warnings.extend(_extra_link_warnings(plan, placeable, placed_by_position))
+        plan.duration_ms = int((time.monotonic() - started) * 1000)
+        plan.scanned = solver.NumBranches()
+
+        # Add unresolved requirements that weren't placed
+        for position, requirement in enumerate(placeable):
+            if position not in placed_by_position:
+                plan.unresolved.append(
+                    Unresolved(
+                        requirement=requirement,
+                        reasons=[
+                            "OR-Tools solver could not find a valid assignment "
+                            "within the time limit."
+                        ],
+                        sessions_considered=len(requirement.candidates),
+                    )
+                )
+    else:
+        # Solver failed, fall back to unresolved
+        for requirement in placeable:
+            plan.unresolved.append(
+                Unresolved(
+                    requirement=requirement,
+                    reasons=[
+                        "OR-Tools solver failed to find a feasible solution. "
+                        "Try increasing the time limit or use a different algorithm."
+                    ],
+                    sessions_considered=len(requirement.candidates),
+                )
+            )
+        plan.duration_ms = int((time.monotonic() - started) * 1000)
+
+    return plan
+
+
+def _would_conflict(req1, req2, session1, session2, index):
+    """Check if two requirements would conflict if assigned to these sessions."""
+    # Same group can't be in two places at once
+    if req1.group.pk == req2.group.pk:
+        if session1.day == session2.day:
+            # Check time overlap
+            if not (session1.end_time <= session2.start_time or session2.end_time <= session1.start_time):
+                return True
+
+    # Check availability conflicts using the index's public method
+    for req, session in [(req1, session1), (req2, session2)]:
+        # Check if the group has any conflicts at this session time
+        if index.conflicts_excluding(req.group.pk, session.day, session.start_time, session.end_time, session.pk):
+            return True
+
+    return False

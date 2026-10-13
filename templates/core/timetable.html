@@ -168,23 +168,28 @@
                the group and the semester on the left, so the way out to a PDF
                of that exact selection belongs beside it rather than back up in
                the toolbar — and, unlike the toolbar, it is not `.no-print`, so
-               the printed sheet carries nothing but the timetable.{% endcomment %}
+               the printed sheet carries nothing but the timetable.
+               `download` is not decoration: it is what tells the page loader in
+               base.html not to arm its full-page overlay. The response is
+               Content-Disposition: attachment, so the browser downloads the file
+               and never navigates — without the attribute the overlay is armed
+               by 'beforeunload' and nothing ever takes it down again.{% endcomment %}
             <div class="shrink-0">
                 {% if show_all %}
                 <a href="{% url 'all-programmes-timetable-export' %}?semester={{ active_semester.pk }}&year={{ year }}"
-                   class="tt-export">
+                   download class="tt-export">
                     <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
                     <span>Export PDF</span>
                 </a>
                 {% elif active_group %}
                 <a href="{% url 'group-timetable-export' active_group.pk %}?semester={{ active_semester.pk }}&year={{ year }}"
-                   class="tt-export">
+                   download class="tt-export">
                     <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
                     <span>Export PDF</span>
                 </a>
                 {% else %}
                 <a href="{% url 'programme-timetable-export' active_programme.pk %}?semester={{ active_semester.pk }}&year={{ year }}"
-                   class="tt-export">
+                   download class="tt-export">
                     <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
                     <span>Export PDF</span>
                 </a>

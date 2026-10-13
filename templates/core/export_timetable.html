@@ -104,13 +104,27 @@
     </div>
 </div>
 <script>
+// Start the download through a temporary anchor carrying `download`, not through
+// window.location. Both reach the same PDF, but only the anchor is a
+// *download*: assigning to location is a navigation, and the page loader in
+// base.html arms its full-page overlay on 'beforeunload' before the browser has
+// seen the Content-Disposition: attachment that cancels that navigation. The
+// result is a spinner that never stops. The `download` attribute is also what
+// the loader's click handler tests, and a synthetic click on the anchor carries
+// the same attribute, so neither path arms it.
 function doExport(btn) {
     const semester = document.getElementById('semester').value;
     const year = document.getElementById('year').value;
     const url = btn.dataset.base
         + '?semester=' + encodeURIComponent(semester)
         + '&year=' + encodeURIComponent(year);
-    window.location.href = url;
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = '';
+    a.rel = 'noopener';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
 }
 </script>
 {% endblock %}

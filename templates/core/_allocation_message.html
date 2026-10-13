@@ -27,3 +27,45 @@
     </ul>
 </div>
 {% endif %}
+
+{# The moment the run is applied is exactly when the audit is worth running,
+   and #allocation-plan is the fragment that was just swapped — so the call to
+   action has to live in here or the coordinator has to reload to find it. #}
+{% if run and result.ok and run.status == 'APPLIED' and not result.reverted %}
+<div class="mb-3 rounded-lg border border-blue-300 bg-blue-50 px-4 py-3">
+    <p class="text-sm font-semibold text-blue-900">Allocation applied. Now audit it.</p>
+    <p class="mt-0.5 text-xs text-blue-800">
+        Reads the timetable as applied and produces a report with evidence and
+        ranked recommendations. It changes nothing.
+    </p>
+    <div class="mt-2.5 flex flex-wrap items-center gap-2">
+        {% with latest=run.audit_reports.first %}
+        {% if latest %}
+        <a href="{% url 'audit-report-detail' latest.pk %}"
+           class="inline-flex items-center rounded-md bg-white px-3 py-1.5 text-sm font-medium text-blue-800 border border-blue-300 hover:bg-blue-100">
+            Open audit report v{{ latest.version }}
+        </a>
+        {% endif %}
+        <form method="post" action="{% url 'allocation-run-audit' run.pk %}"
+              hx-post="{% url 'allocation-run-audit' run.pk %}"
+              hx-target="body" hx-swap="none" hx-disabled-elt="this"
+              x-data="{ busy: false }"
+              hx-on::before-request="busy = true">
+            {% csrf_token %}
+            <input type="hidden" name="run" value="{{ run.pk }}">
+            <button type="submit"
+                    class="inline-flex items-center rounded-md bg-blue-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-800 disabled:opacity-60 disabled:cursor-wait"
+                    :disabled="busy">
+                {# The report is built and printed synchronously, so this takes
+                   ~20s on a full week. Saying so beats a button that simply
+                   stops responding. #}
+                <span x-show="!busy">{% if latest %}Re-audit as new version{% else %}Audit this allocation{% endif %}</span>
+                <span x-show="busy" x-cloak>Analysing and printing PDF&hellip;</span>
+            </button>
+        </form>
+        <a href="{% url 'audit-reports' %}"
+           class="text-sm text-blue-800 hover:underline">All reports &rarr;</a>
+        {% endwith %}
+    </div>
+</div>
+{% endif %}

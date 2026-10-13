@@ -1,3 +1,4 @@
+import datetime
 import io
 import json
 import uuid
@@ -40,9 +41,12 @@ from .group_allocation import (
     apply_run,
     GroupStatus,
     group_statuses,
+    incomplete_group_count,
     manual_assign,
     manual_unassign,
     plan_allocation,
+    plan_allocation_min_conflicts,
+    plan_allocation_ortools,
     revert_run,
     save_plan,
     STUDENTS_PER_GROUP,
@@ -449,6 +453,83 @@ def _query(request, param_names):
     return "?" + urlencode(pairs) if pairs else ""
 
 
+def _export_requested(request):
+    return request.GET.get("export") == "xlsx"
+
+
+def _table_cell(item, column):
+    """The text one desktop table cell shows, for the Excel export.
+
+    This follows the list partial: ``get_attr`` (None becomes an em dash, a
+    method such as ``required_activities`` is called), clock times as HH:MM,
+    and a badge column the same way the template's ``yesno`` filter prints it.
+    """
+    value = getattr(item, column["key"], None)
+    if callable(value):
+        try:
+            value = value()
+        except TypeError:
+            value = None
+    if isinstance(value, datetime.time):
+        return value.strftime("%H:%M")
+    if column.get("badge"):
+        # A one-word badge label is not a yes/no map, so the template prints
+        # the boolean itself, and ``|default`` turns a false value into "Yes".
+        return str(value) if value else "Yes"
+    if value is None:
+        return "—"
+    return str(value)
+
+
+def _excel_response(rows, columns, title, row_issues=None):
+    """An .xlsx of ``rows`` using the same columns the desktop table shows."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+
+    shown = list(columns)
+    issues = row_issues or {}
+    if issues:
+        shown = shown + [{"key": "_quality", "label": "Quality"}]
+    wb = Workbook()
+    ws = wb.active
+    ws.title = (title or "Export")[:31]
+    ws.append([column["label"] for column in shown])
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+    for item in rows:
+        values = []
+        for column in shown:
+            if column["key"] == "_quality":
+                issue = issues.get(getattr(item, "pk", None))
+                summary = ""
+                if isinstance(issue, dict):
+                    summary = issue.get("summary") or ""
+                elif issue is not None:
+                    summary = getattr(issue, "summary", "") or ""
+                values.append(summary)
+            else:
+                values.append(_table_cell(item, column))
+        ws.append(values)
+    for index, column in enumerate(shown, start=1):
+        width = min(max(len(column["label"]) + 2, 12), 42)
+        ws.column_dimensions[ws.cell(1, index).column_letter].width = width
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    filename = "-".join(
+        part for part in "".join(
+            ch.lower() if ch.isalnum() else " " for ch in (title or "export")
+        ).split()
+    ) or "export"
+    response = HttpResponse(
+        buffer.getvalue(),
+        content_type=(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        ),
+    )
+    response["Content-Disposition"] = f'attachment; filename="{filename}.xlsx"'
+    return response
+
+
 def _paginate(request, qs, per_page=50):
     page = int(request.GET.get("page", 1))
     total = qs.count()
@@ -504,6 +585,7 @@ def dashboard(request):
         ).count(),
         "programme_count": Programme.objects.count(),
         "group_count": StudentGroup.objects.count(),
+        "incomplete_group_count": incomplete_group_count(semester),
         "venue_count": Venue.objects.count(),
         "session_count": Session.objects.count(),
         "sessiongroup_count": SessionGroup.objects.count(),
@@ -571,6 +653,8 @@ def programme_list(request):
     qs = Programme.objects.all()
     q = request.GET.get("q", "")
     qs = _search(qs, q, ["code", "name"])
+    if _export_requested(request):
+        return _excel_response(qs, PROG_COLS, "Programmes")
     items, page, pages, total = _paginate(request, qs)
     ctx = {
         "items": items,
@@ -964,6 +1048,8 @@ def studentgroup_list(request):
     qs = _search(qs, q, ["code", "programme__code", "programme__name"])
     if prog:
         qs = qs.filter(programme__code=prog)
+    if _export_requested(request):
+        return _excel_response(qs, GRP_COLS, "Student Groups")
     items, page, pages, total = _paginate(request, qs)
     ctx = {
         "items": items,
@@ -1116,6 +1202,9 @@ def venue_list(request):
         qs = qs.filter(capacity__gte=cmin)
     if cmax:
         qs = qs.filter(capacity__lte=cmax)
+    if _export_requested(request):
+        issues_map, _, _ = analyse_venues()
+        return _excel_response(qs, VENUE_COLS, "Venues", row_issues=issues_map)
     items, page, pages, total = _paginate(request, qs)
     issues_map, problem_groups, has_issues = analyse_venues()
     ctx = {
@@ -1507,6 +1596,8 @@ def semester_list(request):
     qs = _search(qs, q, ["academic_year"])
     if sem:
         qs = qs.filter(semester=sem)
+    if _export_requested(request):
+        return _excel_response(qs, SEM_COLS, "Semesters")
     items, page, pages, total = _paginate(request, qs)
     ctx = {
         "items": items,
@@ -1744,6 +1835,12 @@ def session_list(request):
         qs = qs.filter(session_groups__isnull=(assigned == "no"))
         if assigned == "no":
             qs = qs.filter(activity_type__in=ALLOCATED_ACTIVITY_TYPES)
+    if _export_requested(request):
+        rows = list(qs)
+        _annotate_sessions(
+            rows, set(StudentGroup.objects.values_list("code", flat=True))
+        )
+        return _excel_response(rows, SESS_COLS, "Master Timetable")
     items, page, pages, total = _paginate(request, qs)
     unassigned_count = Session.objects.filter(
         activity_type__in=ALLOCATED_ACTIVITY_TYPES, session_groups__isnull=True
@@ -2154,6 +2251,8 @@ def workshop_list(request):
         qs = qs.filter(end_time__gte=start_from)
     if start_to:
         qs = qs.filter(start_time__lte=start_to)
+    if _export_requested(request):
+        return _excel_response(qs, WS_COLS, "Workshop Allocation")
     items, page, pages, total = _paginate(request, qs)
     legacy = legacy_workshop_allocations()
     ctx = {
@@ -2355,6 +2454,8 @@ def td_list(request):
         qs = qs.filter(end_time__gte=start_from)
     if start_to:
         qs = qs.filter(start_time__lte=start_to)
+    if _export_requested(request):
+        return _excel_response(qs, TD_COLS, "Technical Drawing Allocation")
     items, page, pages, total = _paginate(request, qs)
     ctx = {
         "items": items,
@@ -2523,6 +2624,8 @@ def course_list(request):
         qs = qs.filter(programme__code=prog)
     if sem:
         qs = qs.filter(semester=sem)
+    if _export_requested(request):
+        return _excel_response(qs, PC_COLS, "Programme Courses")
     items, page, pages, total = _paginate(request, qs)
     ctx = {
         "items": items,
@@ -2704,6 +2807,8 @@ def course_requirement_list(request):
         rows = [row for row in rows if not row.has_requirements()]
     elif configured == "yes":
         rows = [row for row in rows if row.has_requirements()]
+    if _export_requested(request):
+        return _excel_response(rows, CR_COLS, "Courses")
     page = max(int(request.GET.get("page", 1)), 1)
     per_page = 50
     total = len(rows)
@@ -2927,13 +3032,19 @@ ALLOCATION_SCOPES = [
 
 def _allocation_base_context(request, semester=None, scope=AllocationScope.ALL, run=None):
     semesters = list(_allocation_semesters())
+
     return {
         "page_title": "Group Allocation",
         "semesters": semesters,
         "semester": semester,
         "scope": scope,
         "scopes": ALLOCATION_SCOPES,
-        "runs": AllocationRun.objects.select_related("semester")[:10],
+        # Prefetched because every run row in the template asks for
+        # run.audit_reports.first (the "Audit report vN" link) and
+        # run.audit_reports.exists(); without this that is two queries per row.
+        "runs": AllocationRun.objects.select_related("semester").prefetch_related(
+            "audit_reports"
+        )[:10],
         "run": run,
         "plan": run.plan() if run is not None else None,
         "allocation_url": "/allocation/",
@@ -2985,7 +3096,7 @@ def _selected_scope(request):
 
 
 def allocation_page(request):
-    """The coordinator page: pick a semester, review, apply, revert."""
+    """The coordinator page: pick a semester, review, apply, revert. Uses smart allocation by default."""
     semester = _selected_semester(request)
     scope = _selected_scope(request)
     run = None
@@ -3021,6 +3132,7 @@ def allocation_page(request):
     ctx["no_semesters"] = not Semester.objects.exists()
     ctx["message"] = request.GET.get("msg", "")
     ctx["error"] = request.GET.get("err", "")
+    ctx["default_algorithm"] = "smart"
     return render(request, "core/allocation.html", ctx)
 
 
@@ -3223,31 +3335,51 @@ def _panel_response(panel, message, kind):
 
 
 def allocation_preview(request):
-    """Compute a plan and show it. Nothing is written to the timetable."""
+    """Compute a plan using smart allocation and show it. Nothing is written to the timetable."""
     if request.method != "POST":
         return redirect("allocation-page")
     semester = _selected_semester(request)
     if semester is None:
         return redirect("allocation-page")
     scope = _selected_scope(request)
-    plan = plan_allocation(semester, scope)
-    run = save_plan(plan)
+    
+    # Determine which algorithm to use
+    algorithm = request.POST.get("algorithm", "smart")
+    
+    if algorithm == "advanced":
+        # Use OR-Tools advanced allocation
+        time_limit = int(request.POST.get("time_limit", 30))
+        plan = plan_allocation_ortools(semester, scope, time_limit_seconds=time_limit)
+        allocation_name = "Advanced Allocation (OR-Tools)"
+    else:
+        # Default to smart allocation (min-conflicts)
+        max_iterations = int(request.POST.get("max_iterations", 50000))
+        random_restarts = int(request.POST.get("random_restarts", 5))
+        plan = plan_allocation_min_conflicts(
+            semester, scope, max_iterations=max_iterations, random_restarts=random_restarts
+        )
+        allocation_name = "Smart Allocation (Min-Conflicts)"
+    
+    run = save_plan(plan, algorithm=algorithm)
     _log(
         LogAction.ASSIGN,
-        f"Group allocation preview for {semester} ({scope}): "
+        f"{allocation_name} preview for {semester} ({scope}): "
         f"{plan.added} to add, {plan.moved} to move, {plan.retained} kept, "
         f"{plan.unresolved_count} unresolved",
-        "Group Allocation",
+        allocation_name,
         str(run),
     )
     ctx = _allocation_base_context(request, semester=semester, scope=scope, run=run)
     # The template reads one shape everywhere: the stored snapshot, which is
     # exactly what a later Apply or Revert works from.
     ctx["plan"] = run.plan()
+    ctx["allocation_name"] = allocation_name
+    ctx["has_unresolved"] = plan.unresolved_count > 0
+    
     if _htmx(request):
         response = render(request, "core/_allocation_plan.html", ctx)
         response["HX-Trigger"] = json.dumps(
-            {"allocation-toast": {"message": "Allocation plan ready"}}
+            {"allocation-toast": {"message": f"{allocation_name} plan ready"}}
         )
         return response
     return render(request, "core/allocation.html", ctx)
@@ -3266,7 +3398,7 @@ def allocation_apply(request):
     if result.get("ok"):
         _log(
             LogAction.ASSIGN,
-            f"Applied group allocation run: {result['added']} assignment(s) "
+            f"Applied allocation run: {result['added']} assignment(s) "
             f"added, {result['removed']} removed, {run.unresolved} "
             f"unresolved",
             "Group Allocation",
@@ -3298,15 +3430,9 @@ def _allocation_action_response(request, run, result):
     """Render the plan panel with the outcome of apply/revert."""
     message = result.get("message", "")
     if _htmx(request):
-        ctx = {
-            "page_title": "Group Allocation",
-            "run": run,
-            "plan": run.plan(),
-            "result": result,
-            "message": message,
-            "apply_url": "/allocation/apply/",
-            "revert_url": "/allocation/revert/",
-        }
+        ctx = _allocation_base_context(request, semester=run.semester, scope=run.scope, run=run)
+        ctx["result"] = result
+        ctx["message"] = message
         # The panel replaces #allocation-plan, so the plan markup must not wrap
         # itself in another element with that id.
         response = render(request, "core/_allocation_result.html", ctx)
@@ -3502,13 +3628,13 @@ IMPORT_TYPES = {
     "programmes": {
         "title": "Programmes",
         "columns": "code, name",
-        "hint": "Aliases accepted: 'code', 'programme_code', 'programme', 'program'; 'name', 'programme_name', 'title'.",
+        "hint": "",
         "fn": import_programmes_from_excel,
     },
     "student-groups": {
         "title": "Student Groups",
         "columns": "programme_code, group_code",
-        "hint": "Aliases accepted for both columns. Programme can be a code or a full name.",
+        "hint": "Programme can be a code or a full name.",
         "fn": import_student_groups_from_excel,
     },
     "programme-courses": {
@@ -3518,8 +3644,7 @@ IMPORT_TYPES = {
             "Required Activities (optional)"
         ),
         "hint": (
-            "Aliases accepted ('programme'/'program', 'course_code'/'course', "
-            "'course_name'/'course'). A programme name (e.g. 'BSc. in Chemical and "
+            "A programme name (e.g. 'BSc. in Chemical and "
             "Processing Engineering') is recognised and the missing programme is "
             "created automatically. "
             "REQUIRED ACTIVITIES (optional): the heading 'Required Activities' "
@@ -3538,7 +3663,12 @@ IMPORT_TYPES = {
     "venues": {
         "title": "Venues",
         "columns": "name, capacity",
-        "hint": "Aliases accepted: 'name'/'venue'/'room'; 'capacity'/'seats'.",
+        "hint": (
+            "Aliases accepted: 'name'/'venue'/'room'; 'capacity'/'seats'. "
+            "Capitals and spaces do not make a different room: PB 06, pb 06 "
+            "and PB06 are stored as one venue and noted, not left as a "
+            "conflict to choose."
+        ),
         "fn": import_venues_from_excel,
     },
     "master-timetable": {
@@ -3549,10 +3679,13 @@ IMPORT_TYPES = {
             "Set course requirements from these sessions"
         ),
         "hint": (
-            "Readable aliases accepted ('course', 'type', 'start', 'end', 'room', "
-            "'groups', ...). Comma-separated course codes are split into separate "
+            "Comma-separated course codes are split into separate "
             "sessions. Choose the academic Semester this timetable belongs to above — "
-            "it is never auto-detected. LECTURE sessions are automatically linked to "
+            "it is never auto-detected. A course code is recognised with or "
+            "without spaces and in any capitals, and DS114(COET) is stored as "
+            "DS114 (the same for DS115). A venue cell that lists several rooms "
+            "is not created as a venue; an ME101 tutorial whose list includes "
+            "S112 is stored in S112. LECTURE sessions are automatically linked to "
             "every programme group that studies the course. Tick 'Set course "
             "requirements from these sessions' to also fill in each course's "
             "required activities: a course with tutorial sessions gets Tutorial, "

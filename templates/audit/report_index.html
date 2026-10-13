@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+{% block title %}Audit Reports{% endblock %}
+{% block content %}
+<div class="px-4 sm:px-6 py-6 max-w-7xl mx-auto min-w-0">
+
+    <div class="flex flex-wrap items-start justify-between gap-4 mb-6">
+        <div class="min-w-0">
+            <h1 class="text-2xl font-semibold text-slate-900">Audit Reports</h1>
+            <p class="text-sm text-slate-600 mt-1">
+                Every version of every post-allocation audit, newest first.
+                Re-auditing a run with different thresholds adds a version
+                rather than replacing one, so you can always see what changed.
+            </p>
+        </div>
+    </div>
+
+    {# A run with no report yet is the thing a coordinator is actually here to
+       do, so it is offered above the history rather than buried in it. #}
+    {% if recent_runs %}
+    <section class="mb-6">
+        <h2 class="text-sm font-semibold uppercase tracking-wide text-slate-500 mb-2">
+            Generate a report
+        </h2>
+        <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {% for run in recent_runs %}
+            <div class="rounded-lg border border-slate-200 bg-white p-4 min-w-0">
+                <p class="font-medium text-slate-900 truncate">{{ run.semester }}</p>
+                <p class="text-xs text-slate-500 mt-0.5">
+                    Run #{{ run.pk }} &middot; {{ run.get_status_display }}
+                    {% if run.applied_at %}&middot; {{ run.applied_at|date:"d M Y H:i" }}{% endif %}
+                </p>
+                <div class="mt-3 flex flex-wrap items-center gap-2">
+                    <form method="post" action="{% url 'allocation-run-audit' run.pk %}"
+                          x-data="{ busy: false }" hx-on::before-request="busy = true">
+                        {% csrf_token %}
+                        <button type="submit" :disabled="busy"
+                                class="inline-flex items-center rounded-md bg-blue-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-800 disabled:opacity-60 disabled:cursor-wait">
+                            <span x-show="!busy">
+                                {% if run.audit_reports.exists %}Re-audit as new version{% else %}Audit this allocation{% endif %}
+                            </span>
+                            <span x-show="busy" x-cloak>Analysing&hellip;</span>
+                        </button>
+                    </form>
+                    {% with latest=run.audit_reports.first %}
+                    {% if latest %}
+                        <a href="{% url 'audit-report-detail' latest.pk %}"
+                           class="text-sm text-blue-700 hover:underline">Latest report &rarr;</a>
+                    {% endif %}
+                    {% endwith %}
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </section>
+    {% endif %}
+
+    {# Status counts are links, so "the one that failed" is one click away
+       instead of something you filter for by hand. #}
+    {% if counts %}
+    <div class="mb-4 flex flex-wrap gap-2 text-sm">
+        {% for status, n in counts.items %}
+        <a href="?status={{ status }}"
+           class="rounded-full border border-slate-300 px-3 py-1 {% if selected_status == status %}bg-slate-800 text-white{% else %}bg-white text-slate-700 hover:bg-slate-50{% endif %}">
+            {{ n }} {{ status|lower }}
+        </a>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    <div class="overflow-x-auto rounded-lg border border-slate-200 bg-white min-w-0">
+        <table class="min-w-full divide-y divide-slate-200 text-sm">
+            <thead class="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+                <tr>
+                    <th class="px-4 py-3 text-left font-semibold">Report</th>
+                    <th class="px-4 py-3 text-left font-semibold">Semester</th>
+                    <th class="px-4 py-3 text-left font-semibold">Run</th>
+                    <th class="px-4 py-3 text-left font-semibold">Verdict</th>
+                    <th class="hidden md:table-cell px-4 py-3 text-left font-semibold">Status</th>
+                    <th class="hidden sm:table-cell px-4 py-3 text-left font-semibold">Generated</th>
+                    <th class="px-4 py-3 text-right font-semibold">Export</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-100">
+                {% for report in reports %}
+                <tr>
+                    <td class="px-4 py-3">
+                        <a href="{% url 'audit-report-detail' report.pk %}"
+                           class="font-medium text-blue-700 hover:underline">Version {{ report.version }}</a>
+                        {% if report.comparison_to_id %}
+                        <span class="ml-1 text-xs text-slate-500">(compared)</span>
+                        {% endif %}
+                    </td>
+                    <td class="px-4 py-3 text-slate-700">{{ report.allocation_run.semester }}</td>
+                    <td class="px-4 py-3 text-slate-700">#{{ report.allocation_run_id }}</td>
+                    <td class="px-4 py-3">
+                        {% with v=report.summary.verdict %}
+                        <span class="font-medium
+                            {% if v.colour == 'green' %}text-green-700
+                            {% elif v.colour == 'amber' %}text-amber-700
+                            {% elif v.colour == 'red' %}text-red-700
+                            {% else %}text-slate-500{% endif %}">
+                            {{ v.label|default:"&mdash;" }}
+                        </span>
+                        {% endwith %}
+                    </td>
+                    <td class="hidden md:table-cell px-4 py-3">
+                        <span class="text-xs rounded-full px-2 py-0.5
+                            {% if report.status == 'COMPLETE' %}bg-green-100 text-green-800
+                            {% elif report.status == 'FAILED' %}bg-red-100 text-red-800
+                            else %}bg-amber-100 text-amber-800{% endif %}">
+                            {{ report.status }}
+                        </span>
+                        {% if report.error %}
+                        <p class="mt-1 text-xs text-red-700 break-words">{{ report.error|truncatechars:120 }}</p>
+                        {% endif %}
+                    </td>
+                    <td class="hidden sm:table-cell px-4 py-3 text-slate-600 text-xs">
+                        {{ report.created_label }}
+                        {% if report.page_count %}
+                        <span class="block text-slate-400">{{ report.page_count }} pages</span>
+                        {% endif %}
+                    </td>
+                    <td class="px-4 py-3 text-right whitespace-nowrap">
+                        {% if report.status == 'COMPLETE' %}
+                        <a href="{% url 'audit-report-pdf' report.pk %}" download
+                           class="text-sm text-blue-700 hover:underline">PDF</a>
+                        <span class="text-slate-300 mx-1">|</span>
+                        {% endif %}
+                        <a href="{% url 'audit-report-json' report.pk %}"
+                           class="text-sm text-slate-600 hover:underline">JSON</a>
+                    </td>
+                </tr>
+                {% empty %}
+                <tr>
+                    <td colspan="7" class="px-4 py-10 text-center text-slate-500">
+                        No audit reports yet. Apply an allocation, then use
+                        &ldquo;Audit this allocation&rdquo; above.
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

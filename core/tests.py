@@ -356,8 +356,132 @@ class MasterTimetableImportTests(ImporterTestCase):
             MASTER_COLS,
         )
         import_master_timetable_from_excel(path, semester_id=self.sem1.pk)
-        self.assertTrue(Session.objects.filter(course_code="mt161").exists())
-        self.assertFalse(Session.objects.filter(course_code="MT161").exists())
+        self.assertTrue(Session.objects.filter(course_code="MT161").exists())
+        self.assertFalse(Session.objects.filter(course_code="mt161").exists())
+
+    def test_spaced_course_code_matches_the_same_course(self):
+        self._seed()
+        course = Course.objects.create(code="DS114(coet)", name="Development Studies")
+        ProgrammeCourse.objects.create(
+            programme=self.prog_a, course=course, semester=1
+        )
+        # A link saved before codes were compacted still has the spaced spelling.
+        ProgrammeCourse.objects.filter(course=course).update(
+            course_code="DS 114 (COET)"
+        )
+        venue = Venue.objects.get(name="LH1")
+        Session.objects.create(
+            semester=self.sem1,
+            course_code="DS 114 (COET)",
+            activity_type=ActivityType.LECTURE,
+            day="MONDAY",
+            start_time=time(8, 0),
+            end_time=time(10, 0),
+            venue=venue,
+        )
+        path = make_xlsx(
+            [["DS 114 (COET)", "LECTURE", "MONDAY", "08:00", "10:00", "LH1", "ALL"]],
+            MASTER_COLS,
+        )
+        result = import_master_timetable_from_excel(path, semester_id=self.sem1.pk)
+        self.assertEqual(result.created, 0)
+        self.assertEqual(result.updated, 1)
+        self.assertEqual(result.missing_courses, [])
+        self.assertIn("DS114", result.matched_courses)
+        self.assertEqual(result.conflicts, [])
+        self.assertTrue(
+            any("DS 114 (COET) is the same course as DS114" in note for note in result.notes)
+        )
+        session = Session.objects.get(semester=self.sem1)
+        self.assertEqual(session.course_code, "DS114")
+        self.assertEqual(session.session_groups.count(), 2)
+
+        again = import_master_timetable_from_excel(path, semester_id=self.sem1.pk)
+        self.assertEqual(again.created, 0)
+        self.assertEqual(Session.objects.count(), 1)
+
+    def test_coet_suffix_is_stored_as_the_plain_course(self):
+        self._seed()
+        ProgrammeCourse.objects.create(
+            programme=self.prog_a,
+            course_code="DS114",
+            course_name="Development Studies",
+            semester=1,
+        )
+        ProgrammeCourse.objects.create(
+            programme=self.prog_a,
+            course_code="DS115",
+            course_name="Development Studies 2",
+            semester=1,
+        )
+        path = make_xlsx(
+            [
+                ["DS114(COET)", "LECTURE", "MONDAY", "08:00", "10:00", "LH1", "A1"],
+                ["DS 115 (COET)", "LECTURE", "TUESDAY", "08:00", "10:00", "LH1", "A1"],
+            ],
+            MASTER_COLS,
+        )
+        result = import_master_timetable_from_excel(path, semester_id=self.sem1.pk)
+        self.assertEqual(result.missing_courses, [])
+        self.assertEqual(
+            set(Session.objects.values_list("course_code", flat=True)),
+            {"DS114", "DS115"},
+        )
+        self.assertFalse(Session.objects.filter(course_code__contains="COET").exists())
+        notes = " ".join(result.notes)
+        self.assertIn("DS114(COET) is the same course as DS114", notes)
+        self.assertIn("DS 115 (COET) is the same course as DS115", notes)
+
+    def test_me101_tutorial_venue_list_uses_s112(self):
+        self._seed()
+        Venue.objects.create(name="S112", capacity=40)
+        Venue.objects.create(name="P008", capacity=30)
+        ProgrammeCourse.objects.create(
+            programme=self.prog_b,
+            course_code="ME101",
+            course_name="Engineering Drawing",
+            semester=1,
+        )
+        path = make_xlsx(
+            [
+                ["ME101", "TUTORIAL", "MONDAY", "10:00", "12:00", "P 008, PB 06, S 112", "A1"],
+                ["ME101", "TUTORIAL", "TUESDAY", "10:00", "12:00", "P006,S112", "A2"],
+                ["ME101", "LECTURE", "WEDNESDAY", "08:00", "10:00", "P 008, PB 06, S112", "A1"],
+            ],
+            MASTER_COLS,
+        )
+        result = import_master_timetable_from_excel(path, semester_id=self.sem1.pk)
+        tutorials = Session.objects.filter(
+            course_code="ME101", activity_type=ActivityType.TUTORIAL
+        )
+        self.assertEqual(tutorials.count(), 2)
+        self.assertEqual(
+            set(tutorials.values_list("venue__name", flat=True)),
+            {"S112"},
+        )
+        lecture = Session.objects.get(
+            course_code="ME101", activity_type=ActivityType.LECTURE
+        )
+        self.assertIsNone(lecture.venue)
+        self.assertFalse(Venue.objects.filter(name__contains=",").exists())
+        self.assertFalse(Venue.objects.filter(name="PB 06").exists())
+        self.assertFalse(Venue.objects.filter(name="P006").exists())
+        notes = " ".join(result.notes)
+        self.assertIn("P 008, PB 06, S 112 for ME101 tutorial was taken as S112", notes)
+        self.assertIn("P006,S112 for ME101 tutorial was taken as S112", notes)
+        self.assertIn("was not stored as one venue", notes)
+
+    def test_me101_tutorial_list_creates_s112_not_a_comma_venue(self):
+        self._seed()
+        path = make_xlsx(
+            [["ME101", "TUTORIAL", "MONDAY", "10:00", "12:00", "P006,S112", "A1"]],
+            MASTER_COLS,
+        )
+        import_master_timetable_from_excel(path, semester_id=self.sem1.pk)
+        self.assertFalse(Venue.objects.filter(name__contains=",").exists())
+        session = Session.objects.get(course_code="ME101")
+        self.assertEqual(session.venue.name, "S112")
+        self.assertEqual(session.venue.capacity, 0)
 
     def test_all_group_expands_through_programme_courses(self):
         self._seed()
@@ -421,6 +545,181 @@ class MasterTimetableImportTests(ImporterTestCase):
         result = import_master_timetable_from_excel(path, semester_id=9999)
         self.assertTrue(result.errors)
         self.assertEqual(Session.objects.count(), 0)
+
+    def test_four_hour_session_is_stored_as_workshop(self):
+        """09:00-12:55 is four teaching hours, so it is a workshop.
+
+        The course is stored as WORKSHOP and the venue as Workshop. A
+        comma-separated room list is not kept as a venue name.
+        """
+        self._seed()
+        path = make_xlsx(
+            [[
+                "ME101", "PRACTICAL", "MONDAY", "09:00", "12:55",
+                "TW107, TW113, TW119", "A1",
+            ]],
+            MASTER_COLS,
+        )
+        result = import_master_timetable_from_excel(path, semester_id=self.sem1.pk)
+        self.assertEqual(result.errors, [])
+        self.assertNotIn("WORKSHOP", result.missing_courses)
+        self.assertNotIn("ME101", result.missing_courses)
+        self.assertIn(
+            "Sessions of four hours were stored as Workshop, at venue Workshop.",
+            result.notes,
+        )
+        session = Session.objects.get()
+        self.assertEqual(session.course_code, "WORKSHOP")
+        self.assertEqual(session.activity_type, ActivityType.WORKSHOP)
+        self.assertEqual(session.venue.name, "Workshop")
+        self.assertEqual(session.start_time, time(9, 0))
+        self.assertEqual(session.end_time, time(12, 55))
+        self.assertEqual(
+            list(session.session_groups.values_list("group__code", flat=True)),
+            ["A1"],
+        )
+        self.assertFalse(Venue.objects.filter(name__contains=",").exists())
+
+    def test_four_hour_clock_span_is_a_workshop(self):
+        self._seed()
+        path = make_xlsx(
+            [["TG201", "PRACTICAL", "THURSDAY", "10:00", "14:00", "A207", "A1"]],
+            MASTER_COLS,
+        )
+        result = import_master_timetable_from_excel(path, semester_id=self.sem1.pk)
+        self.assertEqual(result.errors, [])
+        session = Session.objects.get()
+        self.assertEqual(session.course_code, "WORKSHOP")
+        self.assertEqual(session.activity_type, ActivityType.WORKSHOP)
+        self.assertEqual(session.venue.name, "Workshop")
+
+    def test_architecture_studio_keeps_its_course_and_venue(self):
+        """A four-hour AR course is a studio of Bachelor of Architecture.
+
+        The programme code is the prefix, so AR111 and AR121 stay as imported.
+        CL111 is taught to architecture students as well, and it does not
+        carry that prefix, so a four-hour block of it is still a workshop.
+        """
+        self._seed()
+        architecture = Programme.objects.create(
+            code="AR", name="Bachelor of Architecture"
+        )
+        ProgrammeCourse.objects.create(
+            programme=architecture,
+            course_code="CL111",
+            course_name="Communication Skills",
+            semester=1,
+        )
+        ProgrammeCourse.objects.create(
+            programme=architecture,
+            course_code="AR111",
+            course_name="Studio Design Project I",
+            semester=1,
+        )
+        path = make_xlsx(
+            [
+                ["AR111", "PRACTICAL", "TUESDAY", "09:00", "12:55", "A207", "A1"],
+                ["AR 121", "PRACTICAL", "THURSDAY", "10:00", "13:55", "A207", "A1"],
+                ["CL111", "LECTURE", "MONDAY", "09:00", "12:55", "LH1", "A1"],
+            ],
+            MASTER_COLS,
+        )
+        result = import_master_timetable_from_excel(path, semester_id=self.sem1.pk)
+        self.assertEqual(result.errors, [])
+        self.assertIn(
+            "Four-hour architecture studios kept their own course and venue.",
+            result.notes,
+        )
+        studio = Session.objects.get(course_code="AR111")
+        self.assertEqual(studio.activity_type, ActivityType.PRACTICAL)
+        self.assertEqual(studio.venue.name, "A207")
+        graphics = Session.objects.get(course_code="AR121")
+        self.assertEqual(graphics.activity_type, ActivityType.PRACTICAL)
+        self.assertEqual(graphics.venue.name, "A207")
+        workshop = Session.objects.get(course_code="WORKSHOP")
+        self.assertEqual(workshop.activity_type, ActivityType.WORKSHOP)
+        self.assertEqual(workshop.venue.name, "Workshop")
+
+    def test_architecture_code_is_recognised_before_the_programme_is_imported(self):
+        self._seed()
+        path = make_xlsx(
+            [["AR111", "PRACTICAL", "TUESDAY", "09:00", "12:55", "A207", "A1"]],
+            MASTER_COLS,
+        )
+        result = import_master_timetable_from_excel(path, semester_id=self.sem1.pk)
+        self.assertEqual(result.errors, [])
+        session = Session.objects.get()
+        self.assertEqual(session.course_code, "AR111")
+        self.assertEqual(session.activity_type, ActivityType.PRACTICAL)
+        self.assertEqual(session.venue.name, "A207")
+
+    def test_four_hour_all_groups_still_follow_the_sheet_course(self):
+        self._seed()
+        path = make_xlsx(
+            [["MT161", "LECTURE", "MONDAY", "08:00", "11:55", "LH1", "ALL"]],
+            MASTER_COLS,
+        )
+        result = import_master_timetable_from_excel(path, semester_id=self.sem1.pk)
+        self.assertEqual(result.conflicts, [])
+        session = Session.objects.get()
+        self.assertEqual(session.course_code, "WORKSHOP")
+        self.assertEqual(session.activity_type, ActivityType.WORKSHOP)
+        self.assertEqual(session.session_groups.count(), 3)
+
+    def test_shorter_and_longer_sessions_keep_their_own_name_and_venue(self):
+        self._seed()
+        path = make_xlsx(
+            [
+                ["MT161", "LECTURE", "MONDAY", "08:00", "09:55", "LH1", "A1"],
+                ["TG201", "PRACTICAL", "TUESDAY", "09:00", "11:55", "NB102", "A1"],
+                ["AR111", "PRACTICAL", "FRIDAY", "08:00", "12:55", "A207", "A2"],
+            ],
+            MASTER_COLS,
+        )
+        result = import_master_timetable_from_excel(path, semester_id=self.sem1.pk)
+        self.assertEqual(result.errors, [])
+        self.assertFalse(
+            Session.objects.filter(activity_type=ActivityType.WORKSHOP).exists()
+        )
+        self.assertFalse(Venue.objects.filter(name="Workshop").exists())
+        friday = Session.objects.get(course_code="AR111")
+        self.assertEqual(friday.activity_type, ActivityType.PRACTICAL)
+        self.assertEqual(friday.venue.name, "A207")
+
+    def test_reimport_updates_a_four_hour_practical_in_place(self):
+        self._seed()
+        old_venue = Venue.objects.create(
+            name="TW107, TW113, TW119", capacity=0
+        )
+        Session.objects.create(
+            semester=self.sem1,
+            course_code="WORKSHOP",
+            activity_type=ActivityType.PRACTICAL,
+            day="MONDAY",
+            start_time=time(9, 0),
+            end_time=time(12, 55),
+            venue=old_venue,
+        )
+        path = make_xlsx(
+            [[
+                "WORKSHOP", "PRACTICAL", "MONDAY", "09:00", "12:55",
+                "TW107, TW113, TW119", "A1",
+            ]],
+            MASTER_COLS,
+        )
+        result = import_master_timetable_from_excel(path, semester_id=self.sem1.pk)
+        self.assertEqual(result.created, 0)
+        self.assertEqual(result.updated, 1)
+        self.assertEqual(Session.objects.count(), 1)
+        session = Session.objects.get()
+        self.assertEqual(session.activity_type, ActivityType.WORKSHOP)
+        self.assertEqual(session.course_code, "WORKSHOP")
+        self.assertEqual(session.venue.name, "Workshop")
+
+        again = import_master_timetable_from_excel(path, semester_id=self.sem1.pk)
+        self.assertEqual(again.created, 0)
+        self.assertEqual(again.updated, 1)
+        self.assertEqual(Session.objects.count(), 1)
 
 
 class WorkshopTdImportTests(ImporterTestCase):
@@ -2034,6 +2333,53 @@ class SidebarStructureTests(TestCase):
         for event in ("beforeunload", "load", "pageshow"):
             self.assertIn("addEventListener('%s'" % event, html)
 
+    def test_the_loader_always_comes_back_down(self):
+        """A download never loads a document, so nothing else can clear it.
+
+        A PDF export answers with ``Content-Disposition: attachment``: the browser
+        takes the file, abandons the navigation and stays put. ``beforeunload``
+        has already armed the overlay by then, and ``load``/``pageshow``/
+        ``htmx:afterRequest`` can never fire -- so the spinner sat there for good
+        after every export. The overlay is ``pointer-events:none``, which is why
+        it read as a page that had frozen rather than one that had wedged.
+        """
+        html = self._html("/staff/")
+        # The backstop, for any path that still manages to arm it.
+        self.assertIn("MAX_HOLD_MS", html)
+        self.assertIn("setTimeout(hideLoader, MAX_HOLD_MS)", html)
+        # And the primary fix: a download link is recognised and left alone.
+        self.assertIn("link.hasAttribute('download')", html)
+
+    def test_no_page_arms_the_loader_for_a_pdf_export(self):
+        """Every entry point to a PDF carries ``download``.
+
+        The loader's click handler returns early for a link with the attribute,
+        and a ``download`` click does not navigate at all, so ``beforeunload``
+        never fires either. The export hub used to assign ``window.location``,
+        which *is* a navigation and was the one path that still stuck.
+        """
+        for path in (
+            "/export/",
+            "/timetable/?programme=%s&semester=%s&year=1"
+            % (self.programme.pk, self.semester.pk),
+            # The detail pages carry their own export link (detail.html and
+            # _detail_content.html), so they are a second and third entry point.
+            "/programmes/%s/" % self.programme.pk,
+        ):
+            html = self._html(path)
+            for anchor in re.findall(r"<a\b[^>]*>", html):
+                if "timetable.pdf" not in anchor and "timetable-export" not in anchor:
+                    continue
+                self.assertIn(
+                    "download", anchor, f"export link would stick the loader: {anchor}"
+                )
+
+        hub = self._html("/export/")
+        # Not a navigation, and the click it makes carries the attribute too.
+        self.assertNotIn("window.location.href = url", hub)
+        self.assertIn("a.download = ''", hub)
+        self.assertIn("a.click()", hub)
+
     def test_the_bell_counts_only_unresolved_issues(self):
         from student_portal.models import CollisionReport
 
@@ -2462,11 +2808,15 @@ class VenueQualityTests(TestCase):
 
 
 class VenueImportConflictTests(TestCase):
-    """Detect spacing/casing venue-name duplicates at import time and let the
-    user interactively pick the official name, which is then merged."""
+    """Spacing and casing are the same venue: the import merges them and notes
+    it. The conflict view remains for a choice that was already stored."""
 
     def setUp(self):
         self.client = Client()
+        self.staff = User.objects.create_user(
+            "venue-tester", password="pw", is_staff=True
+        )
+        self.client.force_login(self.staff)
 
     # ---- Detection primitives ----------------------------------------------
 
@@ -2511,32 +2861,55 @@ class VenueImportConflictTests(TestCase):
     def _import(self, rows):
         return import_venues_from_excel(make_xlsx(rows, ["name", "capacity"]))
 
-    def test_venue_import_detects_spacing_conflict(self):
-        result = self._import([["PB 06", 100], ["PB06", 100]])
-        self.assertEqual(result.created, 2)
-        self.assertEqual(len(result.venue_conflicts), 1)
-        issue = result.venue_conflicts[0]
-        self.assertEqual(issue["reasons"], ["Spacing"])
-        self.assertEqual(set(issue["names"]), {"PB 06", "PB06"})
-        # Venue formatting conflicts are structured, not free-text.
+    def test_venue_import_merges_spacing(self):
+        result = self._import([["PB 06", 100], ["PB06", 150]])
+        self.assertEqual(result.venue_conflicts, [])
         self.assertEqual(result.conflicts, [])
+        self.assertEqual(Venue.objects.count(), 1)
+        venue = Venue.objects.get()
+        self.assertEqual(venue.name, "PB06")
+        self.assertEqual(venue.capacity, 150)
+        self.assertTrue(
+            any("PB 06 is the same venue as PB06" in note for note in result.notes)
+        )
 
-    def test_venue_import_detects_casing_conflict(self):
-        result = self._import([["PB 06", 100], ["pb 06", 100]])
-        self.assertEqual(len(result.venue_conflicts), 1)
-        self.assertEqual(result.venue_conflicts[0]["reasons"], ["Casing"])
+    def test_venue_import_merges_casing(self):
+        result = self._import([["PB 06", 100], ["pb 06", 80]])
+        self.assertEqual(result.venue_conflicts, [])
+        venue = Venue.objects.get()
+        self.assertEqual(venue.name, "PB06")
+        self.assertEqual(venue.capacity, 100)
 
-    def test_venue_import_detects_combined_conflict(self):
+    def test_venue_import_merges_spacing_and_casing_together(self):
         result = self._import([["pb 06", 100], ["PB06", 150]])
-        issue = result.venue_conflicts[0]
-        self.assertEqual(set(issue["reasons"]), {"Spacing", "Casing"})
+        self.assertEqual(result.venue_conflicts, [])
+        venue = Venue.objects.get()
+        self.assertEqual(venue.name, "PB06")
+        self.assertEqual(venue.capacity, 150)
 
-    def test_venue_import_flags_clash_with_existing_venue(self):
+    def test_venue_import_merges_with_an_existing_venue(self):
         Venue.objects.create(name="A104", capacity=60)
-        result = self._import([["A 104", 60]])
-        self.assertEqual(result.created, 1)
-        self.assertEqual(len(result.venue_conflicts), 1)
-        self.assertEqual(set(result.venue_conflicts[0]["names"]), {"A104", "A 104"})
+        result = self._import([["A 104", 90]])
+        self.assertEqual(result.created, 0)
+        self.assertEqual(result.venue_conflicts, [])
+        self.assertEqual(Venue.objects.count(), 1)
+        venue = Venue.objects.get()
+        self.assertEqual(venue.name, "A104")
+        self.assertEqual(venue.capacity, 90)
+        self.assertTrue(
+            any("A 104 is the same venue as A104" in note for note in result.notes)
+        )
+
+    def test_venue_import_leaves_different_names_alone(self):
+        result = self._import(
+            [
+                ["D01 Luhanga Hall Kijitonyama", 100],
+                ["D01 Kijitonyama", 80],
+            ]
+        )
+        self.assertEqual(Venue.objects.count(), 2)
+        self.assertEqual(result.venue_conflicts, [])
+        self.assertEqual(result.notes, [])
 
     def test_venue_import_clean_data_has_no_conflicts(self):
         result = self._import([["A104", 60], ["B106", 50]])
@@ -2566,13 +2939,13 @@ class VenueImportConflictTests(TestCase):
         self.assertEqual(result.venue_capacity_issues, [])
         self.assertFalse(Venue.objects.filter(name="PB 06").exists())
 
-    def test_venue_import_missing_capacity_still_detects_conflict(self):
+    def test_venue_import_blank_capacity_keeps_the_stated_one(self):
         result = self._import([["PB 06", ""], ["PB06", 150]])
-        self.assertEqual(result.created, 2)
-        self.assertEqual(result.venue_capacity_issues, ["PB 06"])
-        self.assertEqual(len(result.venue_conflicts), 1)
-        self.assertEqual(result.venue_conflicts[0]["reasons"], ["Spacing"])
-        self.assertEqual(set(result.venue_conflicts[0]["names"]), {"PB 06", "PB06"})
+        self.assertEqual(result.venue_conflicts, [])
+        self.assertEqual(result.venue_capacity_issues, [])
+        venue = Venue.objects.get()
+        self.assertEqual(venue.name, "PB06")
+        self.assertEqual(venue.capacity, 150)
 
     # ---- Interactive web fix flow ------------------------------------------
 
@@ -2590,30 +2963,46 @@ class VenueImportConflictTests(TestCase):
                 HTTP_HX_REQUEST="true",
             )
 
-    def _token(self):
-        for key in self.client.session.keys():
-            if key.startswith("venue_conflicts:"):
-                return key.split(":", 1)[1]
-        self.fail("no venue conflict token in session")
+    def _seed_conflict(self):
+        Venue.objects.create(name="PB 06", capacity=100)
+        Venue.objects.create(name="PB06", capacity=150)
+        session = self.client.session
+        session["venue_conflicts:tok"] = {
+            "open": [
+                {
+                    "id": "issue1",
+                    "key": "PB06",
+                    "names": ["PB 06", "PB06"],
+                    "reasons": ["Spacing"],
+                }
+            ],
+            "resolved": [],
+        }
+        session.save()
 
-    def _open_issue(self, key):
-        token = self._token()
-        store = self.client.session["venue_conflicts:%s" % token]
-        return token, next(issue for issue in store["open"] if issue["key"] == key)
-
-    def test_upload_lists_conflicts_with_fix_chooser(self):
+    def test_upload_merges_spacing_without_a_chooser(self):
         resp = self._upload_venues([["PB 06", 100], ["PB06", 150]])
         self.assertEqual(resp.status_code, 200)
         html = resp.content.decode()
-        self.assertIn("1 remaining", html)
-        self.assertIn("Spacing difference", html)
-        self.assertIn("PB 06", html)
-        self.assertIn("PB06", html)
-        self.assertIn("Accept &amp; Merge", html)
-        self.assertIn("Which name should be the official venue name", html)
+        self.assertIn("Recognised automatically", html)
+        self.assertIn("PB 06 is the same venue as PB06", html)
+        self.assertNotIn("Accept &amp; Merge", html)
+        self.assertNotIn("remaining", html)
+        self.assertEqual(Venue.objects.get().name, "PB06")
+        self.assertEqual(Venue.objects.get().capacity, 150)
 
-    def test_fix_accepts_official_name_and_merges_references(self):
-        self._upload_venues([["PB 06", 100], ["PB06", 150]])
+    def test_upload_merges_each_room_on_its_own(self):
+        resp = self._upload_venues(
+            [["PB 06", 100], ["PB06", 150], ["LH 1", 80], ["LH1", 90]]
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotIn("remaining", resp.content.decode())
+        self.assertEqual(Venue.objects.count(), 2)
+        self.assertEqual(Venue.objects.get(name="PB06").capacity, 150)
+        self.assertEqual(Venue.objects.get(name="LH1").capacity, 90)
+
+    def test_upload_repoints_an_existing_spaced_name(self):
+        venue = Venue.objects.create(name="PB 06", capacity=100)
         sem = Semester.objects.create(academic_year="2026/2027", semester=1)
         session = Session.objects.create(
             semester=sem,
@@ -2622,7 +3011,7 @@ class VenueImportConflictTests(TestCase):
             day="MONDAY",
             start_time="08:00",
             end_time="10:00",
-            venue=Venue.objects.get(name="PB 06"),
+            venue=venue,
         )
         WorkshopAllocation.objects.create(
             semester=sem,
@@ -2633,14 +3022,46 @@ class VenueImportConflictTests(TestCase):
             end_time="17:00",
             venue="PB 06",
         )
+        resp = self._upload_venues([["PB06", 150]])
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotIn("Accept &amp; Merge", resp.content.decode())
+        self.assertEqual(Venue.objects.count(), 1)
+        self.assertEqual(Venue.objects.get().name, "PB06")
+        self.assertEqual(Venue.objects.get().capacity, 150)
+        session.refresh_from_db()
+        self.assertEqual(session.venue.name, "PB06")
+        self.assertEqual(
+            WorkshopAllocation.objects.get(course_code="ME201").venue, "PB06"
+        )
 
-        token, issue = self._open_issue("PB06")
+    def test_fix_view_merges_a_stored_choice(self):
+        self._seed_conflict()
+        sem = Semester.objects.create(academic_year="2026/2027", semester=1)
+        held = Venue.objects.get(name="PB 06")
+        session = Session.objects.create(
+            semester=sem,
+            course_code="MT161",
+            activity_type="LECTURE",
+            day="MONDAY",
+            start_time="08:00",
+            end_time="10:00",
+            venue=held,
+        )
+        WorkshopAllocation.objects.create(
+            semester=sem,
+            course_code="ME201",
+            group_code="A1",
+            day="TUESDAY",
+            start_time="14:00",
+            end_time="17:00",
+            venue="PB 06",
+        )
         resp = self.client.post(
             "/venues/fix-conflict/",
             {
-                "token": token,
-                "key": issue["key"],
-                "issue_id": issue["id"],
+                "token": "tok",
+                "key": "PB06",
+                "issue_id": "issue1",
                 "official": "PB06",
             },
             HTTP_HX_REQUEST="true",
@@ -2649,134 +3070,43 @@ class VenueImportConflictTests(TestCase):
         html = resp.content.decode()
         self.assertIn("All resolved", html)
         self.assertIn("Accepted: PB06", html)
-        self.assertIn("Fixed", html)
-        self.assertNotIn("remaining", html)
-
-        # No duplicates left; every reference now uses the official name.
-        self.assertFalse(Venue.objects.filter(name="PB 06").exists())
-        self.assertTrue(Venue.objects.filter(name="PB06").exists())
         self.assertEqual(Venue.objects.count(), 1)
         session.refresh_from_db()
         self.assertEqual(session.venue.name, "PB06")
         self.assertEqual(
             WorkshopAllocation.objects.get(course_code="ME201").venue, "PB06"
         )
-
-        # The audit trail keeps the original value, the chosen official value,
-        # the action and the timestamp.
-        logs = ActivityLog.objects.filter(action=LogAction.UPDATE, target="PB06")
-        self.assertEqual(logs.count(), 1)
-        log = logs.get()
+        log = ActivityLog.objects.get(action=LogAction.UPDATE, target="PB06")
         self.assertIn("PB 06", log.message)
         self.assertIn("official", log.message)
-        self.assertIsNotNone(log.created_at)
 
-    def test_remaining_count_updates_after_each_fix(self):
-        resp = self._upload_venues(
-            [["PB 06", 100], ["PB06", 150], ["LH 1", 80], ["LH1", 80]]
-        )
-        self.assertIn("2 remaining", resp.content.decode())
-
-        token, lh_issue = self._open_issue("LH1")
-        resp = self.client.post(
-            "/venues/fix-conflict/",
-            {
-                "token": token,
-                "key": lh_issue["key"],
-                "issue_id": lh_issue["id"],
-                "official": "LH1",
-            },
-            HTTP_HX_REQUEST="true",
-        )
-        html = resp.content.decode()
-        self.assertIn("1 remaining", html)
-        self.assertIn("Accepted: LH1", html)
-        self.assertFalse(Venue.objects.filter(name="LH 1").exists())
-        self.assertTrue(Venue.objects.filter(name="PB 06").exists())
-        self.assertTrue(Venue.objects.filter(name="PB06").exists())
-
-        token, pb_issue = self._open_issue("PB06")
-        resp = self.client.post(
-            "/venues/fix-conflict/",
-            {
-                "token": token,
-                "key": pb_issue["key"],
-                "issue_id": pb_issue["id"],
-                "official": "PB06",
-            },
-            HTTP_HX_REQUEST="true",
-        )
-        html = resp.content.decode()
-        self.assertIn("All resolved", html)
-        self.assertNotIn("remaining", html)
-        self.assertEqual(Venue.objects.count(), 2)
-        self.assertEqual(Venue.objects.values_list("name", flat=True).count(), 2)
-
-    def test_fix_spacing_conflict_with_missing_capacity_preserves_capacity(self):
-        # One row has no capacity: the conflict still appears and fixing it is
-        # not blocked, while the accepted venue keeps its real capacity.
+    def test_upload_blank_capacity_is_not_a_conflict(self):
         resp = self._upload_venues([["PB 06", ""], ["PB06", 150]])
         html = resp.content.decode()
-        self.assertIn("1 remaining", html)
-        self.assertIn("Spacing difference", html)
-        self.assertIn("missing capacity", html)
-        self.assertNotIn("capacity: This field is required", html)
-        self.assertNotIn("Invalid capacity", html)
-        self.assertEqual(Venue.objects.get(name="PB 06").capacity, 0)
-
-        token, issue = self._open_issue("PB06")
-        resp = self.client.post(
-            "/venues/fix-conflict/",
-            {
-                "token": token,
-                "key": issue["key"],
-                "issue_id": issue["id"],
-                "official": "PB06",
-            },
-            HTTP_HX_REQUEST="true",
-        )
-        html = resp.content.decode()
-        self.assertIn("All resolved", html)
-        self.assertIn("Accepted: PB06", html)
         self.assertNotIn("remaining", html)
-        self.assertFalse(Venue.objects.filter(name="PB 06").exists())
-        self.assertEqual(Venue.objects.get(name="PB06").capacity, 150)
-
-    def test_fix_casing_conflict_with_empty_capacity(self):
-        # Both colliding names lack capacity; accepting an official name must
-        # still resolve the casing duplicate without any capacity error.
-        resp = self._upload_venues([["PB 06", ""], ["pb 06", ""]])
-        self.assertIn("Casing difference", resp.content.decode())
-        self.assertNotIn("Invalid capacity", resp.content.decode())
-
-        token, issue = self._open_issue("PB06")
-        resp = self.client.post(
-            "/venues/fix-conflict/",
-            {
-                "token": token,
-                "key": issue["key"],
-                "issue_id": issue["id"],
-                "official": "pb 06",
-            },
-            HTTP_HX_REQUEST="true",
-        )
-        html = resp.content.decode()
-        self.assertIn("All resolved", html)
-        self.assertIn("Accepted: pb 06", html)
-        self.assertEqual(Venue.objects.count(), 1)
+        self.assertNotIn("Accept &amp; Merge", html)
+        self.assertNotIn("Invalid capacity", html)
         venue = Venue.objects.get()
-        self.assertEqual(venue.name, "pb 06")
+        self.assertEqual(venue.name, "PB06")
+        self.assertEqual(venue.capacity, 150)
+
+    def test_upload_both_blank_spellings_are_one_venue(self):
+        resp = self._upload_venues([["PB 06", ""], ["pb 06", ""]])
+        html = resp.content.decode()
+        self.assertNotIn("remaining", html)
+        self.assertIn("Venues missing capacity", html)
+        venue = Venue.objects.get()
+        self.assertEqual(venue.name, "PB06")
         self.assertEqual(venue.capacity, 0)
 
     def test_fix_rejects_official_not_offered(self):
-        self._upload_venues([["PB 06", 100], ["PB06", 150]])
-        token, issue = self._open_issue("PB06")
+        self._seed_conflict()
         resp = self.client.post(
             "/venues/fix-conflict/",
             {
-                "token": token,
-                "key": issue["key"],
-                "issue_id": issue["id"],
+                "token": "tok",
+                "key": "PB06",
+                "issue_id": "issue1",
                 "official": "SOME OTHER VENUE",
             },
             HTTP_HX_REQUEST="true",
@@ -2792,7 +3122,6 @@ class VenueImportConflictTests(TestCase):
         )
 
     def test_fix_without_choice_is_rejected(self):
-        self._upload_venues([["PB 06", 100], ["PB06", 150]])
         resp = self.client.post(
             "/venues/fix-conflict/",
             {"token": "", "key": "", "issue_id": "", "official": ""},
@@ -2800,7 +3129,7 @@ class VenueImportConflictTests(TestCase):
         )
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Missing venue choice", resp.content.decode())
-        self.assertEqual(Venue.objects.count(), 2)
+
 
     def test_resolve_merges_every_colliding_name(self):
         Venue.objects.create(name="pb 06", capacity=100)
@@ -3629,7 +3958,8 @@ class GridExportFooterTests(TestCase):
         import datetime as _dt
 
         self._sessions()
-        text = _pdf_text(self._programme_pdf())
+        pdf = self._programme_pdf()
+        text = _pdf_text(pdf)
         for fragment in (
             "Generated from",
             "CoET Timetable Portal",
@@ -3637,6 +3967,15 @@ class GridExportFooterTests(TestCase):
             "(Page 1)",
         ):
             self.assertIn(fragment, text)
+        # Same page as the all-programmes sheet: A4 landscape, hours across.
+        boxes = re.findall(
+            rb"/MediaBox\s*\[\s*([\d.\-]+)\s+([\d.\-]+)\s+"
+            rb"([\d.\-]+)\s+([\d.\-]+)\s*\]",
+            pdf,
+        )
+        self.assertEqual({round(float(b[2])) for b in boxes}, {842})
+        self.assertEqual({round(float(b[3])) for b in boxes}, {595})
+        self.assertIn("07:00", text)
 
     def test_the_footer_sits_at_the_bottom_of_the_page(self):
         """Not merely present -- down in the margin, where a footer belongs.
@@ -5460,6 +5799,200 @@ class MasterTimetableExportTests(TestCase):
         self.assertEqual(response["Content-Type"], "application/pdf")
         self.assertTrue(response.content.startswith(b"%PDF-"))
         self.assertIn("master_timetable_1.pdf", response["Content-Disposition"])
+
+
+class ProgrammeExportLayoutTests(TestCase):
+    """The whole-programme sheet is the master's packed band layout.
+
+    The programme export used to be a classic grid: a cell per hour, with a
+    session spanning five hours drawn as five cells and two sessions in one hour
+    stacked into the one box they share. Both are unreadable for a real
+    programme, where a whole cohort is in a lecture at 08:00 while six groups
+    are in six different rooms at the same hour. It now uses the same
+    ``_DayFlowable`` packing as the all-programmes export -- days down a narrow
+    left column, hours across the top, and each block laid down on the lowest
+    free position across the hours it covers, so nothing is ever sliced or
+    overlapped. The single-group sheet is deliberately left as the classic
+    portrait grid: one group's week has no simultaneous sessions to separate.
+    """
+
+    def setUp(self):
+        self.sem = Semester.objects.create(academic_year="2026/2027", semester=1)
+        self.prog = Programme.objects.create(
+            code="CE", name="BSc. in Civil Engineering"
+        )
+        self.groups = [
+            StudentGroup.objects.create(programme=self.prog, code="C%d" % i)
+            for i in range(1, 8)
+        ]
+        self.venue = Venue.objects.create(name="YOMBO5", capacity=200)
+
+    def _session(self, code, day, start, end, groups=(), activity="LECTURE", venue=None):
+        session = Session.objects.create(
+            semester=self.sem,
+            course_code=code,
+            activity_type=activity,
+            day=day,
+            start_time=start,
+            end_time=end,
+            venue=venue or self.venue,
+        )
+        for group in groups:
+            SessionGroup.objects.create(session=session, group=group)
+        return session
+
+    def _entries(self):
+        return fold_for_display(
+            collect_entries(self.prog, self.sem, year=1), [g.code for g in self.groups]
+        )
+
+    def test_the_programme_sheet_is_the_packed_landscape_layout(self):
+        # Six groups in six rooms at the same hour, plus a cohort lecture on
+        # top: the case the classic grid could not draw at all.
+        for i, group in enumerate(self.groups[:6]):
+            self._session(
+                "AR%d" % (i + 1), "MONDAY", "08:00", "10:55", groups=[group],
+                activity="TUTORIAL", venue=Venue.objects.create(
+                    name="ROOM%d" % i, capacity=40
+                ),
+            )
+        # A whole-cohort lecture has to be linked to every group to be collected
+        # at all -- ``collect_entries`` selects on ``session_groups``, so an
+        # unlinked session belongs to the master sheet, not this one.
+        self._session("MT171", "MONDAY", "08:00", "09:55", groups=self.groups)
+
+        day_flowables, _slots = _build_day_flowables(self._entries(), 60.0, 46)
+        self.assertEqual(len(day_flowables), 1)
+        monday = day_flowables[0]
+        self.assertEqual(monday.day_label, "Monday")
+
+        # Every block is whole: no session is cut into one box per hour, and the
+        # 08:00-09:55 lecture is a single block rather than two.
+        spans = [box["colspan"] for box in monday.boxes]
+        self.assertIn(3, spans, "the 3-hour lecture was not drawn as one block")
+        self.assertEqual(len(monday.boxes), 7)
+
+        # And nothing overlaps. Two blocks may share an hour column only if one
+        # ends before the other starts.
+        for i, upper in enumerate(monday.boxes):
+            for lower in monday.boxes[i + 1:]:
+                same_columns = (
+                    upper["col"] < lower["col"] + lower["colspan"]
+                    and lower["col"] < upper["col"] + upper["colspan"]
+                )
+                if not same_columns:
+                    continue
+                self.assertFalse(
+                    upper["top"] < lower["bottom"] and lower["top"] < upper["bottom"],
+                    f"blocks overlap: {upper['lines']} / {lower['lines']}",
+                )
+
+    def test_the_programme_export_renders_a_packed_pdf_that_keeps_its_key(self):
+        self._session("AR111", "MONDAY", "08:00", "10:55", groups=self.groups[:3])
+        # A real rotation is one *group* doing two *different* workshops in the
+        # same slot on different week blocks. Two groups each on one block is
+        # not a rotation and earns no key row, so the fixture below is the only
+        # shape that can prove the key survived the change of engine.
+        for workshop, (start, end) in (("Carpentry", (1, 7)), ("Welding", (8, 14))):
+            WorkshopAllocation.objects.create(
+                semester=self.sem, group_code="C1", day="TUESDAY",
+                start_time="08:00", end_time="11:00", venue="YOMBO5",
+                workshop=workshop, week_start=start, week_end=end,
+            )
+        buf = io.BytesIO()
+        render_programme_timetable(self.prog, self.sem, 1, out=buf)
+        pdf = buf.getvalue()
+        self.assertTrue(pdf.startswith(b"%PDF-"))
+
+        text = _pdf_text(pdf)
+        self.assertIn("WORKSHOP ROTATION KEY", text)
+        # The key states the mapping the folded cell cannot: which craft runs in
+        # which weeks.
+        self.assertIn("Carpentry", text)
+        self.assertIn("Welding", text)
+        self.assertIn("1-7", text.replace("\\226", "-"))
+        self.assertIn("8-14", text.replace("\\226", "-"))
+        # Packed band, not the classic grid: an hour header naming the columns,
+        # and day names drawn rotated in their own left column.
+        self.assertIn("07:00", text)
+        self.assertIn("Monday", text)
+        # A4 landscape, like the master sheet it now shares an engine with.
+        boxes = re.findall(
+            rb"/MediaBox\s*\[\s*([\d.\-]+)\s+([\d.\-]+)\s+([\d.\-]+)\s+([\d.\-]+)\s*\]",
+            pdf,
+        )
+        self.assertTrue(boxes, "no MediaBox in the PDF")
+        self.assertEqual({round(float(b[2])) for b in boxes}, {842})
+        self.assertEqual({round(float(b[3])) for b in boxes}, {595})
+
+    def test_the_single_group_sheet_still_uses_the_classic_portrait_grid(self):
+        """One group's week has no simultaneity, so the grid is right for it."""
+        self._session("AR111", "MONDAY", "08:00", "10:55", groups=self.groups[:1])
+        buf = io.BytesIO()
+        render_group_timetable(self.groups[0], self.sem, 1, out=buf)
+        pdf = buf.getvalue()
+
+        boxes = re.findall(
+            rb"/MediaBox\s*\[\s*([\d.\-]+)\s+([\d.\-]+)\s+([\d.\-]+)\s+([\d.\-]+)\s*\]",
+            pdf,
+        )
+        self.assertTrue(boxes, "no MediaBox in the PDF")
+        # Portrait, where the master and programme sheets are landscape.
+        self.assertEqual({round(float(b[2])) for b in boxes}, {595})
+        self.assertEqual({round(float(b[3])) for b in boxes}, {842})
+
+    def test_both_packed_exports_share_one_engine(self):
+        """Two renderers, one packer -- so they cannot drift apart."""
+        from reportlab.lib.pagesizes import A4
+        from reportlab.platypus import SimpleDocTemplate
+
+        calls = []
+
+        def fake_bands(*args, **kwargs):
+            calls.append(kwargs)
+            SimpleDocTemplate(io.BytesIO(), pagesize=A4).build([])
+
+        with mock.patch("core.timetable_pdf._render_day_bands", fake_bands):
+            render_programme_timetable(self.prog, self.sem, 1, out=io.BytesIO())
+            render_udsm_master_timetable([], self.sem, 1, out=io.BytesIO())
+
+        self.assertEqual(len(calls), 2)
+        # The programme sheet keeps the workshop week range (two groups in one
+        # slot on different week blocks must stay tellable apart); the master
+        # sheet, which has no rotation key, drops it.
+        self.assertIs(calls[0]["show_notes"], True)
+        self.assertIs(calls[1]["show_notes"], False)
+
+    def test_the_week_range_survives_into_the_programme_cell(self):
+        """The range is the only thing telling two groups in one slot apart.
+
+        ``fold_same_sessions`` buckets on ``(slot, identity, note)``, so a
+        differing week range is a differing block -- the two groups must not be
+        merged into one box, or the cell would keep whichever range was seen
+        first and print "Wk 1-7" against everyone. The packed band draws them
+        as two adjacent blocks, which is also the only way both can be read.
+        """
+        self._session("AR111", "MONDAY", "08:00", "10:55", groups=self.groups[:1])
+        for code, (start, end) in (("C1", (1, 7)), ("C2", (8, 14))):
+            WorkshopAllocation.objects.create(
+                semester=self.sem, group_code=code, day="TUESDAY",
+                start_time="08:00", end_time="11:00", venue="YOMBO5",
+                workshop="Carpentry", week_start=start, week_end=end,
+            )
+        entries = self._entries()
+        workshop = [e for e in entries if e["kind"] == "workshop"]
+        self.assertEqual(len(workshop), 2, "the week range must keep them apart")
+
+        with_notes, _ = _build_day_flowables(entries, 60.0, 46, show_notes=True)
+        without_notes, _ = _build_day_flowables(entries, 60.0, 46, show_notes=False)
+        noted = [ln for f in with_notes for b in f.boxes for ln in b["lines"]]
+        plain = [ln for f in without_notes for b in f.boxes for ln in b["lines"]]
+        # Both ranges, on the programme sheet...
+        self.assertTrue(any("1-7" in ln[0] for ln in noted), noted)
+        self.assertTrue(any("8-14" in ln[0] for ln in noted), noted)
+        # ...and neither on the single-group one, whose key states them instead.
+        self.assertFalse(any("1-7" in ln[0] for ln in plain), plain)
+        self.assertFalse(any("8-14" in ln[0] for ln in plain), plain)
 
 
 class TimetablePageTests(TestCase):
@@ -7588,7 +8121,11 @@ end_time=time(13, 0),
 class CourseCodeNormalisationTests(TestCase):
     def test_trims_and_uppercases(self):
         self.assertEqual(normalise_course_code("  mt161 "), "MT161")
-        self.assertEqual(normalise_course_code("Mt 161"), "MT 161")
+        self.assertEqual(normalise_course_code("Mt 161"), "MT161")
+        self.assertEqual(normalise_course_code("DS114(coet)"), "DS114")
+        self.assertEqual(normalise_course_code("DS 114 (COET)"), "DS114")
+        self.assertEqual(normalise_course_code("ds115 (coet)"), "DS115")
+        self.assertEqual(normalise_course_code("DS114"), "DS114")
         self.assertEqual(normalise_course_code(None), "")
 
     def test_code_is_normalised_on_save(self):
@@ -9146,6 +9683,73 @@ class AllocationEngineTests(AllocationTestCase):
             {ActivityType.TUTORIAL},
         )
 
+    def test_opening_a_zero_capacity_room_rebalances_the_groups(self):
+        self._seed()
+        monday = self._tutorial("MONDAY", 8, 9, self.hall)
+        tuesday = self._tutorial("TUESDAY", 8, 9, self.no_capacity)
+        first = plan_allocation(self.semester, "ALL")
+        self.assertEqual(first.unresolved_count, 0)
+        self.assertTrue(all(a.session.pk == monday.pk for a in first.assignments))
+        apply_run(save_plan(first))
+        tuesday.venue.capacity = 200
+        tuesday.venue.save()
+        second = plan_allocation(self.semester, "ALL")
+        self.assertEqual(second.unresolved_count, 0)
+        counts = {}
+        seen = set()
+        for assignment in second.assignments:
+            self.assertNotIn(assignment.requirement.group.pk, seen)
+            seen.add(assignment.requirement.group.pk)
+            counts[assignment.session.pk] = counts.get(assignment.session.pk, 0) + 1
+            self.assertLessEqual(
+                counts[assignment.session.pk],
+                assignment.session.venue.capacity // 30,
+            )
+        self.assertEqual(set(counts), {monday.pk, tuesday.pk})
+        self.assertLessEqual(max(counts.values()) - min(counts.values()), 1)
+        self.assertGreater(second.moved, 0)
+        self.assertEqual(second.assignments[0].group_count, counts[second.assignments[0].session.pk])
+
+    def test_groups_left_out_by_a_closed_room_are_placed_once_it_opens(self):
+        self._seed()
+        monday = self._tutorial("MONDAY", 8, 9, self.small)
+        tuesday = self._tutorial("TUESDAY", 8, 9, self.no_capacity)
+        first = plan_allocation(self.semester, "ALL")
+        self.assertEqual(first.added, 1)
+        self.assertEqual(first.unresolved_count, 3)
+        self.assertIn("Set the capacity of GAP", " ".join(first.unresolved[0].reasons))
+        apply_run(save_plan(first))
+        tuesday.venue.capacity = 90
+        tuesday.venue.save()
+        second = plan_allocation(self.semester, "ALL")
+        self.assertEqual(second.unresolved_count, 0)
+        self.assertEqual(second.added + second.retained + second.moved, 4)
+        by_session = {}
+        for assignment in second.assignments:
+            by_session.setdefault(assignment.session.pk, set()).add(
+                assignment.requirement.group.pk
+            )
+        self.assertEqual(len(by_session[monday.pk]), 1)
+        self.assertEqual(len(by_session[tuesday.pk]), 3)
+        self.assertEqual(len(set().union(*by_session.values())), 4)
+
+    def test_a_second_run_keeps_a_plan_that_is_already_spread(self):
+        self._seed()
+        self._tutorial("MONDAY", 8, 9, self.hall)
+        self._tutorial("TUESDAY", 8, 9, self.hall)
+        first = plan_allocation(self.semester, "ALL")
+        apply_run(save_plan(first))
+        second = plan_allocation(self.semester, "ALL")
+        self.assertEqual(second.moved, 0)
+        self.assertEqual(second.unresolved_count, 0)
+        first_pairs = sorted(
+            (a.requirement.group.pk, a.session.pk) for a in first.assignments
+        )
+        second_pairs = sorted(
+            (a.requirement.group.pk, a.session.pk) for a in second.assignments
+        )
+        self.assertEqual(first_pairs, second_pairs)
+
 
 class ManualAssignmentTests(AllocationTestCase):
     def test_a_valid_manual_assignment_is_accepted(self):
@@ -9210,7 +9814,7 @@ class ManualAssignmentTests(AllocationTestCase):
 class AllocationRunTests(AllocationTestCase):
     def _plan_and_run(self, scope="ALL"):
         plan = plan_allocation(self.semester, scope)
-        return plan, save_plan(plan)
+        return plan, save_plan(plan, algorithm="smart")
 
     def _a_group_pinned_to_monday(self):
         """A group that must be moved off Monday to its Tuesday session.
@@ -10677,7 +11281,7 @@ class AllocationShowsInTheTimetableTests(AllocationTestCase):
         self._tutorial("MONDAY", 8, 9, self.hall)
         self._tutorial("TUESDAY", 8, 9, self.hall)
         plan = plan_allocation(self.semester, scope)
-        return plan, apply_run(save_plan(plan))
+        return plan, apply_run(save_plan(plan, algorithm="smart"))
 
     def test_the_sessions_list_shows_the_assigned_groups(self):
         self._seed()
@@ -10895,7 +11499,7 @@ class AllocationShowsInTheTimetableTests(AllocationTestCase):
         SessionGroup.objects.create(session=lecture, group=self.a1)
         self._session("MT161", ActivityType.SEMINAR, "TUESDAY", 8, 9, self.hall)
         plan = plan_allocation(self.semester, "ALL")
-        apply_run(save_plan(plan))
+        apply_run(save_plan(plan, algorithm="smart"))
         entries, _ = _collect_group_entries_and_rotations(self.a1, self.semester)
         with_groups = fold_for_display(entries, {self.a1.code})
         without = fold_for_display(
@@ -10933,7 +11537,7 @@ class AllocationAppearsInExportsTests(AllocationTestCase):
         self._seed()
         self._tutorial("MONDAY", 8, 9, self.hall)
         plan = plan_allocation(self.semester, "ALL")
-        apply_run(save_plan(plan))
+        apply_run(save_plan(plan, algorithm="smart"))
         entries = collect_group_entries(self.a1, self.semester)
         codes = {e["course_code"] for e in entries}
         self.assertIn("MT161", codes)
@@ -10944,7 +11548,7 @@ class AllocationAppearsInExportsTests(AllocationTestCase):
         # Only A1 is allocated; D1's requirement stays unresolved.
         self._tutorial("MONDAY", 8, 9, self.small)
         plan = plan_allocation(self.semester, "ALL")
-        apply_run(save_plan(plan))
+        apply_run(save_plan(plan, algorithm="smart"))
         self.assertIn(
             "MT161", {e["course_code"] for e in collect_group_entries(self.a1, self.semester)}
         )
@@ -10957,7 +11561,7 @@ class AllocationAppearsInExportsTests(AllocationTestCase):
         self._seed()
         self._tutorial("MONDAY", 8, 9, self.big)
         plan = plan_allocation(self.semester, "ALL")
-        apply_run(save_plan(plan))
+        apply_run(save_plan(plan, algorithm="smart"))
         out = io.BytesIO()
         render_group_timetable(self.a1, self.semester, out=out)
         self.assertGreater(len(out.getvalue()), 1000)
@@ -11055,6 +11659,14 @@ class CurrentSemesterTests(TestCase):
         self.assertEqual(resp.status_code, 302)
         self.assertIsNone(Semester.current())
 
+    def test_the_dashboard_card_opens_unfinished_group_progress(self):
+        resp = self.client.get("/staff/")
+        self.assertContains(resp, "Groups not complete")
+        self.assertContains(
+            resp, "/allocation/groups/?semester=%d" % resp.context["selected_semester"].pk
+        )
+        self.assertNotContains(resp, "Student groups")
+
     def test_the_dashboard_defaults_to_the_current_semester(self):
         Semester.set_current(self.old)
         resp = self.client.get("/staff/")
@@ -11129,3 +11741,62 @@ class CurrentSemesterTests(TestCase):
         Semester.set_current(self.old)
         PortalSettings.objects.create(current_semester=self.new)
         self.assertEqual(current_semester(), self.new)
+
+
+class StaffSignInAndTableExportTests(TestCase):
+    """Sign-in lands on the dashboard, an idle return loads the page, and a
+    desktop list can download the columns it shows."""
+
+    def setUp(self):
+        self.staff = User.objects.create_user(
+            "export-tester", password="pw", is_staff=True
+        )
+        self.client.force_login(self.staff)
+
+    def test_sign_in_opens_the_dashboard(self):
+        self.client.logout()
+        response = self.client.post(
+            "/staff/login/",
+            {"username": "export-tester", "password": "pw"},
+        )
+        self.assertRedirects(response, "/staff/", fetch_redirect_response=False)
+
+    def test_an_idle_return_loads_the_open_page(self):
+        from django.utils import timezone
+
+        session = self.client.session
+        session["staff_last_activity"] = timezone.now().timestamp() - 10_000
+        session.save()
+        response = self.client.get("/programmes/")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Programmes")
+        self.assertNotIn(b"Staff sign in", response.content)
+        # The session is over, so the next visit has to sign in.
+        again = self.client.get("/programmes/")
+        self.assertRedirects(again, "/staff/login/", fetch_redirect_response=False)
+
+    def test_admin_uses_its_own_login_page(self):
+        self.client.logout()
+        response = self.client.get("/admin/", follow=True)
+        self.assertNotContains(response, "Staff sign in")
+        self.assertContains(response, "Django administration")
+
+    def test_the_programme_table_exports_its_own_columns(self):
+        from openpyxl import load_workbook
+
+        Programme.objects.create(code="EE", name="Electrical")
+        Programme.objects.create(code="CE", name="Civil")
+        page = self.client.get("/programmes/")
+        self.assertContains(page, "Export Excel")
+        self.assertContains(page, "export=xlsx")
+        self.assertContains(page, "hidden lg:inline-flex")
+        response = self.client.get("/programmes/?q=Civil&export=xlsx")
+        self.assertEqual(
+            response["Content-Type"],
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        sheet = load_workbook(io.BytesIO(response.content)).active
+        self.assertEqual([cell.value for cell in sheet[1]], ["Code", "Name"])
+        self.assertEqual(sheet.max_row, 2)
+        self.assertEqual(sheet.cell(2, 1).value, "CE")
+        self.assertEqual(sheet.cell(2, 2).value, "Civil")

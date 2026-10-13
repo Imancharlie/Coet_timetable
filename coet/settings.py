@@ -68,7 +68,9 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'core',
     'allocation',
+    'audit',
     'student_portal',
+    'api',
 ]
 
 MIDDLEWARE = [
@@ -150,6 +152,7 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
 STATIC_URL = 'static/'
+MEDIA_ROOT = BASE_DIR / "media"
 STATICFILES_DIRS = [BASE_DIR / 'static']
 
 # Default primary key field type
@@ -157,13 +160,20 @@ STATICFILES_DIRS = [BASE_DIR / 'static']
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
+# Read-only API. Clients send this value in the X-API-Key header.
+# Override it in the environment with COET_API_KEY.
+API_KEY = os.environ.get('COET_API_KEY', 'coet-timetable-api-key')
+
 # Staff workspace security. Student routes are explicitly public; all other
 # application routes require an authenticated staff account.
 LOGIN_URL = '/staff/login/'
 LOGIN_REDIRECT_URL = '/staff/'
 LOGOUT_REDIRECT_URL = '/'
 STAFF_IDLE_TIMEOUT_SECONDS = 15 * 60
-SESSION_COOKIE_AGE = STAFF_IDLE_TIMEOUT_SECONDS
+# The cookie has to outlive the idle window. If it expires at the same moment,
+# Django drops the session before the idle check runs and the return visit is
+# redirected to the staff login page instead of loading.
+SESSION_COOKIE_AGE = 12 * 60 * 60
 SESSION_EXPIRE_AT_BROWSER_CLOSE = True
 SESSION_SAVE_EVERY_REQUEST = True
 SESSION_COOKIE_HTTPONLY = True

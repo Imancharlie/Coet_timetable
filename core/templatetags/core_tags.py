@@ -88,8 +88,19 @@ _NAV_SECTIONS = {
     # More specific than "allocation", and it must come first: the loop below
     # returns on the first prefix that matches, so the generic entry would
     # otherwise swallow these and light up the allocator link instead.
+    # "audit-reports" likewise precedes "audit-report-*": the list page is the
+    # one the sidebar link points at, so that is what must light up, and the
+    # longer names are the *pages of* a report rather than the section itself.
+    "audit-reports": "audit-reports",
+    "audit-report-detail": "audit-reports",
+    "audit-report-pdf": "audit-reports",
+    "audit-report-json": "audit-reports",
     "allocation-groups": "allocation-progress",
     "allocation-group": "allocation-progress",
+    "allocation-smart-page": "allocation-smart",
+    "allocation-smart-preview": "allocation-smart",
+    "allocation-advanced-page": "allocation-advanced",
+    "allocation-advanced-preview": "allocation-advanced",
     "allocation": "allocation",
     "import": "imports",
     "export": "exports",

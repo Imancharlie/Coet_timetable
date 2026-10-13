@@ -2,6 +2,7 @@ from django.contrib.auth.forms import AuthenticationForm
 from django.contrib.auth.views import LoginView
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
+from django.urls import reverse
 
 
 class StaffAuthenticationForm(AuthenticationForm):
@@ -38,6 +39,12 @@ class StaffLoginView(LoginView):
     template_name = "student_portal/login.html"
     authentication_form = StaffAuthenticationForm
     redirect_authenticated_user = True
+
+    def get_success_url(self):
+        # A successful sign-in always opens the dashboard. A "next" address
+        # left over from an idle timeout must not send them somewhere else,
+        # and must not send them back to this login page.
+        return reverse("dashboard")
 
     def form_valid(self, form):
         if not form.get_user().is_staff:

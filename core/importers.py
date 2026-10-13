@@ -27,7 +27,16 @@ from core.workshop_times import (
     programme_codes_for_group_codes,
     workshop_time_issue,
 )
-from core.venue_quality import base_key, detect_name_conflicts
+from core.venue_quality import (
+    adopt_official_name,
+    base_key,
+    detect_name_conflicts,
+    fold_formatting_duplicates,
+    formatting_key,
+    kept_capacity,
+    official_formatting_name,
+    venue_by_formatting,
+)
 from core.workshop_parser import (
     detect_format,
     parse_workbook,
@@ -217,6 +226,7 @@ class ImportResult:
     courses_created: list = field(default_factory=list)
     courses_updated: list = field(default_factory=list)
     warnings: list = field(default_factory=list)
+    notes: list = field(default_factory=list)
     course_requirements: list = field(default_factory=list)
     requirements_column: str = ""
     requirement_count_columns: dict = field(default_factory=dict)
@@ -266,6 +276,9 @@ class ImportResult:
         if self.warnings:
             for warning in self.warnings:
                 lines.append(f"Warning: {warning}")
+        if self.notes:
+            for note in self.notes:
+                lines.append(f"Noted: {note}")
         if self.programmes_created:
             lines.append(
                 f"Programmes created automatically: "
@@ -417,6 +430,7 @@ class ImportResult:
             "derived_unresolved": list(self.derived_unresolved),
             "derived_skipped": list(self.derived_skipped),
             "warnings": list(self.warnings),
+            "notes": list(self.notes),
             "lecture_sessions_processed": self.lecture_sessions_processed,
             "lecture_groups_linked": self.lecture_groups_linked,
             "lecture_groups_existing": self.lecture_groups_existing,
@@ -877,6 +891,7 @@ def import_venues_from_excel(path: str | Path) -> ImportResult:
         )
         return result
 
+    blanks = []
     for _, row in df.iterrows():
         name = str(row[name_col]).strip()
         if not name:
@@ -885,12 +900,11 @@ def import_venues_from_excel(path: str | Path) -> ImportResult:
             continue
         raw_cap = str(row[cap_col]).strip()
         if not raw_cap:
-            # A name with no capacity is still imported so spacing/casing
-            # duplicates involving it can be detected and fixed interactively.
-            # The missing capacity is flagged separately and stays visible in
-            # the validation panel until the record is finalised with one.
+            # A name with no capacity is still imported. Spacing and casing
+            # duplicates of it are the same room and are merged below; the
+            # missing capacity is flagged only when the room we keep still
+            # has none.
             cap = 0
-            result.venue_capacity_issues.append(name)
         else:
             try:
                 cap = int(float(raw_cap))
@@ -898,18 +912,46 @@ def import_venues_from_excel(path: str | Path) -> ImportResult:
                 result.errors.append(f"Invalid capacity for venue '{name}'")
                 result.skipped += 1
                 continue
-        _, created = Venue.objects.update_or_create(
-            name=name, defaults={"capacity": cap}
-        )
-        if created:
-            result.created += 1
-        else:
+        existing = venue_by_formatting(name)
+        if existing is not None:
+            spellings = {existing.name, name}
+            merging = len(spellings) > 1
+            official = (
+                official_formatting_name(spellings) if merging else existing.name
+            )
+            venue = adopt_official_name(existing, official)
+            chosen = kept_capacity(venue.capacity, cap) if merging or cap <= 0 else cap
+            if venue.capacity != chosen:
+                venue.capacity = chosen
+                venue.save(update_fields=["capacity"])
             result.updated += 1
+            for spelling in sorted(spellings):
+                if spelling != venue.name:
+                    _remember_note(
+                        result, f"{spelling} is the same venue as {venue.name}."
+                    )
+        else:
+            Venue.objects.create(name=name, capacity=cap)
+            result.created += 1
+        if not raw_cap:
+            blanks.append(name)
 
-    # Spacing / casing duplicates are reported as structured conflicts so the
-    # import result panel can offer an interactive, user-confirmed fix for each
-    # one (choose the official name → merge). Detection runs against the
-    # post-import venue table so clashes with pre-existing rows surface too.
+    for note in fold_formatting_duplicates():
+        _remember_note(result, note)
+
+    # A blank capacity is still reported, but only when the room we kept has
+    # no capacity. A second spelling that already stated one fills it in.
+    for raw_name in blanks:
+        venue = venue_by_formatting(raw_name)
+        label = venue.name if venue is not None else raw_name
+        if venue is not None and (venue.capacity or 0) > 0:
+            continue
+        if label not in result.venue_capacity_issues:
+            result.venue_capacity_issues.append(label)
+
+    # Anything left that is only a spacing or casing pair was merged above.
+    # detect_name_conflicts stays for a genuine leftover the merge could not
+    # fold; a pure formatting difference does not reach the chooser.
     result.venue_conflicts = detect_name_conflicts(
         Venue.objects.all().values_list("name", flat=True)
     )
@@ -918,47 +960,42 @@ def import_venues_from_excel(path: str | Path) -> ImportResult:
 
 
 def _resolve_venue(venue_raw: str, dry_run: bool = False) -> tuple[Venue, str, int]:
-    """Smart venue resolution for master timetable imports.
-    
+    """Resolve one venue name for a master-timetable session.
+
     Returns (venue, action, capacity) where action is:
-    - "exact": exact name match found
-    - "matched": smart match via base_key with name/capacity update
-    - "created": no match found, new venue created with capacity 0
+    - "exact": the stored name matches
+    - "matched": the same room, ignoring spaces and capitals, already exists
+    - "created": no match, so a new venue is created with capacity 0
+    - "skipped": the cell is empty or still a comma-separated list
+
+    An existing venue keeps its name. A list such as ``P 008, PB 06, S112``
+    is never stored as a venue; the caller picks one room before this runs.
     """
-    venue_raw = venue_raw.strip()
-    if not venue_raw:
+    venue_raw = (venue_raw or "").strip()
+    if not venue_raw or "," in venue_raw:
         return None, "skipped", 0
-    
-    # Try exact match first
+
     venue = Venue.objects.filter(name=venue_raw).first()
     if venue:
         return venue, "exact", venue.capacity or 0
-    
-    # Try smart match via base_key
+
+    match = venue_by_formatting(venue_raw)
+    if match is not None:
+        return match, "matched", match.capacity or 0
+
     raw_key = base_key(venue_raw)
-    if raw_key:
-        # Find all venues with matching base_key
-        existing_venues = Venue.objects.all()
-        for v in existing_venues:
-            if base_key(v.name) == raw_key:
-                # Smart match found - determine better name and capacity
-                better_name = venue_raw if len(venue_raw) > len(v.name) else v.name
-                better_capacity = v.capacity if v.capacity > 0 else 0
-                
-                if not dry_run:
-                    # Update the venue with better name and capacity
-                    v.name = better_name
-                    v.capacity = better_capacity
-                    v.save()
-                
-                return v, "matched", better_capacity
-    
-    # No match found - create new venue with capacity 0
+    if raw_key and "," not in raw_key:
+        for existing in Venue.objects.all():
+            if "," in existing.name:
+                continue
+            if base_key(existing.name) == raw_key:
+                return existing, "matched", existing.capacity or 0
+
     if not dry_run:
-        venue, _ = Venue.objects.get_or_create(name=venue_raw, defaults={"capacity": 0})
+        venue, _ = Venue.objects.get_or_create(
+            name=venue_raw, defaults={"capacity": 0}
+        )
         return venue, "created", 0
-    
-    # Dry run - return None but indicate it would be created
     return None, "created", 0
 
 
@@ -1029,6 +1066,252 @@ def _missing_columns(df, required, aliases) -> list[str]:
     ]
 
 
+def _remember_note(result, note):
+    if note and note not in result.notes:
+        result.notes.append(note)
+
+
+def _choose_session_venue(venue_raw, course_code, activity_raw):
+    """Pick the one room a master-timetable cell is actually using.
+
+    A comma-separated cell is a list of rooms, never a venue name, so nothing
+    called ``P 008, PB 06, S112`` is created. An ME101 tutorial whose list
+    includes S112 (any spacing or capitals) is that room. Any other list uses
+    a listed room only when exactly one of them already exists.
+    """
+    text = str(venue_raw or "").strip()
+    if not text or text.lower() in {"nan", "none"}:
+        return "", ""
+    if "," not in text:
+        existing = venue_by_formatting(text)
+        if existing is None or existing.name == text:
+            return text, ""
+        return existing.name, f"{text} is the same venue as {existing.name}."
+
+    parts = [part.strip() for part in text.split(",") if part.strip()]
+    me101_tutorial = (
+        normalise_course_code(course_code) == "ME101"
+        and normalise_activity_type(activity_raw) == ActivityType.TUTORIAL
+    )
+    if me101_tutorial and any(formatting_key(part) == "s112" for part in parts):
+        existing = venue_by_formatting("S112")
+        chosen = existing.name if existing is not None else "S112"
+        return chosen, f"{text} for ME101 tutorial was taken as {chosen}."
+
+    matches = []
+    seen = set()
+    for part in parts:
+        existing = venue_by_formatting(part)
+        if existing is not None and existing.pk not in seen:
+            seen.add(existing.pk)
+            matches.append(existing)
+    if len(matches) == 1:
+        return matches[0].name, f"{text} was taken as {matches[0].name}."
+    if len(matches) > 1:
+        names = ", ".join(venue.name for venue in matches)
+        return "", (
+            f"{text} lists several venues ({names}) and was not stored as one venue."
+        )
+    return "", f"{text} is a list of rooms and was not created as a venue."
+
+
+def _programmes_for_course_codes():
+    """``{canonical course code: {programme code, ...}}``.
+
+    Stored codes are matched through :func:`normalise_course_code`, so a
+    programme link saved as ``DS114(COET)`` is found from a timetable cell
+    written ``DS114`` or ``DS 114 (COET)``.
+    """
+    found = {}
+    for code, programme in ProgrammeCourse.objects.values_list(
+        "course_code", "programme__code"
+    ):
+        key = normalise_course_code(code)
+        if not key:
+            continue
+        found.setdefault(key, set()).add(programme)
+    return found
+
+
+def _programme_ids_for_course_codes():
+    """``{canonical course code: {programme pk, ...}}`` for lecture linking."""
+    found = {}
+    for code, programme_id in ProgrammeCourse.objects.values_list(
+        "course_code", "programme_id"
+    ):
+        key = normalise_course_code(code)
+        if not key:
+            continue
+        found.setdefault(key, set()).add(programme_id)
+    return found
+
+
+def _note_course_spelling(result, raw, canonical):
+    """Record that a spaced, padded or ``(COET)`` code was recognised."""
+    shown = " ".join(str(raw or "").split()).upper()
+    if not shown or shown == canonical:
+        return
+    _remember_note(result, f"{shown} is the same course as {canonical}.")
+
+
+def _spans_four_hours(start, end) -> bool:
+    """True when a session covers four hour-slots.
+
+    A master-timetable period ends at :55, so ``09:00-12:55`` is four hours
+    (09, 10, 11 and 12) — the same block as ``09:00-13:00``.
+    """
+    if start is None or end is None or end <= start:
+        return False
+    return (
+        sum(
+            1
+            for hour in range(0, 23)
+            if start < time(hour + 1, 0) and end > time(hour, 0)
+        )
+        == 4
+    )
+
+
+_FOUR_HOUR_WORKSHOP_NOTE = (
+    "Sessions of four hours were stored as Workshop, at venue Workshop."
+)
+_ARCHITECTURE_STUDIO_NOTE = (
+    "Four-hour architecture studios kept their own course and venue."
+)
+
+
+def _architecture_course_prefixes():
+    """Prefixes of an architecture programme's own courses.
+
+    Bachelor of Architecture is stored as programme ``AR``, and its own
+    courses are written ``AR111``, ``AR121`` and so on. A course the
+    architecture students also take (``CL111``, ``DS114``, ``TW107``) does
+    not start with that code, so it is not one of these studios.
+
+    When the programme list has not been imported yet, ``AR`` is still the
+    faculty's code for those courses.
+    """
+    prefixes = set()
+    for code, name in Programme.objects.values_list("code", "name"):
+        if "architect" not in f"{code} {name}".casefold():
+            continue
+        prefix = normalise_course_code(code)
+        if len(prefix) >= 2:
+            prefixes.add(prefix)
+    if not prefixes:
+        prefixes.add("AR")
+    return prefixes
+
+
+def _is_architecture_course(course_code) -> bool:
+    """True when ``course_code`` is an architecture programme's own course."""
+    code = normalise_course_code(course_code)
+    if not code:
+        return False
+    return any(code.startswith(prefix) for prefix in _architecture_course_prefixes())
+
+
+def _mark_four_hour_workshop(rec) -> bool:
+    """Store a four-hour master-timetable block as a workshop.
+
+    The course is saved as ``WORKSHOP`` and the venue as ``Workshop``,
+    whatever the sheet wrote in those cells. The clock times and the groups
+    stay as imported. ``sheet_course_code`` keeps the original code so an
+    ``ALL`` group list still expands through the course the row named.
+
+    An architecture studio is the exception. ``AR111`` lasting four hours stays
+    that studio, in its own room, so the row is left as imported.
+    """
+    if rec.get("four_hour_workshop"):
+        return True
+    if not _spans_four_hours(rec.get("start_time"), rec.get("end_time")):
+        return False
+    if _is_architecture_course(rec.get("course_code")):
+        rec["architecture_studio"] = True
+        return False
+    rec["sheet_course_code"] = rec["course_code"]
+    rec["sheet_activity_type"] = rec["activity_type"]
+    rec["course_code"] = "WORKSHOP"
+    rec["activity_type"] = ActivityType.WORKSHOP
+    rec["venue_raw"] = "Workshop"
+    rec["venue_note"] = ""
+    rec["four_hour_workshop"] = True
+    return True
+
+
+def _note_four_hour_workshop(result, rec):
+    """Record which four-hour rule the row fell under."""
+    if _mark_four_hour_workshop(rec):
+        _remember_note(result, _FOUR_HOUR_WORKSHOP_NOTE)
+        return True
+    if rec.get("architecture_studio"):
+        _remember_note(result, _ARCHITECTURE_STUDIO_NOTE)
+    return False
+
+
+def _locate_master_session(basis, earlier=None):
+    """The session this row should write, or None when it is new.
+
+    Matches the stored row, the same slot under another spelling of the
+    course, or — when a four-hour block was rewritten as a workshop — the
+    session previously imported from the sheet's own course and activity.
+    """
+    canonical = basis["course_code"]
+    existing = Session.objects.filter(**basis).first()
+    if existing is not None:
+        return existing
+    slot = {key: value for key, value in basis.items() if key != "course_code"}
+    for session in Session.objects.filter(**slot):
+        if normalise_course_code(session.course_code) == canonical:
+            return session
+    if not earlier:
+        return None
+    sheet_code = normalise_course_code(earlier.get("course_code"))
+    sheet_activity = earlier.get("activity_type") or ""
+    if not sheet_code or not sheet_activity:
+        return None
+    for session in Session.objects.filter(
+        semester=basis["semester"],
+        day=basis["day"],
+        start_time=basis["start_time"],
+        end_time=basis["end_time"],
+        activity_type=sheet_activity,
+    ):
+        if normalise_course_code(session.course_code) == sheet_code:
+            return session
+    return None
+
+
+def _get_or_create_master_session(basis, earlier=None):
+    """Find the session for this slot, including one stored under another spelling.
+
+    ``DS 114 (COET)``, ``DS114(COET)`` and ``DS114`` are one session. A row
+    that arrives under another spelling updates the stored code to the plain
+    code instead of creating a second session. A four-hour block that used to
+    be stored under the sheet's own course and activity is updated in place,
+    so re-importing it does not leave the old row beside the workshop.
+    """
+    canonical = basis["course_code"]
+    session = _locate_master_session(basis, earlier)
+    if session is None:
+        return Session.objects.create(**basis), True
+    changed = []
+    if session.course_code != canonical:
+        session.course_code = canonical
+        changed.append("course_code")
+    if session.activity_type != basis["activity_type"]:
+        session.activity_type = basis["activity_type"]
+        changed.append("activity_type")
+    venue = basis["venue"]
+    venue_id = venue.pk if venue is not None else None
+    if session.venue_id != venue_id:
+        session.venue = venue
+        changed.append("venue")
+    if changed:
+        session.save(update_fields=changed)
+    return session, False
+
+
 def _read_master_rows(df) -> list[dict]:
     venue_col = _match_col(df, *MASTER_COLUMN_ALIASES["venue"])
     code_col = _match_col(df, *MASTER_COLUMN_ALIASES["course_code"])
@@ -1046,17 +1329,20 @@ def _read_master_rows(df) -> list[dict]:
         else:
             venue_raw = str(venue_val).strip()
         raw_code = str(row.get(code_col, "")).strip() if code_col else ""
-        # Comma-separated course codes are split into one session per code; the
-        # venue cell is kept verbatim (a multi-room row stays a single session).
+        # Comma-separated course codes are split into one session per code.
+        # A comma-separated venue cell is a list of rooms, resolved to one.
         codes = _split_csv(raw_code) if "," in raw_code else ([raw_code] if raw_code else [])
+        activity_raw = str(row.get(act_col, "") if act_col else "").strip()
         for code in codes:
+            chosen_venue, venue_note = _choose_session_venue(
+                venue_raw, normalise_course_code(code), activity_raw
+            )
             rows.append(
                 {
                     "row_no": idx + 2,
-                    "course_code": code,
-                    "activity_raw": str(
-                        row.get(act_col, "") if act_col else ""
-                    ).strip(),
+                    "course_code_raw": code,
+                    "course_code": normalise_course_code(code),
+                    "activity_raw": activity_raw,
                     "activity_type": None,
                     "day_raw": str(
                         row.get(day_col, "") if day_col else ""
@@ -1070,7 +1356,8 @@ def _read_master_rows(df) -> list[dict]:
                     ).strip(),
                     "start_time": None,
                     "end_time": None,
-                    "venue_raw": venue_raw,
+                    "venue_raw": chosen_venue,
+                    "venue_note": venue_note,
                     "raw_groups": str(
                         row.get(group_col, "") if group_col else ""
                     ).strip(),
@@ -1090,6 +1377,7 @@ def _validate_master_rows(df, result) -> list[dict]:
             result.errors.append(f"Row {rec['row_no']}: missing course_code, skipped")
             result.skipped += 1
             continue
+        _note_course_spelling(result, rec.get("course_code_raw"), rec["course_code"])
         rec["activity_type"] = normalise_activity_type(rec["activity_raw"])
         try:
             rec["day"] = normalise_day(rec["day_raw"])
@@ -1115,12 +1403,15 @@ def _validate_master_rows(df, result) -> list[dict]:
                 result.errors.append(f"Row {rec['row_no']}: {issue}")
                 result.skipped += 1
                 continue
+        _note_four_hour_workshop(result, rec)
         if rec["raw_groups"].upper() != "ALL":
             rec["group_codes"] = [
                 g.strip()
                 for g in rec["raw_groups"].split(",")
                 if g.strip() and g.strip().upper() != "ALL"
             ]
+        if rec.get("venue_note"):
+            _remember_note(result, rec["venue_note"])
         valid.append(rec)
     return valid
 
@@ -1151,22 +1442,17 @@ def _reconcile_master(df, semester_id) -> ImportResult:
 
     rows = _validate_master_rows(df, result)
 
-    codes = sorted({r["course_code"] for r in rows})
-    known = set(
-        ProgrammeCourse.objects.filter(course_code__in=codes).values_list(
-            "course_code", flat=True
-        )
+    known = _programmes_for_course_codes()
+    codes = sorted({r["course_code"] for r in rows if r["course_code"]})
+    # A four-hour block is stored as WORKSHOP on purpose. That name is not a
+    # course the workbook forgot to list.
+    placeholder = any(r.get("four_hour_workshop") for r in rows)
+    result.matched_courses = sorted(code for code in codes if code in known)
+    result.missing_courses = sorted(
+        code
+        for code in codes
+        if code not in known and not (placeholder and code == "WORKSHOP")
     )
-    result.matched_courses = sorted(known)
-    result.missing_courses = sorted(set(codes) - known)
-
-    prog_map = {}
-    for code in codes:
-        prog_map[code] = sorted(
-            ProgrammeCourse.objects.filter(course_code=code).values_list(
-                "programme__code", flat=True
-            )
-        )
 
     venue_req = {
         r["venue_raw"] for r in rows if r["venue_raw"].lower() not in ("nan", "none")
@@ -1186,21 +1472,22 @@ def _reconcile_master(df, semester_id) -> ImportResult:
 
     for rec in rows:
         if rec["raw_groups"].upper() == "ALL":
-            progs = prog_map.get(rec["course_code"], [])
+            link_code = rec.get("sheet_course_code") or rec["course_code"]
+            progs = sorted(known.get(link_code, ()))
             groups = StudentGroup.objects.filter(
                 programme__code__in=progs
             ).select_related("programme")
             if not progs:
                 rec["conflict"] = True
                 result.conflicts.append(
-                    f"Row {rec['row_no']}: course '{rec['course_code']}' uses "
+                    f"Row {rec['row_no']}: course '{link_code}' uses "
                     f"'ALL' but has no ProgrammeCourse mapping — groups cannot "
                     f"be expanded"
                 )
                 continue
             rec["expanded_groups"] = list(groups)
             result.all_rows.append(
-                f"Row {rec['row_no']}: ALL for {rec['course_code']} expanded to "
+                f"Row {rec['row_no']}: ALL for {link_code} expanded to "
                 f"{len(groups)} student group(s) across {', '.join(progs)}"
             )
         elif rec["group_codes"]:
@@ -1237,12 +1524,9 @@ def assign_lecture_groups(semester=None):
     created = 0
     existing = 0
     skipped = set()
+    programmes = _programme_ids_for_course_codes()
     for session in sessions:
-        prog_ids = list(
-            ProgrammeCourse.objects.filter(
-                course_code=session.course_code
-            ).values_list("programme_id", flat=True)
-        )
+        prog_ids = programmes.get(normalise_course_code(session.course_code), ())
         if not prog_ids:
             skipped.add(session.course_code)
             continue
@@ -1312,6 +1596,10 @@ def import_master_timetable_from_excel(
         except (ValueError, TypeError):
             continue
         activity_type = normalise_activity_type(rec["activity_raw"])
+        rec["activity_type"] = activity_type
+        rec["start_time"] = start_time
+        rec["end_time"] = end_time
+        rec["day"] = day
         if activity_type == ActivityType.WORKSHOP:
             issue = workshop_time_issue(
                 day,
@@ -1322,6 +1610,9 @@ def import_master_timetable_from_excel(
             if issue:
                 # Reported and counted as skipped in the validate pass.
                 continue
+        if _note_four_hour_workshop(result, rec):
+            course_code = rec["course_code"]
+            activity_type = rec["activity_type"]
 
         venue_raw = rec["venue_raw"]
         if not venue_raw:
@@ -1344,25 +1635,30 @@ def import_master_timetable_from_excel(
             "end_time": end_time,
             "venue": venue,
         }
+        earlier = None
+        if rec.get("four_hour_workshop"):
+            earlier = {
+                "course_code": rec.get("sheet_course_code"),
+                "activity_type": rec.get("sheet_activity_type"),
+            }
         if dry_run:
-            exists = Session.objects.filter(**basis).exists()
+            exists = _locate_master_session(basis, earlier) is not None
             result.created += int(not exists)
             result.updated += int(exists)
             continue
 
-        session, created = Session.objects.get_or_create(**basis)
+        session, created = _get_or_create_master_session(basis, earlier)
         if created:
             result.created += 1
         else:
             result.updated += 1
 
         raw_groups = rec["raw_groups"]
+        link_code = rec.get("sheet_course_code") or course_code
 
         if raw_groups.upper() == "ALL":
-            progs = list(
-                ProgrammeCourse.objects.filter(course_code=course_code).values_list(
-                    "programme__code", flat=True
-                )
+            progs = sorted(
+                _programmes_for_course_codes().get(link_code, ())
             )
             if not progs:
                 # Unresolvable: reported as a conflict in the reconcile pass.

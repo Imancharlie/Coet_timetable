@@ -197,6 +197,7 @@ class AllocationRunAdmin(admin.ModelAdmin):
     )
     list_display_links = ("id",)
     list_filter = ("semester", "scope", "status")
+    exclude = ("algorithm",)
     search_fields = ("semester__academic_year",)
     readonly_fields = ("created_at", "applied_at", "reverted_at", "summary")
     inlines = [AllocationChangeInline]
