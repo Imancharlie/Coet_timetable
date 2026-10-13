@@ -153,6 +153,20 @@
     </div>
     {% endif %}
 
+    {% if result.notes %}
+    <div class="bg-white rounded-xl shadow-sm border border-sky-200 overflow-hidden">
+        <div class="px-4 py-3 border-b border-sky-100 bg-sky-50">
+            <h4 class="text-sm font-semibold text-sky-900">Recognised automatically ({{ result.notes|length }})</h4>
+            <p class="text-xs text-sky-800 mt-0.5">These were recognised automatically. Nothing needs fixing.</p>
+        </div>
+        <ul class="divide-y divide-sky-100">
+            {% for note in result.notes %}
+            <li class="px-4 py-2 text-sm text-sky-900">{{ note }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+
     {% if result.requirements_column %}
     <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
         <div class="px-4 py-3 border-b border-gray-100 bg-gray-50">

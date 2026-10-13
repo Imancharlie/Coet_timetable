@@ -23,15 +23,19 @@ ALLOCATED_ACTIVITY_TYPES = (
 
 
 def normalise_course_code(value) -> str:
-    """Canonical form of a course code: trimmed, internal whitespace collapsed.
+    """Canonical course code: upper case, spaces removed, trailing ``(COET)`` dropped.
 
-    Course codes arrive from Excel with stray casing and padding (" mt161 ",
-    "MT161"). Every code comparison in the shared-course model and in the
-    group allocator goes through this one function so a code typed three
-    different ways still names the same course. Sessions keep storing their
-    own text ``course_code`` and are matched to a ``Course`` with this.
+    ``DS114``, ``DS114(coet)`` and ``DS 114 (COET)`` are one course, stored as
+    ``DS114``. The same applies to ``DS115``. Spacing and capitals are not a
+    different code, and the ``(COET)`` mark on the master timetable is the
+    same course written out in full. Every comparison — the shared ``Course``,
+    programme links, the allocator and the master-timetable import — goes
+    through this function.
     """
-    return " ".join(str(value or "").strip().split()).upper()
+    code = "".join(str(value or "").split()).upper()
+    if code.endswith("(COET)"):
+        code = code[: -len("(COET)")]
+    return code
 
 
 class Day(models.TextChoices):
@@ -645,6 +649,17 @@ class AllocationRun(models.Model):
         max_length=20,
         choices=AllocationScope.choices,
         default=AllocationScope.ALL,
+    )
+    # The live database requires this column (migration 0009). The app has one
+    # allocator, so a preview always stores the default and does not offer a
+    # choice of algorithms.
+    algorithm = models.CharField(
+        max_length=20,
+        choices=[
+            ("smart", "Smart (Min-Conflicts)"),
+            ("advanced", "Advanced (OR-Tools)"),
+        ],
+        default="smart",
     )
     status = models.CharField(
         max_length=20,

@@ -6,6 +6,7 @@ from django.contrib.auth.views import LogoutView
 from student_portal.auth import StaffLoginView
 
 urlpatterns = [
+    path("api/", include("api.urls")),
     path("admin/", admin.site.urls),
     path("staff/login/", StaffLoginView.as_view(), name="staff-login"),
     path("staff/logout/", LogoutView.as_view(), name="staff-logout"),

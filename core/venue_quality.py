@@ -63,6 +63,26 @@ def issues_for(name: str) -> list:
     return list(dict.fromkeys(issues))
 
 
+def official_formatting_name(names) -> str:
+    """The one name to keep when spellings differ only by spaces or capitals.
+
+    A room code collapses to its compact form (``PB 06`` and ``pb06`` become
+    ``PB06``). A longer name keeps its words and prefers the spelling that
+    already uses capitals.
+    """
+    texts = []
+    for name in names:
+        text = collapse_ws(name)
+        if text:
+            texts.append(text)
+    if not texts:
+        return ""
+    compact = "".join(texts[0].split()).upper()
+    if _CODELIKE_RE.match(compact):
+        return compact
+    return sorted(texts, key=lambda text: (text == text.lower(), text.lower(), text))[0]
+
+
 def suggested_name(name: str, key: str | None = None) -> str:
     """Return the cleaned name that a human should probably adopt.
 
@@ -125,6 +145,22 @@ def _format_key(name: str) -> str:
     duplicates, not pure formatting variants).
     """
     return "".join(str(name).lower().split())
+
+
+def formatting_key(name: str) -> str:
+    """Public spacing-and-case key. Different words stay different venues."""
+    return _format_key(name)
+
+
+def kept_capacity(current, incoming) -> int:
+    """Keep a known capacity. A blank (0) never wipes one, and the higher wins."""
+    current = current or 0
+    incoming = incoming or 0
+    if current <= 0:
+        return incoming
+    if incoming <= 0:
+        return current
+    return max(current, incoming)
 
 
 def conflict_reasons(a: str, b: str) -> list:
@@ -208,11 +244,89 @@ def merge_venues(source, target):
     TechnicalDrawingAllocation.objects.filter(venue=source.name).update(
         venue=target.name
     )
-    if (target.capacity or 0) <= 0 and (source.capacity or 0) > 0:
-        target.capacity = source.capacity
+    best = kept_capacity(target.capacity, source.capacity)
+    if best != (target.capacity or 0):
+        target.capacity = best
         target.save(update_fields=["capacity"])
     source.delete()
     return target
+
+
+def venue_by_formatting(name: str):
+    """The venue whose name matches ``name`` once spaces and capitals are ignored.
+
+    When several rows are the same room, the compact code is preferred so a
+    later merge updates that row.
+    """
+    from .models import Venue
+
+    key = _format_key(name)
+    if not key:
+        return None
+    matches = [venue for venue in Venue.objects.all() if _format_key(venue.name) == key]
+    if not matches:
+        return None
+    official = official_formatting_name([venue.name for venue in matches])
+    for venue in matches:
+        if venue.name == official:
+            return venue
+    return matches[0]
+
+
+def adopt_official_name(venue, official: str):
+    """Rename ``venue`` to ``official``, folding into that row when it exists.
+
+    Workshop and technical-drawing rows store the venue as text, so those
+    strings move with the name. Session rows point at the venue itself.
+    """
+    from .models import TechnicalDrawingAllocation, Venue, WorkshopAllocation
+
+    official = str(official or "").strip()
+    if not official or venue.name == official:
+        return venue
+    other = Venue.objects.filter(name=official).exclude(pk=venue.pk).first()
+    if other is not None:
+        return merge_venues(venue, other)
+    old = venue.name
+    venue.name = official
+    venue.save(update_fields=["name"])
+    WorkshopAllocation.objects.filter(venue=old).update(venue=official)
+    TechnicalDrawingAllocation.objects.filter(venue=old).update(venue=official)
+    return venue
+
+
+def fold_formatting_duplicates() -> list:
+    """Merge venues that differ only by spaces or capitals. Return the notes."""
+    from .models import Venue
+
+    notes = []
+    groups = {}
+    for venue in list(Venue.objects.all()):
+        groups.setdefault(_format_key(venue.name), []).append(venue)
+    for key, venues in groups.items():
+        if not key or len(venues) < 2:
+            continue
+        official = official_formatting_name([venue.name for venue in venues])
+        target = next((venue for venue in venues if venue.name == official), None)
+        if target is None:
+            target = adopt_official_name(venues[0], official)
+        best = 0
+        for venue in venues:
+            best = kept_capacity(best, venue.capacity)
+        if (target.capacity or 0) != best:
+            target.capacity = best
+            target.save(update_fields=["capacity"])
+        for venue in list(venues):
+            if venue.pk == target.pk:
+                continue
+            try:
+                venue.refresh_from_db()
+            except Venue.DoesNotExist:
+                continue
+            if venue.name != target.name:
+                notes.append(f"{venue.name} is the same venue as {target.name}.")
+            merge_venues(venue, target)
+    return notes
 
 
 def resolve_venue_name_conflict(key: str, official: str):
