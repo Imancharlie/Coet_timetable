@@ -68,7 +68,6 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'core',
     'allocation',
-    'audit',
     'student_portal',
     'api',
 ]
@@ -152,7 +151,6 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
 STATIC_URL = 'static/'
-MEDIA_ROOT = BASE_DIR / "media"
 STATICFILES_DIRS = [BASE_DIR / 'static']
 
 # Default primary key field type
