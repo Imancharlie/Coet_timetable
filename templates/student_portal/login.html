@@ -1,6 +1,6 @@
 {% extends "student_portal/base.html" %}
 {% block title %}Staff Sign In · CoET{% endblock %}
-{% block content %}<section class="card sign-in-card" style="max-width:30rem;margin:2vh auto">
+{% block content %}<section class="card sign-in-card" style="max-width:35rem;margin: 4vh auto 2vh; padding: 2rem;">
     <h1>Staff sign in</h1>
     {% if request.GET.expired %}<div class="notice" role="status">You were signed out after a period of inactivity. Please sign in again.</div>{% endif %}
     {% if form.non_field_errors %}<div class="error" role="alert">Username or password is incorrect. Try again.</div>{% endif %}
@@ -33,5 +33,6 @@
         });
     })();
     </script>
-    <p style="margin:1rem 0 0;text-align:center;font-size:.85rem"><a href="/">Return to student portal</a></p>
+    <p style="margin:1rem auto 0;text-align:center;font-size:.85rem"><a href="{% url 'password_reset' %}">Forgot password?</a></p>
+    <p style="margin:.4rem 0 0;text-align:center;font-size:.85rem"><a href="/">Return to student portal</a></p>
 </section>{% endblock %}

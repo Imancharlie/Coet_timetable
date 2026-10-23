@@ -45,6 +45,11 @@ urlpatterns = [
         views.semester_set_current,
         name="semester-set-current",
     ),
+    path(
+        "semesters/<int:pk>/published/",
+        views.semester_set_published,
+        name="semester-set-published",
+    ),
     path("semesters/<int:pk>/edit/", views.semester_edit, name="semester-edit"),
     path("semesters/<int:pk>/delete/", views.semester_delete, name="semester-delete"),
     # Sessions (Master Timetable)

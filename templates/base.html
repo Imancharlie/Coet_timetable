@@ -25,6 +25,9 @@
     <meta name="apple-mobile-web-app-title" content="CoET Timetable">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="format-detection" content="telephone=no">
+    <link rel="icon" type="image/png" sizes="32x32" href="{% static 'assets/coet_icon.png' %}">
+    <link rel="apple-touch-icon" href="{% static 'assets/coet_icon.png' %}">
+    <link rel="icon" type="image/x-icon" href="{% static 'assets/coet_icon.png' %}">
     <title>{% block title %}{{ page_title|default:"CoET Timetable" }}{% endblock %} — CoET Timetable</title>
     <script>
         // Apply the persisted sidebar collapse state before the first paint so

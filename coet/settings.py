@@ -24,7 +24,25 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = 'django-insecure-g3p@&5=erpv-+2i#0xs$+tu5l+i&##j*gwukeoznqf*prr0xy7'
-SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', SECRET_KEY)
+# Mail. With no credentials Django prints messages to the console, which is
+# what local development wants. Set DJANGO_EMAIL_HOST_USER and
+# DJANGO_EMAIL_HOST_PASSWORD (a Gmail app password, spaces ignored) and the
+# SMTP backend is used instead, so a password reset actually leaves the server.
+# The From address has to be the same mailbox Gmail authenticated, or Gmail
+# refuses the message.
+EMAIL_HOST = os.environ.get("DJANGO_EMAIL_HOST", "smtp.gmail.com")
+EMAIL_PORT = int(os.environ.get("DJANGO_EMAIL_PORT", "587"))
+EMAIL_USE_TLS = os.environ.get("DJANGO_EMAIL_USE_TLS", "true").strip().lower() in {"1", "true", "yes"}
+EMAIL_HOST_USER = os.environ.get("DJANGO_EMAIL_HOST_USER", "").strip()
+EMAIL_HOST_PASSWORD = os.environ.get("DJANGO_EMAIL_HOST_PASSWORD", "").replace(" ", "")
+DEFAULT_FROM_EMAIL = os.environ.get("DJANGO_DEFAULT_FROM_EMAIL", EMAIL_HOST_USER or "webmaster@localhost")
+SERVER_EMAIL = DEFAULT_FROM_EMAIL
+if os.environ.get("DJANGO_EMAIL_BACKEND"):
+    EMAIL_BACKEND = os.environ["DJANGO_EMAIL_BACKEND"]
+elif EMAIL_HOST_USER and EMAIL_HOST_PASSWORD:
+    EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+else:
+    EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.environ.get('DJANGO_DEBUG', 'True').strip().lower() in {'1', 'true', 'yes'}

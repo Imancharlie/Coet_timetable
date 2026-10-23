@@ -1,0 +1,51 @@
+{% extends "student_portal/base.html" %}
+{% block content %}
+<style>
+    .button[aria-disabled="true"] { opacity: .55; cursor: not-allowed; }
+    #unpublished-dialog::backdrop { background: rgba(15, 23, 42, .5); }
+</style>
+
+<main class="mx-auto max-w-7xl py-12">
+    <div class="max-w-md mx-auto text-center">
+
+        <dialog id="unpublished-dialog" aria-labelledby="unpublished-title"
+                style="border:0;border-radius:1rem;padding:1.5rem;max-width:24rem;box-shadow:0 20px 40px rgba(0,0,0,.25)">
+            <h2 id="unpublished-title" style="margin:0 0 .5rem;font-size:1.125rem">Timetable not published yet</h2>
+            <p style="margin:0 0 1rem">The timetable for this semester hasn't been published yet. Please check back later or contact your coordinator.</p>
+            <form method="dialog"><button class="button" type="submit">OK</button></form>
+        </dialog>
+
+        <!-- The button MUST live inside a real form, otherwise it has nothing to submit -->
+        <form id="download-form" method="get" action="{% url 'student-timetable-pdf' %}">
+            {# Pass along whatever the PDF view needs (scope, programme, group, year...) #}
+            {% for key, value in request.GET.items %}
+                {% if key != "semester" %}<input type="hidden" name="{{ key }}" value="{{ value }}">{% endif %}
+            {% endfor %}
+            <input type="hidden" name="semester" value="{{ semester.pk }}">
+
+            <button id="download-button" class="button mt-4" type="submit"
+                    {% if not semester.is_published %}aria-disabled="true"{% endif %}>Download PDF</button>
+        </form>
+
+    </div>
+</main>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    const isPublished = {{ semester.is_published|yesno:"true,false" }};
+    const form = document.getElementById('download-form');
+    const dialog = document.getElementById('unpublished-dialog');
+
+    form.addEventListener('submit', event => {
+        if (!isPublished) {
+            event.preventDefault();
+            if (dialog && typeof dialog.showModal === 'function') {
+                dialog.showModal();
+            } else {
+                alert("The timetable for this semester hasn't been published yet.");
+            }
+        }
+    });
+});
+</script>
+{% endblock %}

@@ -5,13 +5,36 @@
 
     <header class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <h1 class="text-2xl font-bold text-slate-900">Dashboard</h1>
-        <form method="get" class="flex w-full gap-2 sm:w-auto">
-            <label for="semester" class="sr-only">Semester</label>
-            <select id="semester" name="semester" class="min-h-11 min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-3 text-sm sm:flex-none">
-                {% for term in semesters %}<option value="{{ term.pk }}" {% if selected_semester.pk == term.pk %}selected{% endif %}>{{ term }}</option>{% endfor %}
-            </select>
-            <button class="min-h-11 rounded-lg bg-slate-800 px-4 text-sm font-semibold text-white">View</button>
-        </form>
+
+        <div class="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:flex-nowrap sm:gap-3">
+            <form method="get" class="flex min-w-0 flex-1 gap-2 sm:flex-none">
+                <label for="semester" class="sr-only">Semester</label>
+                <select id="semester" name="semester" class="min-h-11 min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-3 text-sm sm:flex-none">
+                    {% for term in semesters %}<option value="{{ term.pk }}" {% if selected_semester.pk == term.pk %}selected{% endif %}>{{ term }}</option>{% endfor %}
+                </select>
+                <button class="min-h-11 rounded-lg bg-slate-800 px-4 text-sm font-semibold text-white">View</button>
+            </form>
+
+            {% if selected_semester %}
+            <button type="button"
+                    id="publish-toggle"
+                    class="publish-toggle"
+                    role="switch"
+                    aria-checked="{% if selected_semester.is_published %}true{% else %}false{% endif %}"
+                    aria-label="Timetable visibility"
+                    title="Click to {% if selected_semester.is_published %}unpublish{% else %}publish{% endif %} this semester's timetable"
+                    hx-post="{% url 'semester-set-published' selected_semester.pk %}"
+                    hx-swap="none"
+                    hx-disabled-elt="this">
+                <span class="publish-toggle__label" id="publish-toggle-label">
+                    {% if selected_semester.is_published %}Published{% else %}Not published{% endif %}
+                </span>
+                <span class="publish-toggle__track" aria-hidden="true">
+                    <span class="publish-toggle__knob"></span>
+                </span>
+            </button>
+            {% endif %}
+        </div>
     </header>
 
     {% if not selected_semester %}<div class="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">No semester set up.</div>{% endif %}
@@ -67,4 +90,59 @@
         </div>
     </section>
 </main>
+
+<style>
+    .publish-toggle {
+        display: inline-flex; align-items: center; gap: .75rem;
+        min-height: 2.75rem; padding: 0 .5rem 0 .875rem;
+        border-radius: 9999px; border: 1px solid #cbd5e1;
+        background: #f1f5f9; color: #475569;
+        font-size: .875rem; font-weight: 600; cursor: pointer;
+        transition: background-color .2s, border-color .2s, color .2s;
+    }
+    .publish-toggle:hover { filter: brightness(.97); }
+    .publish-toggle:focus-visible { outline: 2px solid #64748b; outline-offset: 2px; }
+    .publish-toggle:disabled { opacity: .7; cursor: wait; }
+
+    .publish-toggle__track {
+        position: relative; flex: none; width: 2.75rem; height: 1.5rem;
+        border-radius: 9999px; background: #94a3b8; transition: background-color .2s;
+    }
+    .publish-toggle__knob {
+        position: absolute; top: .125rem; left: .125rem;
+        width: 1.25rem; height: 1.25rem; border-radius: 9999px;
+        background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.3);
+        transition: transform .2s ease-in-out;
+    }
+
+    /* Published = green */
+    .publish-toggle[aria-checked="true"] { background: #dcfce7; border-color: #86efac; color: #166534; }
+    .publish-toggle[aria-checked="true"] .publish-toggle__track { background: #16a34a; }
+    .publish-toggle[aria-checked="true"] .publish-toggle__knob { transform: translateX(1.25rem); }
+</style>
+
+<script>
+(function () {
+    const btn = document.getElementById('publish-toggle');
+    if (!btn) return;
+    const label = document.getElementById('publish-toggle-label');
+
+    function render(on) {
+        btn.setAttribute('aria-checked', on ? 'true' : 'false');
+        label.textContent = on ? 'Published' : 'Not published';
+        btn.title = 'Click to ' + (on ? 'unpublish' : 'publish') + " this semester's timetable";
+    }
+
+    // Flip instantly on click, before the server answers
+    btn.addEventListener('htmx:beforeRequest', function () {
+        btn.dataset.previous = btn.getAttribute('aria-checked');
+        render(btn.getAttribute('aria-checked') !== 'true');
+    });
+
+    // If the request fails, put it back so the UI never lies
+    function revert() { render(btn.dataset.previous === 'true'); }
+    btn.addEventListener('htmx:responseError', revert);
+    btn.addEventListener('htmx:sendError', revert);
+})();
+</script>
 {% endblock %}

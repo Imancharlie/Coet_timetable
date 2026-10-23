@@ -70,6 +70,13 @@ class Semester(models.Model):
             "that holds data."
         ),
     )
+    is_published = models.BooleanField(
+        default=False,
+        help_text=(
+            "If checked, the timetable is visible and downloadable by students. "
+            "Uncheck to hide the timetable and show 'no timetable available' message."
+        ),
+    )
 
     class Meta:
         ordering = ["-academic_year", "-semester"]

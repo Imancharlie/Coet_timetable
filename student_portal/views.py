@@ -54,6 +54,14 @@ def student_timetable_pdf(request):
     semester = get_object_or_404(Semester, pk=semester_id) if semester_id else current_semester()
     if semester is None:
         return HttpResponseBadRequest("No semester has been configured yet.")
+    
+    # If the semester is not published, students cannot download the timetable
+    # but we show a friendly page instead of a raw error
+    if not semester.is_published:
+        return render(request, "student_portal/timetable_unpublished.html", {
+            "semester": semester,
+        })
+    
     try:
         year = max(1, min(4, int(request.GET.get("year", 1))))
     except (TypeError, ValueError):

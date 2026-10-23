@@ -790,22 +790,32 @@ def _render_grid(
     sub_style = ParagraphStyle(
         "sub", fontName="Helvetica", fontSize=9, alignment=TA_CENTER, leading=12
     )
+    # A printed group sheet is read at arm's length. 6.5pt sank into the grid;
+    # 9pt bold is large enough to read, and a day column still wraps a course
+    # line rather than letting it run through the border. The time column is
+    # measured from this size below, so "07:00-08:00" stays on one line.
+    cell_font, cell_leading = 9, 11
+    pad_x, pad_y = 2, 3
     head_style = ParagraphStyle(
         "head",
         fontName="Helvetica-Bold",
-        fontSize=8,
+        fontSize=10,
         alignment=TA_CENTER,
-        leading=10,
+        leading=12,
     )
     cell_style = ParagraphStyle(
-        "cell", fontName="Helvetica-Bold", fontSize=6.5, leading=8, alignment=TA_CENTER
+        "cell",
+        fontName="Helvetica-Bold",
+        fontSize=cell_font,
+        leading=cell_leading,
+        alignment=TA_CENTER,
     )
     time_style = ParagraphStyle(
         "time",
         fontName="Helvetica-Bold",
-        fontSize=6.5,
+        fontSize=cell_font,
         alignment=TA_CENTER,
-        leading=8,
+        leading=cell_leading,
     )
     empty_style = ParagraphStyle(
         "empty",
@@ -840,11 +850,32 @@ def _render_grid(
         )
         n_days = max(len(data[0]) - 1, 1) if data else 1
         usable = A4[0] - 22 * mm
-        time_w = 44
+        # Digits are equal width in Helvetica, so one sample covers every
+        # hour label. The extra 2pt is slack: a label that is even a fraction
+        # over the inner width wraps at the hyphen and spills out of the cell.
+        time_w = (
+            pdfmetrics.stringWidth("00:00-00:00", "Helvetica-Bold", cell_font)
+            + pad_x * 2
+            + 2
+        )
         day_w = (usable - time_w) / n_days
         widths = [time_w] + [day_w] * n_days
+        day_inner = day_w - pad_x * 2
+        # "WEDNESDAY" is the longest day name. On a crowded week it steps
+        # down to the cell size rather than wrapping out of the header.
+        grid_head = head_style
+        if (
+            pdfmetrics.stringWidth("WEDNESDAY", "Helvetica-Bold", head_style.fontSize)
+            > day_inner
+        ):
+            grid_head = ParagraphStyle(
+                "head-fit",
+                parent=head_style,
+                fontSize=cell_font,
+                leading=cell_leading,
+            )
 
-        table_data = [[Paragraph(item, head_style) for item in data[0]]]
+        table_data = [[Paragraph(item, grid_head) for item in data[0]]]
         for row in data[1:]:
             table_data.append(
                 [
@@ -859,6 +890,25 @@ def _render_grid(
                 ]
             )
 
+        span_rows = {
+            start: (end[1] - start[1] + 1) for start, end in spans
+        }
+        inner_time = time_w - pad_x * 2
+        # Tallest text in any one hour. A session that spans several hours
+        # shares that height across the rows it merges, so it asks for less
+        # per row than a one-hour cell with the same number of lines.
+        needed = pad_y * 2
+        for r, row in enumerate(table_data):
+            if r == 0:
+                continue
+            for c, cell in enumerate(row):
+                if not isinstance(cell, Paragraph):
+                    continue
+                width = inner_time if c == 0 else day_inner
+                _wrapped, height = cell.wrap(width, 10000)
+                rows = span_rows.get((c, r), 1)
+                needed = max(needed, (height + pad_y * 2) / rows)
+
         n_rows = len(data) - 1
         row_h = None
         if n_rows:
@@ -866,7 +916,15 @@ def _render_grid(
             footer_block = 6 * mm + 8
             usable_h = A4[1] - doc.topMargin - doc.bottomMargin
             avail = max(usable_h - title_block - footer_block, n_rows * 18)
+            # 42pt is the height a full day already used, so the rotation key
+            # still sits under the grid on the same page. Three lines of the
+            # 9pt face — a wrapped course name, then the venue or the time
+            # range — fit inside it (the inner height is 36pt, three lines
+            # are 33). A cell that needs more grows the row, so the text
+            # stays inside the border instead of painting over the hour below.
             row_h = min(avail / n_rows, 42)
+            if needed > row_h:
+                row_h = needed
 
         grid = Table(
             table_data,
@@ -880,10 +938,10 @@ def _render_grid(
             ("BACKGROUND", (0, 1), (0, -1), colors.HexColor("#f8fafc")),
             ("BACKGROUND", (1, 0), (-1, 0), colors.HexColor("#dce6f1")),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("TOPPADDING", (0, 0), (-1, -1), 3),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-            ("LEFTPADDING", (0, 0), (-1, -1), 2),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+            ("TOPPADDING", (0, 0), (-1, -1), pad_y),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), pad_y),
+            ("LEFTPADDING", (0, 0), (-1, -1), pad_x),
+            ("RIGHTPADDING", (0, 0), (-1, -1), pad_x),
         ]
         for start, end in spans:
             style.append(("SPAN", start, end))

@@ -972,6 +972,9 @@ def timetable_view(request):
     if active_semester is None:
         active_semester = _latest_semester_with_data()
 
+    # Check if the active semester is published for student access
+    published = active_semester is not None and active_semester.is_published
+
     year = 1
     raw_year = request.GET.get("year", "")
     if raw_year.strip().isdigit():
@@ -1010,6 +1013,7 @@ def timetable_view(request):
         "entry_count": len(entries),
         "show_all": show_all,
         "show_groups": (active_programme is not None and active_group is None) or show_all,
+        "published": published,
     }
     return render(request, "core/timetable.html", ctx)
 
@@ -1682,6 +1686,30 @@ def semester_set_current(request, pk):
             target=str(item),
         )
     return _write_response(request, "close-modal,refresh-table", "semester-list")
+
+
+def semester_set_published(request, pk):
+    """Toggle the published flag on a semester.
+
+    POST only. When ``is_published`` is True the timetable becomes visible
+    and downloadable by students; when False it is hidden and a
+    "no timetable available" message is shown instead.
+
+    Returns an HTMX-triggered response that refreshes the dashboard and
+    sends an ``allocation-toast`` so the coordinator gets feedback.
+    """
+    item = get_object_or_404(Semester, pk=pk)
+    if request.method != "POST":
+        return redirect("/semesters/")
+    item.is_published = not item.is_published
+    item.save(update_fields=["is_published"])
+    _log(
+        LogAction.UPDATE,
+        f"{'Published' if item.is_published else 'Unpublished'} semester timetable ({item})",
+        resource="Semester",
+        target=str(item),
+    )
+    return _write_response(request, "close-modal,refresh-table", "dashboard")
 
 
 def semester_detail(request, pk):

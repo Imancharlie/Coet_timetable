@@ -11,6 +11,10 @@ PUBLIC_PATHS = {
     "/student/timetable.pdf/",
     settings.LOGIN_URL,
     settings.LOGOUT_REDIRECT_URL,
+    "/staff/password-reset/",
+    "/staff/password-reset/done/",
+    "/staff/password-reset-confirm/",
+    "/staff/password-reset/complete/",
 }
 
 

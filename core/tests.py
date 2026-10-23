@@ -3907,6 +3907,49 @@ class GridExportFooterTests(TestCase):
         self.assertIn(_dt.date.today().strftime("%d %B %Y"), text)
         self.assertIn("(Page 1)", text)
 
+    def test_group_sheet_type_is_large_enough_to_read(self):
+        """Cell text, including every time range, is 9pt and stays in its cell.
+
+        6.5pt was the size that made a printed group sheet unreadable. The
+        time column is only as wide as the label, so a larger size that does
+        not widen the column wraps "07:00-08:00" at the hyphen and the second
+        half draws outside the cell.
+        """
+        from datetime import time as _t
+
+        session = Session.objects.create(
+            semester=self.sem,
+            course_code="EE150",
+            activity_type=ActivityType.TUTORIAL,
+            day="MONDAY",
+            start_time=_t(7, 0),
+            end_time=_t(8, 0),
+            venue=self.venue,
+        )
+        SessionGroup.objects.create(session=session, group=self.c1)
+        WorkshopAllocation.objects.create(
+            semester=self.sem,
+            course_code="Electrical",
+            workshop="Electrical",
+            group_code="C1",
+            day="TUESDAY",
+            start_time=_t(9, 0),
+            end_time=_t(13, 0),
+            venue="Electrical",
+        )
+        text = _pdf_text(self._group_pdf())
+        self.assertIn("9 Tf", text)
+        self.assertNotIn("6.5 Tf", text)
+        # One string, not "07:00-" on one line and "08:00" on the next.
+        self.assertIn("(07:00-08:00)", text)
+        self.assertNotIn("(07:00-)", text)
+        self.assertIn("EE150 Tutorial", text)
+        self.assertIn("Workshop", text)
+
+        # The programme sheet keeps its own, smaller, packed-grid type.
+        programme = _pdf_text(self._programme_pdf())
+        self.assertIn("6.5 Tf", programme)
+
     def test_the_programme_sheet_carries_the_same_footer(self):
         import datetime as _dt
 
