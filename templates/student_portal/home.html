@@ -10,9 +10,16 @@
 <section class="hero" aria-labelledby="portal-title">
     <div class="hero-copy">
         <p class="eyebrow">University of Dar es Salaam · CoET</p>
-       </div>
+        <h1 id="portal-title" class="hero-desktop">Your timetable, ready when you are.</h1>
+        <p class="muted hero-desktop">Choose your programme and group to download a clear PDF of the latest semester timetable for your studies.</p>
+    </div>
     <figure class="hero-image">
-        <img src="{% static 'student_portal/timetable_logo.png' %}" alt="CoET Timetable" fetchpriority="high">
+        <div class="hero-viewport">
+            <div class="hero-track">
+                <img class="is-photo" src="{% static 'student_portal/hero-coet.jpg' %}" alt="The College of Engineering and Technology at the University of Dar es Salaam" fetchpriority="high">
+                <img class="is-logo" src="{% static 'student_portal/timetable_logo.png' %}" alt="CoET Timetable">
+            </div>
+        </div>
         <figcaption>College of Engineering and Technology · UDSM</figcaption>
     </figure>
 </section>
