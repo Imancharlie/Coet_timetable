@@ -1,0 +1,13 @@
+{
+  "name": "CoET Timetable",
+  "short_name": "CoET Timetable",
+  "icons": [
+    {
+      "src": "timetable_logo.png",
+      "sizes": "32x32",
+      "type": "image/png"
+    }
+  ],
+  "theme_color": "#244b6b",
+  "background_color": "#244b6b"
+}

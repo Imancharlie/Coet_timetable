@@ -10,4 +10,4 @@ are the brand. Sizing the span rather than a wrapper is deliberate -- the
 caller's own element is the one that has to truncate (an inline span cannot),
 and both call sites are flex items, so `truncate` there does work.
 {% endcomment %}
-<span class="tt-brand-text font-bold text-white tracking-tight {% if brand_size %}{{ brand_size }}{% else %}text-lg{% endif %}"><span class="tt-brand-accent">CoET</span> Timetable</span>
+<span class="tt-brand-text font-bold tracking-tight {% if brand_size %}{{ brand_size }}{% else %}text-lg{% endif %}"><span class="tt-brand-accent">CoET</span> Timetable</span>

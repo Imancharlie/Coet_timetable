@@ -96,6 +96,9 @@ are injected by systemd:
 | `DJANGO_ALLOWED_HOSTS` | Comma separated; `*` is rejected when DEBUG is off |
 | `DJANGO_CSRF_TRUSTED_ORIGINS` | `https://coet-timetable.kodin.co.tz` |
 | `COET_DB_*` | PostgreSQL connection |
+| `DJANGO_EMAIL_HOST_USER` | Gmail address that sends password resets |
+| `DJANGO_EMAIL_HOST_PASSWORD` | Gmail app password for that mailbox (spaces are ignored) |
+| `DJANGO_DEFAULT_FROM_EMAIL` | Optional. Defaults to the Gmail address above |
 
 The deploy command reads its own settings from:
 

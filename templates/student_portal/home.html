@@ -2,23 +2,31 @@
 {% load static %}
 {% block title %}Student Timetable · CoET{% endblock %}
 {% block content %}
+<style>
+    .button[aria-disabled="true"] { opacity: .55; cursor: not-allowed; }
+    #unpublished-dialog::backdrop { background: rgba(15, 23, 42, .5); }
+</style>
+
 <section class="hero" aria-labelledby="portal-title">
     <div class="hero-copy">
         <p class="eyebrow">University of Dar es Salaam · CoET</p>
-        <h1 id="portal-title">Your timetable, ready when you are.</h1>
-        <p class="muted">Choose your programme and group to view the latest semester timetable. Download a clear PDF for your studies.</p>
-        <div class="hero-links"><a class="button secondary" href="{% url 'collision-report' %}">Report a timetable clash</a></div>
-    </div>
+       </div>
     <figure class="hero-image">
-        <img src="{% static 'student_portal/hero-coet.png' %}" alt="The College of Engineering and Technology at the University of Dar es Salaam" fetchpriority="high">
+        <img src="{% static 'student_portal/timetable_logo.png' %}" alt="CoET Timetable" fetchpriority="high">
         <figcaption>College of Engineering and Technology · UDSM</figcaption>
     </figure>
 </section>
+
 <section class="card" id="timetable">
-    <p class="section-kicker">Student services</p>
+    
     <h1>Download a timetable</h1>
     {% if current_semester %}
-    <form method="get" action="{% url 'student-timetable-pdf' %}">
+
+    {% if not current_semester.is_published %}
+    <div class="notice" role="status">The timetable for this semester is not published yet.</div>
+    {% endif %}
+
+    <form method="get" action="{% url 'student-timetable-pdf' %}" class="pdf-form">
         <input type="hidden" name="scope" value="group">
         <div class="field"><label for="programme">Programme</label>
             <div class="custom-select" id="programme-select">
@@ -49,18 +57,8 @@
             </div>
             <p id="group-note" class="small-note" hidden></p>
         </div>
-        <div class="field"><label for="semester">Semester / academic year</label>
-            <div class="custom-select" id="semester-select">
-                <button type="button" class="select-button" id="semester-button" aria-haspopup="listbox" aria-expanded="false">
-                    <span class="selected-value">Select semester</span>
-                    <span class="arrow"></span>
-                </button>
-                <ul class="select-dropdown" role="listbox" id="semester-dropdown">
-                    {% for semester in semesters %}<li role="option" data-value="{{ semester.pk }}" {% if semester.pk == current_semester.pk %}aria-selected="true"{% endif %}>{{ semester.academic_year }} · Semester {{ semester.semester }}{% if semester.pk == current_semester.pk %} (Current){% endif %}</li>{% endfor %}
-                </ul>
-                <input type="hidden" name="semester" id="semester" required>
-            </div>
-        </div>
+        <!-- Semester selector hidden - only current semester available -->
+        <input type="hidden" name="semester" id="semester" value="{{ current_semester.pk }}" required>
         <div class="field"><label for="year">Year of study</label>
             <div class="custom-select" id="year-select">
                 <button type="button" class="select-button" id="year-button" aria-haspopup="listbox" aria-expanded="false">
@@ -73,11 +71,39 @@
                 <input type="hidden" name="year" id="year" value="1">
             </div>
         </div>
-        <button id="download-button" class="button" type="submit" disabled>Download PDF</button>
+        <button id="download-button" class="button" type="submit"
+                {% if current_semester.is_published %}disabled{% else %}aria-disabled="true"{% endif %}>Download PDF</button>
     </form>
+
+    <dialog id="unpublished-dialog" aria-labelledby="unpublished-title"
+            style="border:0;border-radius:1rem;padding:1.5rem;max-width:24rem;box-shadow:0 20px 40px rgba(0,0,0,.25)">
+        <h2 id="unpublished-title" style="margin:0 0 .5rem;font-size:1.125rem">Timetable not published yet</h2>
+        <p style="margin:0 0 1rem">The timetable for this semester hasn't been published yet. Please check back later or contact your coordinator.</p>
+        <form method="dialog"><button class="button" type="submit">OK</button></form>
+    </dialog>
+
     <script>
     (()=>{
         document.addEventListener('DOMContentLoaded', () => {
+            const isPublished = {{ current_semester.is_published|yesno:"true,false" }};
+            const unpublishedDialog = document.getElementById('unpublished-dialog');
+            const download = document.getElementById('download-button');
+
+            // When unpublished the button must stay clickable so the popup can show.
+            const setDownloadDisabled = (value) => {
+                download.disabled = isPublished ? value : false;
+            };
+
+            // Block submit on BOTH forms (group download and "all programmes")
+            document.querySelectorAll('form.pdf-form').forEach(form => {
+                form.addEventListener('submit', event => {
+                    if (!isPublished) {
+                        event.preventDefault();
+                        unpublishedDialog.showModal();
+                    }
+                });
+            });
+
             const customSelects = document.querySelectorAll('.custom-select');
 
             customSelects.forEach(customSelect => {
@@ -173,8 +199,6 @@
                 });
             });
 
-            const programmeSelect = document.getElementById('programme-select');
-            const groupSelect = document.getElementById('group-select');
             const programmeButton = document.getElementById('programme-button');
             const groupButton = document.getElementById('group-button');
             const programmeDropdown = document.getElementById('programme-dropdown');
@@ -182,17 +206,7 @@
             const programmeInput = document.getElementById('programme');
             const groupInput = document.getElementById('group');
             const note = document.getElementById('group-note');
-            const download = document.getElementById('download-button');
             const groupOptions = [...groupDropdown.querySelectorAll('li[data-programme]')];
-
-            const selectedSemester = document.querySelector('#semester-dropdown li[aria-selected="true"]');
-            if (selectedSemester) {
-                const semesterButton = document.getElementById('semester-button');
-                const semesterValue = semesterButton.querySelector('.selected-value');
-                const semesterInput = document.getElementById('semester');
-                semesterValue.textContent = selectedSemester.textContent.trim();
-                semesterInput.value = selectedSemester.dataset.value;
-            }
 
             const selectedYear = document.querySelector('#year-dropdown li[aria-selected="true"]');
             if (selectedYear) {
@@ -208,9 +222,8 @@
                 groupInput.value = '';
                 note.hidden = true;
                 note.textContent = '';
-                download.disabled = true;
+                setDownloadDisabled(true);
 
-                const groupPlaceholder = groupDropdown.querySelector('.placeholder');
                 const groupSelectedValue = groupButton.querySelector('.selected-value');
                 groupSelectedValue.textContent = 'Select a programme first';
                 groupDropdown.querySelectorAll('li:not(.placeholder)').forEach(li => li.remove());
@@ -220,9 +233,8 @@
 
                 const selectedProgramme = programmeDropdown.querySelector(`li[data-value="${programmeValue}"]`);
                 const count = Number(selectedProgramme?.dataset.groupCount || 0);
-                const programmeName = selectedProgramme?.textContent.trim() || '';
 
-                groupSelectedValue.textContent = programmeValue ? 'Choose a group or all groups' : 'Select a programme first';
+                groupSelectedValue.textContent = 'Choose a group or all groups';
 
                 if (count === 0) {
                     groupButton.disabled = true;
@@ -232,23 +244,25 @@
                     return;
                 }
 
+                const pickGroup = (li) => {
+                    groupDropdown.querySelectorAll('li').forEach(item => {
+                        item.classList.remove('selected');
+                        item.removeAttribute('aria-selected');
+                    });
+                    li.classList.add('selected');
+                    li.setAttribute('aria-selected', 'true');
+                    groupSelectedValue.textContent = li.textContent.trim();
+                    groupInput.value = li.dataset.value;
+                    groupDropdown.classList.remove('visible');
+                    groupButton.setAttribute('aria-expanded', 'false');
+                    setDownloadDisabled(false);
+                };
+
                 const allGroupsOption = document.createElement('li');
                 allGroupsOption.setAttribute('role', 'option');
                 allGroupsOption.dataset.value = 'all';
                 allGroupsOption.textContent = 'All groups — whole programme';
-                allGroupsOption.addEventListener('click', () => {
-                    groupDropdown.querySelectorAll('li').forEach(li => {
-                        li.classList.remove('selected');
-                        li.removeAttribute('aria-selected');
-                    });
-                    allGroupsOption.classList.add('selected');
-                    allGroupsOption.setAttribute('aria-selected', 'true');
-                    groupSelectedValue.textContent = allGroupsOption.textContent.trim();
-                    groupInput.value = 'all';
-                    groupDropdown.classList.remove('visible');
-                    groupButton.setAttribute('aria-expanded', 'false');
-                    download.disabled = false;
-                });
+                allGroupsOption.addEventListener('click', () => pickGroup(allGroupsOption));
                 groupDropdown.appendChild(allGroupsOption);
 
                 groupOptions.filter(option => option.dataset.programme === programmeValue).forEach(option => {
@@ -257,49 +271,32 @@
                     newOption.dataset.value = option.dataset.value;
                     newOption.dataset.programme = option.dataset.programme;
                     newOption.textContent = option.textContent.trim();
-                    newOption.addEventListener('click', () => {
-                        groupDropdown.querySelectorAll('li').forEach(li => {
-                            li.classList.remove('selected');
-                            li.removeAttribute('aria-selected');
-                        });
-                        newOption.classList.add('selected');
-                        newOption.setAttribute('aria-selected', 'true');
-                        groupSelectedValue.textContent = newOption.textContent.trim();
-                        groupInput.value = newOption.dataset.value;
-                        groupDropdown.classList.remove('visible');
-                        groupButton.setAttribute('aria-expanded', 'false');
-                        download.disabled = false;
-                    });
+                    newOption.addEventListener('click', () => pickGroup(newOption));
                     groupDropdown.appendChild(newOption);
                 });
             });
 
             groupButton.addEventListener('change', () => {
-                download.disabled = !programmeInput.value || !groupInput.value;
-            });
-
-            const semesterButton = document.getElementById('semester-button');
-            const semesterInput = document.getElementById('semester');
-            semesterButton.addEventListener('change', () => {
-                download.disabled = !programmeInput.value || !groupInput.value;
+                setDownloadDisabled(!programmeInput.value || !groupInput.value);
             });
 
             const yearButton = document.getElementById('year-button');
-            const yearInput = document.getElementById('year');
             yearButton.addEventListener('change', () => {
-                download.disabled = !programmeInput.value || !groupInput.value;
+                setDownloadDisabled(!programmeInput.value || !groupInput.value);
             });
         });
     })();
     </script>
     {% else %}<div class="notice">Timetables are not available yet.</div>{% endif %}
 </section>
+
 {% if current_semester %}
 <section class="card">
     <h2>All programmes</h2>
-    <form method="get" action="{% url 'student-timetable-pdf' %}">
+    <form method="get" action="{% url 'student-timetable-pdf' %}" class="pdf-form">
         <input type="hidden" name="scope" value="all">
-        <button class="button secondary" type="submit">Download the complete timetable · {{ current_semester.academic_year }}, Semester {{ current_semester.semester }}</button>
+        <button class="button secondary" type="submit"
+                {% if not current_semester.is_published %}aria-disabled="true"{% endif %}>Download the complete timetable · {{ current_semester.academic_year }}, Semester {{ current_semester.semester }}</button>
     </form>
 </section>
 {% endif %}

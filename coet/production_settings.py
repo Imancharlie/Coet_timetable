@@ -13,6 +13,8 @@ repo. systemd loads the values from /var/www/coet-timetable/.env
     DJANGO_ALLOWED_HOSTS          comma separated; no '*' allowed
     DJANGO_CSRF_TRUSTED_ORIGINS   comma separated, scheme included
     COET_DB_NAME / _USER / _PASSWORD / _HOST / _PORT
+    DJANGO_EMAIL_HOST_USER        mailbox that sends password-reset mail
+    DJANGO_EMAIL_HOST_PASSWORD    app password for that mailbox
 """
 import os
 from pathlib import Path
@@ -52,6 +54,10 @@ if not DEBUG:
     SECURE_HSTS_PRELOAD = True
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
+    # nginx terminates TLS. Without this, a password-reset link is built as
+    # http:// and the mailbox receives a URL the browser then has to upgrade.
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    USE_X_FORWARDED_HOST = True
 
 
 # --- Database -------------------------------------------------------------
@@ -71,12 +77,14 @@ DATABASES = {
 
 
 # --- Static & media -------------------------------------------------------
-# The committed settings points STATICFILES_DIRS at BASE_DIR/'static', which is
-# not in the repo; collectstatic errors on a missing directory, so it is
-# dropped here and everything is collected into staticfiles/.
+# Student-portal icons, the manifest and the home logo live in static/.
+# Dropping that directory makes collectstatic skip them, and the public home
+# then requests files that were never deployed. Include it when it exists so
+# a checkout without the folder still collects cleanly.
 STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
-STATICFILES_DIRS = []
+_static_dir = BASE_DIR / "static"
+STATICFILES_DIRS = [str(_static_dir)] if _static_dir.is_dir() else []
 
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"

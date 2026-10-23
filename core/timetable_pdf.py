@@ -1,9 +1,10 @@
 """Programme timetable PDF generation (reportlab).
 
-Produces a classic weekly grid, A4 portrait: the DAYS run across the first row
-and the hourly TIME slots (07:00-08:00 .. 19:00-20:00) run down the first
-column, matching the on-screen timetable in ``core/timetable.html``. Sessions
-that span multiple hourly slots merge their cells on that day. Each cell is
+A programme's all-groups sheet and the all-programmes sheet share one layout:
+A4 landscape, the hourly TIME slots (07:00-08:00 .. 19:00-20:00) across the
+first row and the DAYS down the first column. Blocks are packed so two sessions
+never overlap. A single group's own sheet stays the classic A4 portrait grid
+(days across, times down), matching the on-screen timetable. Each block is
 shaded by activity type — Lecture faded grey, Workshop faded green, Technical
 Drawing faded pink. External activities (workshops / technical drawing) that
 only carry a Morning/Afternoon period are placed in that day's standard
@@ -573,26 +574,46 @@ def build_grid(entries, show_groups=False, markup=False, show_notes=True):
 def render_programme_timetable(
     programme, semester, year_of_study=1, out=None, portal_url=None
 ):
-    """Render the programme timetable PDF to `out` (file-like or a path)."""
+    """Render one programme's timetable in the all-programmes layout.
+
+    Days run down the first column and the hours run across the first row.
+    Overlapping sessions are packed into lanes the same way as the master
+    sheet, so two classes in one hour never share a box. ``ALL`` means every
+    group of this programme. The workshop rotation key still follows the grid.
+    """
     entries, rotation_keys = _collect_entries_and_rotations(
         programme, semester, year=year_of_study
     )
-    groups = list(StudentGroup.objects.filter(programme=programme))
-    show_groups = len(groups) > 1
-    # Fold the records that describe one session before drawing: a workshop and
-    # the placeholder practical written for it, and the same course recorded
-    # once per group, become one cell listing every group.
-    entries = fold_for_display(entries, {g.code for g in groups})
-    return _render_grid(
+    codes = set(
+        StudentGroup.objects.filter(programme=programme).values_list(
+            "code", flat=True
+        )
+    )
+    year_note = (
+        f" \u00b7 {_ordinal(int(year_of_study)).upper()} YEAR"
+        if year_of_study and int(year_of_study) > 1
+        else ""
+    )
+    heading = [
+        "UNIVERSITY OF DAR ES SALAAM",
+        (
+            f"{programme.name.upper()} \u00b7 TEACHING TIMETABLE FOR "
+            f"{_semester_word(semester.semester)} SEMESTER "
+            f"{semester.academic_year}{year_note}"
+        ),
+    ]
+    trailing = _rotation_key_flowables(rotation_keys) if rotation_keys else None
+    return render_udsm_master_timetable(
         entries,
-        title=f"{programme.name.upper()}",
-        subtitle=f"{_ordinal(year_of_study)} YEAR · {semester.academic_year}",
-        semester=semester,
-        doc_title=f"{programme.name} Timetable",
-        show_groups=show_groups,
-        rotation_keys=rotation_keys,
+        semester,
+        year_of_study,
         out=out,
         portal_url=portal_url,
+        doc_title=f"{programme.name} Timetable",
+        heading=heading,
+        group_codes=codes,
+        trailing=trailing,
+        show_notes=True,
     )
 
 
@@ -769,22 +790,32 @@ def _render_grid(
     sub_style = ParagraphStyle(
         "sub", fontName="Helvetica", fontSize=9, alignment=TA_CENTER, leading=12
     )
+    # A printed group sheet is read at arm's length. 6.5pt sank into the grid;
+    # 9pt bold is large enough to read, and a day column still wraps a course
+    # line rather than letting it run through the border. The time column is
+    # measured from this size below, so "07:00-08:00" stays on one line.
+    cell_font, cell_leading = 9, 11
+    pad_x, pad_y = 2, 3
     head_style = ParagraphStyle(
         "head",
         fontName="Helvetica-Bold",
-        fontSize=8,
+        fontSize=10,
         alignment=TA_CENTER,
-        leading=10,
+        leading=12,
     )
     cell_style = ParagraphStyle(
-        "cell", fontName="Helvetica-Bold", fontSize=6.5, leading=8, alignment=TA_CENTER
+        "cell",
+        fontName="Helvetica-Bold",
+        fontSize=cell_font,
+        leading=cell_leading,
+        alignment=TA_CENTER,
     )
     time_style = ParagraphStyle(
         "time",
         fontName="Helvetica-Bold",
-        fontSize=6.5,
+        fontSize=cell_font,
         alignment=TA_CENTER,
-        leading=8,
+        leading=cell_leading,
     )
     empty_style = ParagraphStyle(
         "empty",
@@ -819,11 +850,32 @@ def _render_grid(
         )
         n_days = max(len(data[0]) - 1, 1) if data else 1
         usable = A4[0] - 22 * mm
-        time_w = 44
+        # Digits are equal width in Helvetica, so one sample covers every
+        # hour label. The extra 2pt is slack: a label that is even a fraction
+        # over the inner width wraps at the hyphen and spills out of the cell.
+        time_w = (
+            pdfmetrics.stringWidth("00:00-00:00", "Helvetica-Bold", cell_font)
+            + pad_x * 2
+            + 2
+        )
         day_w = (usable - time_w) / n_days
         widths = [time_w] + [day_w] * n_days
+        day_inner = day_w - pad_x * 2
+        # "WEDNESDAY" is the longest day name. On a crowded week it steps
+        # down to the cell size rather than wrapping out of the header.
+        grid_head = head_style
+        if (
+            pdfmetrics.stringWidth("WEDNESDAY", "Helvetica-Bold", head_style.fontSize)
+            > day_inner
+        ):
+            grid_head = ParagraphStyle(
+                "head-fit",
+                parent=head_style,
+                fontSize=cell_font,
+                leading=cell_leading,
+            )
 
-        table_data = [[Paragraph(item, head_style) for item in data[0]]]
+        table_data = [[Paragraph(item, grid_head) for item in data[0]]]
         for row in data[1:]:
             table_data.append(
                 [
@@ -838,6 +890,25 @@ def _render_grid(
                 ]
             )
 
+        span_rows = {
+            start: (end[1] - start[1] + 1) for start, end in spans
+        }
+        inner_time = time_w - pad_x * 2
+        # Tallest text in any one hour. A session that spans several hours
+        # shares that height across the rows it merges, so it asks for less
+        # per row than a one-hour cell with the same number of lines.
+        needed = pad_y * 2
+        for r, row in enumerate(table_data):
+            if r == 0:
+                continue
+            for c, cell in enumerate(row):
+                if not isinstance(cell, Paragraph):
+                    continue
+                width = inner_time if c == 0 else day_inner
+                _wrapped, height = cell.wrap(width, 10000)
+                rows = span_rows.get((c, r), 1)
+                needed = max(needed, (height + pad_y * 2) / rows)
+
         n_rows = len(data) - 1
         row_h = None
         if n_rows:
@@ -845,7 +916,15 @@ def _render_grid(
             footer_block = 6 * mm + 8
             usable_h = A4[1] - doc.topMargin - doc.bottomMargin
             avail = max(usable_h - title_block - footer_block, n_rows * 18)
+            # 42pt is the height a full day already used, so the rotation key
+            # still sits under the grid on the same page. Three lines of the
+            # 9pt face — a wrapped course name, then the venue or the time
+            # range — fit inside it (the inner height is 36pt, three lines
+            # are 33). A cell that needs more grows the row, so the text
+            # stays inside the border instead of painting over the hour below.
             row_h = min(avail / n_rows, 42)
+            if needed > row_h:
+                row_h = needed
 
         grid = Table(
             table_data,
@@ -859,10 +938,10 @@ def _render_grid(
             ("BACKGROUND", (0, 1), (0, -1), colors.HexColor("#f8fafc")),
             ("BACKGROUND", (1, 0), (-1, 0), colors.HexColor("#dce6f1")),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("TOPPADDING", (0, 0), (-1, -1), 3),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-            ("LEFTPADDING", (0, 0), (-1, -1), 2),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+            ("TOPPADDING", (0, 0), (-1, -1), pad_y),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), pad_y),
+            ("LEFTPADDING", (0, 0), (-1, -1), pad_x),
+            ("RIGHTPADDING", (0, 0), (-1, -1), pad_x),
         ]
         for start, end in spans:
             style.append(("SPAN", start, end))
@@ -1199,7 +1278,7 @@ class _Bucket(list):
         self.key = key
 
 
-def _merge_master_entries(entries, all_groups):
+def _merge_master_entries(entries, all_groups, show_notes=False):
     """Group the raw master entries into the blocks the master grid draws.
 
     Delegates the "are these the same session?" judgement to
@@ -1209,12 +1288,13 @@ def _merge_master_entries(entries, all_groups):
     groups line, ``ALL`` for a whole-cohort lecture, and the cell text.
 
     Genuinely different sessions in one slot (two different courses, say) are
-    never merged.
+    never merged. ``show_notes`` keeps a workshop's week range in the block,
+    which a programme sheet needs when two groups share the slot in different weeks.
     """
-    return fold_for_display(entries, all_groups)
+    return fold_for_display(entries, all_groups, show_notes=show_notes)
 
 
-def fold_for_display(entries, all_group_codes, show_groups=True):
+def fold_for_display(entries, all_group_codes, show_groups=True, show_notes=False):
     """Fold duplicate records and label what survives: what an export draws.
 
     This is the one place the "same day, same time, same course is one session"
@@ -1229,12 +1309,14 @@ def fold_for_display(entries, all_group_codes, show_groups=True):
     The data stays on the entry for any caller that wants it.
     """
     return [
-        _labelled_entry(entry, all_group_codes, show_groups=show_groups)
+        _labelled_entry(
+            entry, all_group_codes, show_groups=show_groups, show_notes=show_notes
+        )
         for entry in fold_same_sessions(entries)
     ]
 
 
-def _labelled_entry(entry, all_groups, show_groups=True):
+def _labelled_entry(entry, all_groups, show_groups=True, show_notes=False):
     """Attach the group list and the cell text to one folded block."""
     codes = entry.pop("_codes", None)
     if codes is None:
@@ -1259,8 +1341,16 @@ def _labelled_entry(entry, all_groups, show_groups=True):
         # swamp the cell, but the time is stated like it is on every other
         # block so a workshop reads the same way as a lecture does.
         entry["type_label"] = "Technical Drawing" if kind == "td" else "Workshop"
+        # The packed sheet draws from ``_entry_parts``, which reads ``note``
+        # directly. A programme sheet keeps the week range so two groups in
+        # the same slot stay distinguishable; every other sheet drops it.
+        if not show_notes:
+            entry["note"] = ""
+        note = entry.get("note") or ""
         entry["label"] = "\n".join(
-            part for part in (entry["type_label"], _time_span(entry), drawn_groups) if part
+            part
+            for part in (entry["type_label"], _time_span(entry), note, drawn_groups)
+            if part
         )
     else:
         entry["label"] = "\n".join(
@@ -1397,9 +1487,12 @@ def _entry_parts(e):
     if e.get("start") and e.get("end"):
         parts.append((_time_span(e), False))
     if e.get("kind") in ("td", "workshop"):
-        # Type, time and groups only: the course and venue would swamp the
-        # cell, and the hour columns already place it. The time is still stated
-        # here, exactly as it is on a taught session.
+        # Type, time and groups: the course and venue would swamp the cell.
+        # A week range is included only when the caller left it on the entry
+        # (a programme sheet, where two groups can share the slot in different
+        # weeks). The all-programmes sheet clears it before drawing.
+        if e.get("note"):
+            parts.append((e["note"], False))
         if e.get("groups") and e["groups"] != "ALL":
             parts.append((e["groups"], True))
         return _flag_groups(parts, e)
@@ -2016,9 +2109,55 @@ def _draw_master_footer(canvas, doc, portal_url=None, date_text=""):
     canvas.restoreState()
 
 
-def render_udsm_master_timetable(entries, semester, year_of_study=1, out=None, portal_url=None):
-    all_groups = set(StudentGroup.objects.values_list("code", flat=True))
-    merged_entries = _merge_master_entries(entries, all_groups)
+def _rotation_key_flowables(rotation_keys):
+    """The workshop rotation key, drawn under a packed timetable."""
+    if not rotation_keys:
+        return []
+    cell_style = ParagraphStyle(
+        "cell", fontName="Helvetica-Bold", fontSize=6.5, leading=8, alignment=TA_CENTER
+    )
+    head_style = ParagraphStyle(
+        "head",
+        fontName="Helvetica-Bold",
+        fontSize=8,
+        alignment=TA_CENTER,
+        leading=10,
+    )
+    key_title_style = ParagraphStyle(
+        "keytitle",
+        fontName="Helvetica-Bold",
+        fontSize=9,
+        alignment=TA_CENTER,
+        leading=11,
+        spaceBefore=8,
+        spaceAfter=3,
+    )
+    return [
+        Paragraph("WORKSHOP ROTATION KEY", key_title_style),
+        _rotation_key_table(rotation_keys, cell_style, head_style),
+    ]
+
+
+def render_udsm_master_timetable(
+    entries,
+    semester,
+    year_of_study=1,
+    out=None,
+    portal_url=None,
+    doc_title=None,
+    heading=None,
+    group_codes=None,
+    trailing=None,
+    show_notes=False,
+):
+    all_groups = (
+        set(group_codes)
+        if group_codes is not None
+        else set(StudentGroup.objects.values_list("code", flat=True))
+    )
+    merged_entries = _merge_master_entries(
+        entries, all_groups, show_notes=show_notes
+    )
 
     # A4 landscape, not A3: the grid is thirteen hour columns of short text,
     # so the old page was far wider than the content needed and had to be
@@ -2031,7 +2170,7 @@ def render_udsm_master_timetable(entries, semester, year_of_study=1, out=None, p
         rightMargin=8 * mm,
         topMargin=HEADER_MARGIN,
         bottomMargin=FOOTER_MARGIN,
-        title="University Master Timetable",
+        title=doc_title or "University Master Timetable",
     )
 
     usable_w = landscape(A4)[0] - doc.leftMargin - doc.rightMargin
@@ -2040,13 +2179,17 @@ def render_udsm_master_timetable(entries, semester, year_of_study=1, out=None, p
     col_width = (usable_w - day_width) / n_slots
 
     day_flowables, slots = _build_day_flowables(merged_entries, col_width, day_width)
-    year_note = f" \u00b7 {_ordinal(int(year_of_study)).upper()} YEAR" if year_of_study and int(year_of_study) > 1 else ""
-    subtitle = f"TEACHING TIMETABLE FOR {_semester_word(semester.semester)} SEMESTER {semester.academic_year}{year_note}"
-    heading = [
-        "UNIVERSITY OF DAR ES SALAAM",
-        f"TEACHING TIMETABLE FOR {_semester_word(semester.semester)} SEMESTER "
-        f"{semester.academic_year}{year_note} \u00b7 SEMESTER {semester.semester}",
-    ]
+    if heading is None:
+        year_note = (
+            f" \u00b7 {_ordinal(int(year_of_study)).upper()} YEAR"
+            if year_of_study and int(year_of_study) > 1
+            else ""
+        )
+        heading = [
+            "UNIVERSITY OF DAR ES SALAAM",
+            f"TEACHING TIMETABLE FOR {_semester_word(semester.semester)} SEMESTER "
+            f"{semester.academic_year}{year_note} \u00b7 SEMESTER {semester.semester}",
+        ]
     date_text = datetime.date.today().strftime("%d %B %Y")
 
     def page_cb(canvas, doc_):
@@ -2059,5 +2202,7 @@ def render_udsm_master_timetable(entries, semester, year_of_study=1, out=None, p
             ParagraphStyle("e", alignment=TA_CENTER),
         )
     ]
+    if trailing:
+        elements.extend(trailing)
     doc.build(elements, onFirstPage=page_cb, onLaterPages=page_cb)
     return doc

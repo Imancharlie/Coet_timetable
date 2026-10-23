@@ -1,3 +1,4 @@
+import datetime
 import io
 import json
 import uuid
@@ -40,6 +41,7 @@ from .group_allocation import (
     apply_run,
     GroupStatus,
     group_statuses,
+    incomplete_group_count,
     manual_assign,
     manual_unassign,
     plan_allocation,
@@ -449,6 +451,83 @@ def _query(request, param_names):
     return "?" + urlencode(pairs) if pairs else ""
 
 
+def _export_requested(request):
+    return request.GET.get("export") == "xlsx"
+
+
+def _table_cell(item, column):
+    """The text one desktop table cell shows, for the Excel export.
+
+    This follows the list partial: ``get_attr`` (None becomes an em dash, a
+    method such as ``required_activities`` is called), clock times as HH:MM,
+    and a badge column the same way the template's ``yesno`` filter prints it.
+    """
+    value = getattr(item, column["key"], None)
+    if callable(value):
+        try:
+            value = value()
+        except TypeError:
+            value = None
+    if isinstance(value, datetime.time):
+        return value.strftime("%H:%M")
+    if column.get("badge"):
+        # A one-word badge label is not a yes/no map, so the template prints
+        # the boolean itself, and ``|default`` turns a false value into "Yes".
+        return str(value) if value else "Yes"
+    if value is None:
+        return "—"
+    return str(value)
+
+
+def _excel_response(rows, columns, title, row_issues=None):
+    """An .xlsx of ``rows`` using the same columns the desktop table shows."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+
+    shown = list(columns)
+    issues = row_issues or {}
+    if issues:
+        shown = shown + [{"key": "_quality", "label": "Quality"}]
+    wb = Workbook()
+    ws = wb.active
+    ws.title = (title or "Export")[:31]
+    ws.append([column["label"] for column in shown])
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+    for item in rows:
+        values = []
+        for column in shown:
+            if column["key"] == "_quality":
+                issue = issues.get(getattr(item, "pk", None))
+                summary = ""
+                if isinstance(issue, dict):
+                    summary = issue.get("summary") or ""
+                elif issue is not None:
+                    summary = getattr(issue, "summary", "") or ""
+                values.append(summary)
+            else:
+                values.append(_table_cell(item, column))
+        ws.append(values)
+    for index, column in enumerate(shown, start=1):
+        width = min(max(len(column["label"]) + 2, 12), 42)
+        ws.column_dimensions[ws.cell(1, index).column_letter].width = width
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    filename = "-".join(
+        part for part in "".join(
+            ch.lower() if ch.isalnum() else " " for ch in (title or "export")
+        ).split()
+    ) or "export"
+    response = HttpResponse(
+        buffer.getvalue(),
+        content_type=(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        ),
+    )
+    response["Content-Disposition"] = f'attachment; filename="{filename}.xlsx"'
+    return response
+
+
 def _paginate(request, qs, per_page=50):
     page = int(request.GET.get("page", 1))
     total = qs.count()
@@ -504,6 +583,7 @@ def dashboard(request):
         ).count(),
         "programme_count": Programme.objects.count(),
         "group_count": StudentGroup.objects.count(),
+        "incomplete_group_count": incomplete_group_count(semester),
         "venue_count": Venue.objects.count(),
         "session_count": Session.objects.count(),
         "sessiongroup_count": SessionGroup.objects.count(),
@@ -571,6 +651,8 @@ def programme_list(request):
     qs = Programme.objects.all()
     q = request.GET.get("q", "")
     qs = _search(qs, q, ["code", "name"])
+    if _export_requested(request):
+        return _excel_response(qs, PROG_COLS, "Programmes")
     items, page, pages, total = _paginate(request, qs)
     ctx = {
         "items": items,
@@ -890,6 +972,9 @@ def timetable_view(request):
     if active_semester is None:
         active_semester = _latest_semester_with_data()
 
+    # Check if the active semester is published for student access
+    published = active_semester is not None and active_semester.is_published
+
     year = 1
     raw_year = request.GET.get("year", "")
     if raw_year.strip().isdigit():
@@ -928,6 +1013,7 @@ def timetable_view(request):
         "entry_count": len(entries),
         "show_all": show_all,
         "show_groups": (active_programme is not None and active_group is None) or show_all,
+        "published": published,
     }
     return render(request, "core/timetable.html", ctx)
 
@@ -964,6 +1050,8 @@ def studentgroup_list(request):
     qs = _search(qs, q, ["code", "programme__code", "programme__name"])
     if prog:
         qs = qs.filter(programme__code=prog)
+    if _export_requested(request):
+        return _excel_response(qs, GRP_COLS, "Student Groups")
     items, page, pages, total = _paginate(request, qs)
     ctx = {
         "items": items,
@@ -1116,6 +1204,9 @@ def venue_list(request):
         qs = qs.filter(capacity__gte=cmin)
     if cmax:
         qs = qs.filter(capacity__lte=cmax)
+    if _export_requested(request):
+        issues_map, _, _ = analyse_venues()
+        return _excel_response(qs, VENUE_COLS, "Venues", row_issues=issues_map)
     items, page, pages, total = _paginate(request, qs)
     issues_map, problem_groups, has_issues = analyse_venues()
     ctx = {
@@ -1507,6 +1598,8 @@ def semester_list(request):
     qs = _search(qs, q, ["academic_year"])
     if sem:
         qs = qs.filter(semester=sem)
+    if _export_requested(request):
+        return _excel_response(qs, SEM_COLS, "Semesters")
     items, page, pages, total = _paginate(request, qs)
     ctx = {
         "items": items,
@@ -1593,6 +1686,30 @@ def semester_set_current(request, pk):
             target=str(item),
         )
     return _write_response(request, "close-modal,refresh-table", "semester-list")
+
+
+def semester_set_published(request, pk):
+    """Toggle the published flag on a semester.
+
+    POST only. When ``is_published`` is True the timetable becomes visible
+    and downloadable by students; when False it is hidden and a
+    "no timetable available" message is shown instead.
+
+    Returns an HTMX-triggered response that refreshes the dashboard and
+    sends an ``allocation-toast`` so the coordinator gets feedback.
+    """
+    item = get_object_or_404(Semester, pk=pk)
+    if request.method != "POST":
+        return redirect("/semesters/")
+    item.is_published = not item.is_published
+    item.save(update_fields=["is_published"])
+    _log(
+        LogAction.UPDATE,
+        f"{'Published' if item.is_published else 'Unpublished'} semester timetable ({item})",
+        resource="Semester",
+        target=str(item),
+    )
+    return _write_response(request, "close-modal,refresh-table", "dashboard")
 
 
 def semester_detail(request, pk):
@@ -1744,6 +1861,12 @@ def session_list(request):
         qs = qs.filter(session_groups__isnull=(assigned == "no"))
         if assigned == "no":
             qs = qs.filter(activity_type__in=ALLOCATED_ACTIVITY_TYPES)
+    if _export_requested(request):
+        rows = list(qs)
+        _annotate_sessions(
+            rows, set(StudentGroup.objects.values_list("code", flat=True))
+        )
+        return _excel_response(rows, SESS_COLS, "Master Timetable")
     items, page, pages, total = _paginate(request, qs)
     unassigned_count = Session.objects.filter(
         activity_type__in=ALLOCATED_ACTIVITY_TYPES, session_groups__isnull=True
@@ -2154,6 +2277,8 @@ def workshop_list(request):
         qs = qs.filter(end_time__gte=start_from)
     if start_to:
         qs = qs.filter(start_time__lte=start_to)
+    if _export_requested(request):
+        return _excel_response(qs, WS_COLS, "Workshop Allocation")
     items, page, pages, total = _paginate(request, qs)
     legacy = legacy_workshop_allocations()
     ctx = {
@@ -2355,6 +2480,8 @@ def td_list(request):
         qs = qs.filter(end_time__gte=start_from)
     if start_to:
         qs = qs.filter(start_time__lte=start_to)
+    if _export_requested(request):
+        return _excel_response(qs, TD_COLS, "Technical Drawing Allocation")
     items, page, pages, total = _paginate(request, qs)
     ctx = {
         "items": items,
@@ -2523,6 +2650,8 @@ def course_list(request):
         qs = qs.filter(programme__code=prog)
     if sem:
         qs = qs.filter(semester=sem)
+    if _export_requested(request):
+        return _excel_response(qs, PC_COLS, "Programme Courses")
     items, page, pages, total = _paginate(request, qs)
     ctx = {
         "items": items,
@@ -2704,6 +2833,8 @@ def course_requirement_list(request):
         rows = [row for row in rows if not row.has_requirements()]
     elif configured == "yes":
         rows = [row for row in rows if row.has_requirements()]
+    if _export_requested(request):
+        return _excel_response(rows, CR_COLS, "Courses")
     page = max(int(request.GET.get("page", 1)), 1)
     per_page = 50
     total = len(rows)
@@ -3538,7 +3669,12 @@ IMPORT_TYPES = {
     "venues": {
         "title": "Venues",
         "columns": "name, capacity",
-        "hint": "Aliases accepted: 'name'/'venue'/'room'; 'capacity'/'seats'.",
+        "hint": (
+            "Aliases accepted: 'name'/'venue'/'room'; 'capacity'/'seats'. "
+            "Capitals and spaces do not make a different room: PB 06, pb 06 "
+            "and PB06 are stored as one venue and noted, not left as a "
+            "conflict to choose."
+        ),
         "fn": import_venues_from_excel,
     },
     "master-timetable": {
@@ -3552,7 +3688,11 @@ IMPORT_TYPES = {
             "Readable aliases accepted ('course', 'type', 'start', 'end', 'room', "
             "'groups', ...). Comma-separated course codes are split into separate "
             "sessions. Choose the academic Semester this timetable belongs to above — "
-            "it is never auto-detected. LECTURE sessions are automatically linked to "
+            "it is never auto-detected. A course code is recognised with or "
+            "without spaces and in any capitals, and DS114(COET) is stored as "
+            "DS114 (the same for DS115). A venue cell that lists several rooms "
+            "is not created as a venue; an ME101 tutorial whose list includes "
+            "S112 is stored in S112. LECTURE sessions are automatically linked to "
             "every programme group that studies the course. Tick 'Set course "
             "requirements from these sessions' to also fill in each course's "
             "required activities: a course with tutorial sessions gets Tutorial, "
